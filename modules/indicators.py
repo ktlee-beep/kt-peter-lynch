@@ -72,7 +72,8 @@ def bb(prices: list, n: int = 20) -> dict | None:
     std = math.sqrt(sum((v - m) ** 2 for v in r) / n)
     u, l = m + 2 * std, m - 2 * std
     pb = (prices[-1] - l) / (u - l) * 100 if u != l else 50
-    return {"upper": round(u), "mid": round(m), "lower": round(l), "percentB": round(pb, 1)}
+    bw = (u - l) / m * 100 if m > 0 else 0
+    return {"upper": round(u), "mid": round(m), "lower": round(l), "percentB": round(pb, 1), "bandwidth": round(bw, 1)}
 
 
 # ── 정배열 / 역배열 판정 ───────────────────────────────────────

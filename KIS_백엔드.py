@@ -319,7 +319,109 @@ def market():
 
 @app.route('/api/news')
 def news():
-    return jsonify([])
+    """
+    종목 뉴스 + 공시 통합 API
+    GET /api/news?code=005930&corp=00126380&name=삼성전자&dartKey=KEY
+
+    반환:
+      disclosures   DART 공시 목록 (최근 90일)
+      stockNews     종목 뉴스 (네이버 금융)
+      macroNews     시장/경제 뉴스
+      newsSentiment 감성 분석 요약
+    """
+    code     = request.args.get('code', '').strip()
+    corp     = request.args.get('corp', '').strip()
+    name     = request.args.get('name', '').strip()
+    dart_key = request.args.get('dartKey', '').strip()
+
+    result = {
+        'disclosures':   [],
+        'stockNews':     [],
+        'macroNews':     [],
+        'newsSentiment': None,
+    }
+
+    # ── 1. DART 공시 ──────────────────────────────────────────
+    if corp and dart_key:
+        try:
+            from datetime import datetime, timedelta
+            import requests as req_lib
+            end_dt   = datetime.now()
+            start_dt = end_dt - timedelta(days=90)
+            params = {
+                'crtfc_key': dart_key,
+                'corp_code': corp,
+                'bgn_de':    start_dt.strftime('%Y%m%d'),
+                'end_de':    end_dt.strftime('%Y%m%d'),
+                'page_no':   '1',
+                'page_count':'20',
+            }
+            r = req_lib.get('https://opendart.fss.or.kr/api/list.json',
+                            params=params, timeout=8)
+            if r.status_code == 200:
+                data = r.json()
+                if data.get('status') == '000' and data.get('list'):
+                    def classify_disclosure(title):
+                        t = title.lower()
+                        if any(k in t for k in ['실적','매출','영업이익','순이익','분기','반기','사업보고']): return 'earnings'
+                        if any(k in t for k in ['자기주식','자사주']): return 'buyback'
+                        if any(k in t for k in ['합병','인수','취득','양도','주식매수']): return 'takeover'
+                        if any(k in t for k in ['임원','이사','대표','등기']): return 'insider'
+                        if any(k in t for k in ['공급계약','수주','계약','협약','mou','파트너']): return 'major'
+                        return 'general'
+                    for item in data['list']:
+                        rcp_no = item.get('rcept_no','')
+                        result['disclosures'].append({
+                            'title': item.get('report_nm',''),
+                            'date':  item.get('rcept_dt','')[:10] if item.get('rcept_dt') else '',
+                            'type':  classify_disclosure(item.get('report_nm','')),
+                            'url':   f'https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcp_no}' if rcp_no else 'https://dart.fss.or.kr',
+                        })
+        except Exception as e:
+            print(f'[news] DART 오류: {e}')
+
+    # ── 2. 네이버 종목 뉴스 ───────────────────────────────────
+    if code:
+        try:
+            import requests as req_lib
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': 'https://finance.naver.com/',
+            }
+            url = f'https://m.stock.naver.com/api/news/stock/{code}?pageSize=10&page=1'
+            r = req_lib.get(url, headers=headers, timeout=6)
+            if r.status_code == 200:
+                items = r.json()
+                if isinstance(items, list):
+                    for item in items[:10]:
+                        result['stockNews'].append({
+                            'title':     item.get('title', ''),
+                            'url':       item.get('url', ''),
+                            'publisher': item.get('officeName', ''),
+                            'date':      item.get('datetime', '')[:10] if item.get('datetime') else '',
+                        })
+        except Exception as e:
+            print(f'[news] 네이버 뉴스 오류: {e}')
+
+    # ── 3. 뉴스 감성 분석 (키워드 기반 간이) ─────────────────
+    pos_kw  = ['급등','상승','호실적','성장','수주','계약','신고가','매수','기대','호재']
+    neg_kw  = ['급락','하락','적자','손실','리스크','우려','매도','주의','손절','경고']
+    pos_cnt = neg_cnt = neutral_cnt = 0
+    all_news = result['stockNews'] + result['macroNews']
+    for n in all_news:
+        t = n.get('title','')
+        if any(k in t for k in pos_kw): pos_cnt += 1
+        elif any(k in t for k in neg_kw): neg_cnt += 1
+        else: neutral_cnt += 1
+    if all_news:
+        score = pos_cnt - neg_cnt
+        result['newsSentiment'] = {
+            'pos': pos_cnt, 'neg': neg_cnt, 'neutral': neutral_cnt,
+            'score': score,
+            'label': '긍정' if score > 0 else '부정' if score < 0 else '중립',
+        }
+
+    return jsonify(result)
 
 @app.route('/api/movers')
 def movers():
