@@ -617,25 +617,49 @@ def market_indices():
         from datetime import datetime, timedelta
         today = datetime.now().strftime('%Y%m%d')
         start = (datetime.now() - timedelta(days=5)).strftime('%Y%m%d')
-        # FinanceDataReader로 KOSPI/KOSDAQ 지수
-        import FinanceDataReader as fdr
-        from datetime import datetime, timedelta
-        start_fdr = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-        for sym, name in [('KS11', 'KOSPI'), ('KQ11', 'KOSDAQ')]:
-            try:
-                df = fdr.DataReader(sym, start_fdr)
-                if df is not None and not df.empty:
-                    vals = [float(v) for v in df['Close'].dropna() if v > 0]
-                    if len(vals) >= 2:
-                        cur, prev = vals[-1], vals[-2]
-                        chg = cur - prev
-                        result.append({
-                            'name': name, 'value': round(cur, 2),
-                            'change': round(chg, 2),
-                            'change_pct': round(chg / prev * 100, 2),
-                        })
-            except Exception:
-                pass
+        # 1차: FinanceDataReader로 KOSPI/KOSDAQ 지수
+        try:
+            import FinanceDataReader as fdr
+            start_fdr = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+            for sym, name in [('KS11', 'KOSPI'), ('KQ11', 'KOSDAQ')]:
+                try:
+                    df = fdr.DataReader(sym, start_fdr)
+                    if df is not None and not df.empty:
+                        vals = [float(v) for v in df['Close'].dropna() if v > 0]
+                        if len(vals) >= 2:
+                            cur, prev = vals[-1], vals[-2]
+                            chg = cur - prev
+                            result.append({
+                                'name': name, 'value': round(cur, 2),
+                                'change': round(chg, 2),
+                                'change_pct': round(chg / prev * 100, 2),
+                            })
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # 2차: pykrx 폴백 (FDR 미설치 또는 실패 시)
+        have = {r['name'] for r in result}
+        if 'KOSPI' not in have or 'KOSDAQ' not in have:
+            for ticker, name in [('1028', 'KOSPI'), ('2001', 'KOSDAQ')]:
+                if name in have:
+                    continue
+                try:
+                    df = krx.get_index_ohlcv_by_date(start, today, ticker)
+                    if df is not None and not df.empty:
+                        col = '종가' if '종가' in df.columns else df.columns[-1]
+                        vals = df[col].dropna().tolist()
+                        if len(vals) >= 2:
+                            cur, prev = float(vals[-1]), float(vals[-2])
+                            chg = cur - prev
+                            result.append({
+                                'name': name, 'value': round(cur, 2),
+                                'change': round(chg, 2),
+                                'change_pct': round(chg / prev * 100, 2),
+                            })
+                except Exception:
+                    pass
     except Exception:
         pass
 
