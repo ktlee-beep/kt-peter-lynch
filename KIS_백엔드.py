@@ -82,7 +82,8 @@ except ImportError as e:
         std=math.sqrt(sum((v-m)**2 for v in r)/n)
         u,l=m+2*std,m-2*std
         pb=(p[-1]-l)/(u-l)*100 if u!=l else 50
-        return {"upper":round(u),"mid":round(m),"lower":round(l),"percentB":round(pb,1)}
+        bw=(u-l)/m*100 if m>0 else 0
+        return {"upper":round(u),"mid":round(m),"lower":round(l),"percentB":round(pb,1),"bandwidth":round(bw,1)}
     def check_alignment(price, ma_values): return {'type':'unknown','score':0}
     def analyze_weekly(code): return {'error':'modules 미설치'}
     def analyze_mtf(code, **kw): return {'error':'modules 미설치'}
@@ -762,6 +763,76 @@ def market_news():
         }]
 
     return jsonify(articles[:24])
+
+
+@app.route('/api/macro')
+def api_macro():
+    """거시경제 지표 — VIX, USD/KRW, US 10Y, KOSPI"""
+    data = {}
+    notes = []
+    try:
+        import yfinance as yf
+        # USD/KRW
+        try:
+            kr = yf.Ticker('USDKRW=X').history(period='5d')
+            if not kr.empty:
+                cur = float(kr['Close'].iloc[-1])
+                prev = float(kr['Close'].iloc[-2]) if len(kr) >= 2 else cur
+                data['usdkrw'] = {'current': round(cur, 0), 'changePct': round((cur-prev)/prev*100, 2)}
+        except Exception:
+            pass
+        # VIX
+        try:
+            vix_df = yf.Ticker('^VIX').history(period='5d')
+            if not vix_df.empty:
+                data['vix'] = {'current': round(float(vix_df['Close'].iloc[-1]), 2)}
+        except Exception:
+            pass
+        # US 10Y
+        try:
+            t10 = yf.Ticker('^TNX').history(period='5d')
+            if not t10.empty:
+                data['us10y'] = {'current': round(float(t10['Close'].iloc[-1]), 2)}
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # KOSPI (pykrx)
+    try:
+        from pykrx import stock as krx
+        from datetime import datetime as _dt, timedelta as _td
+        _today = _dt.now().strftime('%Y%m%d')
+        _start = (_dt.now() - _td(days=7)).strftime('%Y%m%d')
+        df_k = krx.get_index_ohlcv_by_date(_start, _today, '1028')
+        if df_k is not None and not df_k.empty:
+            col = '종가' if '종가' in df_k.columns else df_k.columns[-1]
+            vals = df_k[col].dropna().tolist()
+            if len(vals) >= 2:
+                cur, prev = float(vals[-1]), float(vals[-2])
+                data['kospi'] = {'current': round(cur, 2), 'changePct': round((cur-prev)/prev*100, 2)}
+    except Exception:
+        pass
+
+    # 종합 판단
+    vix_v = data.get('vix', {}).get('current', 20)
+    if vix_v > 25:
+        label = '부정'
+        notes.append(f'VIX {vix_v} — 시장 공포 고조. 변동성 확대 구간.')
+    elif vix_v > 20:
+        label = '중립'
+        notes.append(f'VIX {vix_v} — 불안감 상승 중. 주의 필요.')
+    else:
+        label = '긍정'
+        notes.append(f'VIX {vix_v} — 시장 안정. 투자 우호 환경.')
+
+    krw_v = data.get('usdkrw', {}).get('current', 1300)
+    if krw_v and krw_v > 1400:
+        notes.append(f'원/달러 {krw_v:.0f}원 — 고환율. 수출주 유리, 내수주 부담.')
+    elif krw_v and krw_v > 1350:
+        notes.append(f'원/달러 {krw_v:.0f}원 — 원화 약세.')
+
+    return jsonify({'label': label, 'data': data, 'notes': notes})
 
 
 # ═══════════════════════════════════════════════════════════════
