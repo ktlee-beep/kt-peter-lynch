@@ -1,0 +1,5 @@
+# 기본적으로 LF 사용 (Linux 서버 배포용)
+* text=auto eol=lf
+*.py text eol=lf
+*.txt text eol=lf
+.python-version text eol=lf
