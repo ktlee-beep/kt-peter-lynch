@@ -1,0 +1,33 @@
+# API 키 — 절대 커밋 금지
+.env
+
+# 리포트 출력 (로컬 전용)
+reports/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+
+# 에디터
+.vscode/
+.idea/
+*.swp
+
+# 시스템
+.DS_Store
+Thumbs.db
+
+# 로컬 전용 (Render 불필요)
+files/
+.gstack/
+.mcp.json
+analyze.bat
+analyze.py
+crew.py
+KIS백엔드_실행.bat
+start_backend.bat

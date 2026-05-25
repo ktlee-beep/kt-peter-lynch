@@ -1,0 +1,9 @@
+flask==3.1.1
+flask-cors==5.0.1
+gunicorn==23.0.0
+pykrx==1.0.47
+FinanceDataReader==0.9.97
+yfinance==0.2.54
+requests==2.32.3
+pandas==2.2.3
+numpy==1.26.4
