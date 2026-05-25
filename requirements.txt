@@ -1,7 +1,7 @@
 flask==3.1.1
 flask-cors==5.0.1
 gunicorn==23.0.0
-pykrx==1.2.8
+pykrx==1.2.6
 FinanceDataReader==0.9.96
 yfinance==0.2.66
 requests==2.32.3
