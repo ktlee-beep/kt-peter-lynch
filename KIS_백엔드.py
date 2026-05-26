@@ -74,8 +74,12 @@ except ImportError as e:
         if len(ml)>=2 and len(sl)>=2:
             if ml[-1]>sl[-1] and ml[-2]<=sl[-2]: cross='golden'
             elif ml[-1]<sl[-1] and ml[-2]>=sl[-2]: cross='dead'
-        return {"lastCross":cross,"macdLine":ml[-20:],"signalLine":sl[-20:],
-                "histogram":[ml[-len(sl)+i]-sl[i] for i in range(len(sl))][-20:]}
+        hist=[ml[-len(sl)+i]-sl[i] for i in range(len(sl))]
+        return {"lastCross":cross,"macdLine":ml[-20:],"signalLine":sl[-20:],"histogram":hist[-20:],
+                "macdArr":ml[-30:],"signalArr":sl[-30:],"histArr":hist[-30:],
+                "lastMacd":round(ml[-1],4) if ml else None,
+                "lastSignal":round(sl[-1],4) if sl else None,
+                "lastHist":round(hist[-1],4) if hist else None}
     def bb(p,n=20):
         if len(p)<n: return None
         r=p[-n:]; m=sum(r)/n
@@ -83,7 +87,7 @@ except ImportError as e:
         u,l=m+2*std,m-2*std
         pb=(p[-1]-l)/(u-l)*100 if u!=l else 50
         bw=(u-l)/m*100 if m>0 else 0
-        return {"upper":round(u),"mid":round(m),"lower":round(l),"percentB":round(pb,1),"bandwidth":round(bw,1)}
+        return {"upper":round(u),"mid":round(m),"middle":round(m),"lower":round(l),"percentB":round(pb,1),"bandwidth":round(bw,1)}
     def check_alignment(price, ma_values): return {'type':'unknown','score':0}
     def analyze_weekly(code): return {'error':'modules 미설치'}
     def analyze_mtf(code, **kw): return {'error':'modules 미설치'}
@@ -251,9 +255,15 @@ def analysis():
             'ma200': round(ma200_a[-1]) if ma200_a else 0,
         })
 
+        prev_close = candles[-2]['c'] if len(candles) >= 2 else price
+        change_val = price - prev_close
+
         return jsonify({
             'code':       code, 'name': name, 'market': market, 'source': 'pykrx/KRX',
-            'currentPrice': price, 'changeRate': change_rate,
+            # 현재가 — currentPrice(기존) + close(Node.js 호환)
+            'currentPrice': price, 'close': price,
+            'change': change_val, 'changeRate': change_rate,
+            'previousClose': prev_close,
             'high52w': high52, 'low52w': low52,
             # 이동평균 (일봉 전체 체계)
             'ma5':   round(ma5_a[-1])   if ma5_a   else 0,
@@ -273,6 +283,17 @@ def analysis():
             'candles': candles[-80:],
             'volRatio': round(vols[-1]/avg_vol, 2) if vols and avg_vol else 1,
             'fundamentals': fund,
+            # 종합 신호 (간이)
+            'combinedSignal': None,
+            # 미구현 고급 지표 — null 반환으로 프론트 TypeError 방지
+            'fibonacci': None, 'psar': None, 'elder': None,
+            'adx': None, 'mfi': None, 'rsiDivergence': None,
+            'williamsR': None, 'ichimoku': None, 'stochastic': None,
+            'obv': None, 'candlePatterns': [], 'krFlags': [],
+            'backtest': None, 'newsSentiment': None,
+            'dynStop': None, 'fScore': None, 'dart': None,
+            'support': None, 'resistance': None, 'keyLevels': [],
+            'serverTime': datetime.now().isoformat(),
             # MA 설명 (프론트 표시용)
             'ma_legend': {
                 'ma20':  '20일선 = 주봉 5주선 (심리선) ★',
@@ -425,7 +446,70 @@ def news():
 
 @app.route('/api/movers')
 def movers():
-    return jsonify({'candidates': []})
+    """
+    거래량 상위 + 상승률 상위 + 하락률 하위 종목 반환
+    GET /api/movers?market=KOSPI (기본: KOSPI+KOSDAQ)
+    """
+    if not PYKRX_OK:
+        return jsonify({'candidates': []})
+    try:
+        req_market = request.args.get('market', '').strip().upper()
+        markets    = [req_market] if req_market in ('KOSPI', 'KOSDAQ') else ['KOSPI', 'KOSDAQ']
+
+        # 최근 거래일 탐색 (오늘 ~ 최대 10일 전)
+        all_rows = []
+        for mkt in markets:
+            for days_back in range(0, 10):
+                date_str = days_ago_str(days_back)
+                try:
+                    df = krx.get_market_ohlcv_by_ticker(date_str, market=mkt)
+                    if df is not None and not df.empty:
+                        for code, row in df.iterrows():
+                            close = int(row.get('종가', 0))
+                            if close <= 0:
+                                continue
+                            vol    = int(row.get('거래량', 0))
+                            chg_rt = float(row.get('등락률', 0))
+                            try:
+                                name = krx.get_market_ticker_name(code)
+                            except Exception:
+                                name = code
+                            all_rows.append({
+                                'code':       code,
+                                'name':       name,
+                                'market':     mkt,
+                                'close':      close,
+                                'changeRate': chg_rt,
+                                'volume':     vol,
+                            })
+                        break   # 해당 시장 데이터 확보됨
+                except Exception:
+                    continue
+
+        if not all_rows:
+            return jsonify({'candidates': []})
+
+        # 거래량 상위 40
+        by_vol = sorted(all_rows, key=lambda x: x['volume'], reverse=True)[:40]
+        # 상승률 상위 25 (거래량 1000주 이상)
+        by_up  = sorted([r for r in all_rows if r['volume'] >= 1000],
+                        key=lambda x: x['changeRate'], reverse=True)[:25]
+        # 하락률 하위 10
+        by_dn  = sorted([r for r in all_rows if r['volume'] >= 1000],
+                        key=lambda x: x['changeRate'])[:10]
+
+        # 중복 제거 (거래량 순 정렬 유지)
+        seen = set()
+        candidates = []
+        for item in by_vol + by_up + by_dn:
+            if item['code'] not in seen:
+                seen.add(item['code'])
+                candidates.append(item)
+
+        return jsonify({'candidates': candidates})
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'candidates': [], 'error': str(e)})
 
 
 # ═══════════════════════════════════════════════════════════════

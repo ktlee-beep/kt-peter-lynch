@@ -55,11 +55,19 @@ def macd(prices: list) -> dict | None:
             cross = 'golden'
         elif ml[-1] < sl[-1] and ml[-2] >= sl[-2]:
             cross = 'dead'
+    hist = [ml[-len(sl) + i] - sl[i] for i in range(len(sl))]
     return {
         "lastCross":  cross,
         "macdLine":   ml[-20:],
         "signalLine": sl[-20:],
-        "histogram":  [ml[-len(sl) + i] - sl[i] for i in range(len(sl))][-20:],
+        "histogram":  hist[-20:],
+        # Node.js 호환 aliases
+        "macdArr":    ml[-30:],
+        "signalArr":  sl[-30:],
+        "histArr":    hist[-30:],
+        "lastMacd":   round(ml[-1], 4)   if ml   else None,
+        "lastSignal": round(sl[-1], 4)   if sl   else None,
+        "lastHist":   round(hist[-1], 4) if hist else None,
     }
 
 
@@ -73,7 +81,7 @@ def bb(prices: list, n: int = 20) -> dict | None:
     u, l = m + 2 * std, m - 2 * std
     pb = (prices[-1] - l) / (u - l) * 100 if u != l else 50
     bw = (u - l) / m * 100 if m > 0 else 0
-    return {"upper": round(u), "mid": round(m), "lower": round(l), "percentB": round(pb, 1), "bandwidth": round(bw, 1)}
+    return {"upper": round(u), "mid": round(m), "middle": round(m), "lower": round(l), "percentB": round(pb, 1), "bandwidth": round(bw, 1)}
 
 
 # ── 정배열 / 역배열 판정 ───────────────────────────────────────
