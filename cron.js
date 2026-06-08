@@ -2,8 +2,7 @@
 // 매일 17:00 KST (UTC 08:00) — 전체 종목 스캔
 // 6시간마다 — 매크로 갱신
 import cron from 'node-cron';
-import { naverHistory } from './data.js';
-import { calcRSI, calcMA, calcBollinger, calcMACD, calcOBV, calcLynchScore, detectFreshSignals } from './analysis.js';
+import { calcRSI, calcMA, calcBollinger, calcMACD } from './analysis.js';
 import { getFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks } from './db.js';
 import { KS_UNIVERSE, KQ_UNIVERSE } from './data.js';
 
@@ -36,8 +35,8 @@ async function analyzeStockLean(code) {
     const prev = closes[closes.length - 2] || cur;
     const changeRate = prev > 0 ? (cur - prev) / prev * 100 : 0;
 
-    const rsiVal  = calcRSISimple(closes);
-    const macdVal = calcMACDSimple(closes);
+    const rsiVal  = calcRSI(closes).at(-1);
+    const macdVal = calcMACD(closes);
     const bb      = calcBollinger(closes);
     const ma5arr  = calcMA(closes, 5);
     const ma20arr = calcMA(closes, 20);
@@ -57,8 +56,8 @@ async function analyzeStockLean(code) {
       if (rsiVal > 75)                   sellPts++;
     }
     // MACD 크로스
-    if (macdVal?.cross === 'golden') buyPts += 2;
-    if (macdVal?.cross === 'dead')   sellPts += 2;
+    if (macdVal?.lastCross === 'golden') buyPts += 2;
+    if (macdVal?.lastCross === 'dead')   sellPts += 2;
     // 이동평균 정배열
     if (ma5 && ma20 && ma60 && ma5 > ma20 && ma20 > ma60) buyPts += 2;
     else if (ma5 && ma20 && ma5 < ma20)                    sellPts++;
@@ -91,39 +90,6 @@ async function analyzeStockLean(code) {
   } catch {
     return null;
   }
-}
-
-function calcRSISimple(closes, period = 14) {
-  const n = closes.length;
-  if (n < period + 1) return null;
-  let gains = 0, losses = 0;
-  for (let i = n - period; i < n; i++) {
-    const d = closes[i] - closes[i - 1];
-    if (d > 0) gains += d; else losses -= d;
-  }
-  if (losses === 0) return 100;
-  return parseFloat((100 - 100 / (1 + gains / losses)).toFixed(1));
-}
-
-function calcMACDSimple(closes) {
-  const n = closes.length;
-  if (n < 27) return { cross: null, lastCross: null };
-  const ema = (arr, k) => {
-    let e = arr[0];
-    for (let i = 1; i < arr.length; i++) e = arr[i] * k + e * (1 - k);
-    return e;
-  };
-  const k12 = 2 / 13, k26 = 2 / 27;
-  const e12 = ema(closes.slice(-26), k12);
-  const e26 = ema(closes.slice(-26), k26);
-  const macd = e12 - e26;
-  const prevE12 = ema(closes.slice(-27, -1), k12);
-  const prevE26 = ema(closes.slice(-27, -1), k26);
-  const prevMacd = prevE12 - prevE26;
-  const cross = macd > 0 && prevMacd <= 0 ? 'golden'
-              : macd < 0 && prevMacd >= 0 ? 'dead'
-              : null;
-  return { macd: parseFloat(macd.toFixed(2)), cross, lastCross: cross };
 }
 
 function calcLynchScoreSimple(fund) {
@@ -180,7 +146,7 @@ export async function runDailyScan() {
         piotroski_score: 0,
         combined_score:  Math.round(((a.pScore ?? 0) + (a.lScore ?? 0)) / 2),
         rsi:             a.rsi       ?? null,
-        macd_cross:      a.macd?.cross ?? a.macd?.lastCross ?? null,
+        macd_cross:      a.macd?.lastCross ?? null,
         close_price:     a.close     ?? null,
         change_rate:     a.changeRate ?? null,
         vol_ratio:       a.volRatio   ?? null,
