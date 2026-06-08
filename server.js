@@ -615,6 +615,118 @@ app.get('/api/movers', async (req, res) => {
   res.json(payload);
 });
 
+// ── /api/ai-guide (피터린치 AI 투자 가이드 — 룰 기반) ────────────────
+app.post('/api/ai-guide', async (req, res) => {
+  try {
+    const { code, name, buyPrice, currentPrice, profitPct, analysis, market } = req.body ?? {};
+    if (!code || !name) return res.status(400).json({ error: 'code, name 필수' });
+
+    const rsi        = analysis?.rsi ?? null;
+    const macdCross  = analysis?.macd?.lastCross ?? null;
+    const bb         = analysis?.bb ?? null;
+    const ma5        = analysis?.ma5 ?? null;
+    const ma20       = analysis?.ma20 ?? null;
+    const ma60       = analysis?.ma60 ?? null;
+    const near52w    = analysis?.near52wHigh ?? false;
+    const signal     = analysis?.combinedSignal?.signal ?? analysis?.signal ?? 'HOLD';
+    const confidence = analysis?.combinedSignal?.confidence ?? 50;
+    const pScore     = analysis?.pScore ?? 0;
+    const lScore     = analysis?.lScore ?? 0;
+    const profit     = typeof profitPct === 'number' ? profitPct : 0;
+    const cur        = typeof currentPrice === 'number' ? currentPrice : 0;
+    const buyPx      = typeof buyPrice === 'number' ? buyPrice : 0;
+
+    const isDeadCross   = macdCross === 'dead';
+    const isGoldenCross = macdCross === 'golden';
+    const maAligned     = ma5 && ma20 && ma60 && ma5 > ma20 && ma20 > ma60;
+    const maInverted    = ma5 && ma20 && ma5 < ma20;
+    const rsiOverbought = rsi !== null && rsi > 75;
+    const rsiOversold   = rsi !== null && rsi < 30;
+
+    const mktArr      = Array.isArray(market) ? market : [];
+    const kospiChg    = mktArr.find(m => m.id === 'kospi')?.changeRate ?? 0;
+    const kosdaqChg   = mktArr.find(m => m.id === 'kosdaq')?.changeRate ?? 0;
+    const marketWeak  = kospiChg < -1 || kosdaqChg < -1;
+
+    // 판정
+    let verdict = '관망';
+    if (profit <= -15 || (profit < -8 && isDeadCross)) {
+      verdict = '손절검토';
+    } else if (
+      (profit >= 30 && (isDeadCross || signal === 'SELL')) ||
+      (profit >= 25 && rsiOverbought) ||
+      (signal === 'SELL' && confidence >= 65 && profit > 5)
+    ) {
+      verdict = '매도검토';
+    } else if ((isGoldenCross || maAligned) && !rsiOverbought && profit > -5) {
+      verdict = '보유';
+    }
+
+    // 보유 이유
+    const holdReasons = [];
+    if (isGoldenCross)                                 holdReasons.push('MACD 골든크로스 — 추세 상승 전환 신호');
+    if (maAligned)                                     holdReasons.push('단·중·장기 이동평균 정배열 — 강세 추세 유지');
+    if (rsi !== null && rsi >= 50 && rsi <= 70)        holdReasons.push(`RSI ${Math.round(rsi)} — 적정 모멘텀 구간`);
+    if (near52w)                                       holdReasons.push('52주 신고가 근접 — 상승 모멘텀 지속');
+    if (pScore >= 50)                                  holdReasons.push(`피터린치 점수 ${pScore}점 — 펀더멘털 양호`);
+    if (lScore >= 50)                                  holdReasons.push(`리버모어 점수 ${lScore}점 — 기술적 추세 양호`);
+    if (bb && bb.percentB >= 40 && bb.percentB <= 80) holdReasons.push('볼린저밴드 중간권 — 추세 안정적');
+
+    // 매도 트리거
+    const sellTriggers = [];
+    if (isDeadCross)            sellTriggers.push('MACD 데드크로스 — 즉시 비중 축소 검토');
+    if (rsiOverbought)          sellTriggers.push(`RSI ${Math.round(rsi)} 과매수 구간 — 기술적 조정 가능성`);
+    if (maInverted)             sellTriggers.push('단기 이동평균 하락 이탈 — 추세 약화 신호');
+    if (profit >= 20)           sellTriggers.push(`수익률 ${Math.round(profit)}% 달성 — 분할 익절 고려`);
+    if (bb && bb.percentB > 90) sellTriggers.push('볼린저밴드 상단 돌파 — 과열 구간');
+    if (!sellTriggers.length)   sellTriggers.push('뚜렷한 매도 신호 없음 — 손절 기준 준수 시 보유 유효');
+
+    // 리스크
+    const riskFactors = [];
+    if (profit < -5)                    riskFactors.push(`평가손실 ${Math.abs(Math.round(profit))}% — 추가 방어선 설정 권고`);
+    if (rsiOversold)                    riskFactors.push(`RSI ${Math.round(rsi)} 과매도 — 반등 전 추가 하락 가능성`);
+    if (marketWeak)                     riskFactors.push('지수 하락 국면 — 시장 전반 약세로 개별주 영향 주의');
+    if (isDeadCross && profit > 0)      riskFactors.push('익절 구간에서 데드크로스 발생 — 수익 반납 리스크');
+    if (!riskFactors.length)            riskFactors.push('현재 구간 내 주요 리스크 지표 미감지');
+
+    // 손절 기준
+    const stopBase = cur > 0 ? cur : buyPx;
+    const stopLossPrice = stopBase > 0 ? Math.round(stopBase * 0.9) : 0;
+    const stopLoss = stopLossPrice > 0
+      ? `₩${stopLossPrice.toLocaleString()} (현재가 대비 -10%)`
+      : '현재가 기준 -10% 이탈 시 손절 권고';
+
+    // 요약
+    const profitStr = profit >= 0 ? `+${Math.round(profit)}%` : `${Math.round(profit)}%`;
+    const summaryMap = {
+      '보유':     `${name} ${profitStr} — 기술적 추세 양호, 보유 유지 권고`,
+      '관망':     `${name} ${profitStr} — 뚜렷한 방향성 없음, 추세 확인 후 대응`,
+      '매도검토': `${name} ${profitStr} — 과매수·매도 신호 감지, 익절·비중 축소 검토`,
+      '손절검토': `${name} ${profitStr} — 손절 기준 접근, 포지션 재검토 필요`,
+    };
+    const summary = summaryMap[verdict] ?? summaryMap['관망'];
+
+    // 상세 추론
+    const parts = [`현재가 ₩${cur > 0 ? cur.toLocaleString() : '—'}, 매수가 ₩${buyPx > 0 ? buyPx.toLocaleString() : '—'}`];
+    if (rsi !== null) parts.push(`RSI ${Math.round(rsi)}${rsiOverbought ? '(과매수)' : rsiOversold ? '(과매도)' : ''}`);
+    if (macdCross)    parts.push(`MACD ${isGoldenCross ? '골든크로스' : '데드크로스'}`);
+    if (maAligned)    parts.push('이평선 정배열');
+    else if (maInverted) parts.push('이평선 역배열');
+    if (marketWeak)   parts.push('지수 약세');
+    const conclusionMap = {
+      '보유':     '청산 신호 없음 — 손절가 준수 하에 보유 지속 권고.',
+      '관망':     '추세 불명확 — 명확한 신호 출현 시 대응.',
+      '매도검토': '기술적 과열 또는 추세 반전 신호 감지 — 분할 매도 또는 비중 축소 권고.',
+      '손절검토': '손실이 임계치 접근 — 추가 손실 방지를 위해 포지션 정리를 검토하세요.',
+    };
+    const reasoning = parts.join(', ') + '. ' + (conclusionMap[verdict] ?? conclusionMap['관망']);
+
+    res.json({ verdict, summary, reasoning, holdReasons, sellTriggers, riskFactors, stopLoss });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── /api/scan/results ─────────────────────────────────────────────
 app.get('/api/scan/results', async (req, res) => {
   try {
