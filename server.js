@@ -823,51 +823,6 @@ app.post('/api/scan/trigger', async (req, res) => {
   res.json({ ok: true, message: '스캔 시작됨 (비동기)' });
 });
 
-// ── /api/admin/fix-market-codes (C-2 DB 일회성 수정) ────────────
-app.post('/api/admin/fix-market-codes', adminMiddleware, async (req, res) => {
-  try {
-    const sb = getSupabase();
-
-    // 1. 잘못된 KOSPI 행 5개 삭제
-    const { data: deleted, error: e1 } = await sb
-      .from('kt_stocks')
-      .delete()
-      .in('code', ['247540','086520','041510','035900','122870'])
-      .eq('market', 'KOSPI')
-      .select('code,name,market');
-    if (e1) throw new Error('DELETE 실패: ' + e1.message);
-
-    // 2. 만도 → KOSPI 이동
-    const { error: e2 } = await sb
-      .from('kt_stocks')
-      .update({ market: 'KOSPI', yahoo_suffix: 'KS' })
-      .eq('code', '204320');
-    if (e2) throw new Error('UPDATE 만도 실패: ' + e2.message);
-
-    // 3. 5개 KOSDAQ 종목 upsert
-    const kosdaqRows = [
-      { code:'247540', name:'에코프로비엠',    market:'KOSDAQ', sector:'이차전지', yahoo_suffix:'KQ' },
-      { code:'086520', name:'에코프로',         market:'KOSDAQ', sector:'이차전지', yahoo_suffix:'KQ' },
-      { code:'041510', name:'에스엠',            market:'KOSDAQ', sector:'엔터',    yahoo_suffix:'KQ' },
-      { code:'035900', name:'JYP엔터테인먼트',  market:'KOSDAQ', sector:'엔터',    yahoo_suffix:'KQ' },
-      { code:'122870', name:'와이지엔터테인먼트',market:'KOSDAQ', sector:'엔터',    yahoo_suffix:'KQ' },
-    ];
-    const { error: e3 } = await sb
-      .from('kt_stocks')
-      .upsert(kosdaqRows, { onConflict: 'code' });
-    if (e3) throw new Error('UPSERT KOSDAQ 실패: ' + e3.message);
-
-    res.json({
-      ok: true,
-      deleted: deleted?.map(r => `${r.code} ${r.name} (${r.market})`),
-      updated: '만도(204320) → KOSPI',
-      upserted: kosdaqRows.map(r => `${r.code} ${r.name} → KOSDAQ`),
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
 // ── 서버 시작 ─────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`KT Trading API → http://localhost:${PORT}`);
