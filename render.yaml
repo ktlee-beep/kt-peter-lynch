@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: kt-peter-lynch
+    env: node
+    region: singapore
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: 18
+      - key: NODE_ENV
+        value: production
+      - key: MASTER_EMAIL
+        sync: false
+      - key: MASTER_PASS
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: KRX_SERVICE_KEY
+        sync: false
+      - key: DART_API_KEY
+        sync: false
+      - key: FRONTEND_ORIGIN
+        value: https://kt-backend.dlrudxo002.workers.dev
+      - key: SCAN_SECRET
+        sync: false

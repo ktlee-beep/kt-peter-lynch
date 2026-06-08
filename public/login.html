@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KT 트레이딩 — 로그인</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #09090b;
+    color: #fafafa;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .card {
+    background: #18181b;
+    border: 1px solid #27272a;
+    border-radius: 16px;
+    padding: 40px;
+    width: 100%;
+    max-width: 380px;
+  }
+  .logo {
+    text-align: center;
+    margin-bottom: 32px;
+  }
+  .logo h1 {
+    font-size: 24px;
+    font-weight: 700;
+    color: #ef4444;
+    letter-spacing: -0.5px;
+  }
+  .logo p {
+    font-size: 13px;
+    color: #71717a;
+    margin-top: 4px;
+  }
+  label {
+    display: block;
+    font-size: 13px;
+    color: #a1a1aa;
+    margin-bottom: 6px;
+    font-weight: 500;
+  }
+  input {
+    width: 100%;
+    background: #09090b;
+    border: 1px solid #3f3f46;
+    border-radius: 8px;
+    color: #fafafa;
+    font-size: 15px;
+    padding: 10px 14px;
+    outline: none;
+    transition: border-color 0.15s;
+    margin-bottom: 16px;
+  }
+  input:focus { border-color: #ef4444; }
+  input::placeholder { color: #52525b; }
+  button {
+    width: 100%;
+    background: #ef4444;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    padding: 12px;
+    cursor: pointer;
+    transition: background 0.15s;
+    margin-top: 4px;
+  }
+  button:hover { background: #dc2626; }
+  button:disabled { background: #7f1d1d; cursor: not-allowed; }
+  .error {
+    background: #450a0a;
+    border: 1px solid #7f1d1d;
+    color: #fca5a5;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 13px;
+    margin-bottom: 16px;
+    display: none;
+  }
+  .error.show { display: block; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">
+    <h1>📈 KT 트레이딩</h1>
+    <p>피터 린치 투자 시스템</p>
+  </div>
+  <div class="error" id="err"></div>
+  <form id="form">
+    <label>이메일</label>
+    <input type="email" id="email" placeholder="이메일 입력" autocomplete="email" autofocus>
+    <label>비밀번호</label>
+    <input type="password" id="password" placeholder="비밀번호 입력" autocomplete="current-password">
+    <button type="submit" id="btn">로그인</button>
+  </form>
+</div>
+<script>
+// 보안: 저장된 평문 비밀번호 즉시 삭제
+localStorage.removeItem('kt_saved_pass');
+localStorage.removeItem('kt_saved_user');
+
+const BACKEND_URL = localStorage.getItem('kt_backend_url') || 'https://kt-trading-api.onrender.com';
+
+async function doLogin(email, password) {
+  const btn = document.getElementById('btn');
+  const err = document.getElementById('err');
+  err.classList.remove('show');
+  btn.disabled = true;
+  btn.textContent = '로그인 중...';
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await res.json();
+    if (res.ok && data.token) {
+      localStorage.setItem('kt_jwt', data.token);
+      window.location.href = '/';
+    } else {
+      err.textContent = data.error || '로그인 실패';
+      err.classList.add('show');
+      btn.disabled = false;
+      btn.textContent = '로그인';
+    }
+  } catch {
+    err.textContent = '네트워크 오류가 발생했습니다';
+    err.classList.add('show');
+    btn.disabled = false;
+    btn.textContent = '로그인';
+  }
+}
+
+document.getElementById('form').addEventListener('submit', async e => {
+  e.preventDefault();
+  await doLogin(
+    document.getElementById('email').value.trim().toLowerCase(),
+    document.getElementById('password').value,
+  );
+});
+</script>
+</body>
+</html>

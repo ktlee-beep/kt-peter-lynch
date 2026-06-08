@@ -22,6 +22,9 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Node.js
+node_modules/
+
 # 로컬 전용 (Render 불필요)
 files/
 .gstack/
@@ -31,3 +34,8 @@ analyze.py
 crew.py
 KIS백엔드_실행.bat
 start_backend.bat
+
+# 제외
+gh-pages-temp/
+.claude/
+새 폴더/
