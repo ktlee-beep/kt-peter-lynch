@@ -828,7 +828,7 @@ app.post('/api/scan/trigger', async (req, res) => {
 // ── /api/admin/db-diag (pg 연결 진단) ────────────────────────────
 app.get('/api/admin/db-diag', adminMiddleware, async (req, res) => {
   const dbUrl = process.env.DATABASE_URL ||
-    'postgresql://postgres:enova8757%21%21@db.gvpaprczqxdhldotoxqk.supabase.co:5432/postgres';
+    'postgresql://postgres.gvpaprczqxdhldotoxqk:enova8757%21%21@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres';
   const client = new pg.Client({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
   let result = { pgUrl: dbUrl.replace(/:[^:@]+@/, ':***@'), connected: false, tableExists: false, error: null };
   try {
@@ -898,7 +898,7 @@ app.post('/api/admin/fix-market-codes', adminMiddleware, async (req, res) => {
 // ── DB 스키마 자동 마이그레이션 ──────────────────────────────────
 async function runMigration() {
   const dbUrl = process.env.DATABASE_URL ||
-    'postgresql://postgres:enova8757%21%21@db.gvpaprczqxdhldotoxqk.supabase.co:5432/postgres';
+    'postgresql://postgres.gvpaprczqxdhldotoxqk:enova8757%21%21@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres';
   const client = new pg.Client({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
   try {
     await client.connect();
