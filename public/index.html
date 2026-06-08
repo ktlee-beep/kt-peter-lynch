@@ -58,6 +58,7 @@ const { useState, useEffect, useMemo, useRef } = React;
   localStorage.removeItem('kt_saved_user');
   // 401 응답 시 자동 로그아웃
   const _origFetch = window.fetch.bind(window);
+  let _redirecting = false;
   window.fetch = function(url, opts = {}) {
     const _token = localStorage.getItem('kt_jwt');
     const backendBase = localStorage.getItem('kt_backend_url') || 'https://kt-trading-api.onrender.com';
@@ -65,7 +66,8 @@ const { useState, useEffect, useMemo, useRef } = React;
       opts = { ...opts, headers: { ...opts.headers, 'Authorization': 'Bearer ' + _token } };
     }
     return _origFetch(url, opts).then(r => {
-      if (r.status === 401 && typeof url === 'string' && url.includes('/api/')) {
+      if (r.status === 401 && !_redirecting && typeof url === 'string' && url.includes('/api/')) {
+        _redirecting = true;
         localStorage.removeItem('kt_jwt');
         window.location.href = '/login';
       }
@@ -367,7 +369,7 @@ const Ic = {
 // ═══════════════════════════════════════════════
 const fmt = (n) => n ? Math.round(n).toLocaleString('ko-KR') : '0';
 const fmt1 = (n) => n ? n.toLocaleString('ko-KR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : '0';
-const fmtPct = (n) => `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
+const fmtPct = (n) => n == null ? '-' : `${n >= 0 ? '+' : ''}${(+n).toFixed(2)}%`;
 const fmtKR = (n) => {
   if (n >= 1e8) return `${(n/1e8).toFixed(1)}억`;
   if (n >= 1e4) return `${(n/1e4).toFixed(1)}만`;
@@ -5782,6 +5784,7 @@ function MarketIndexPanel({ backendUrl }) {
     { id: 'nasdaq', name: '나스닥',   flag: '🇺🇸' },
     { id: 'dow',    name: '다우',     flag: '🇺🇸' },
     { id: 'usdkrw', name: 'USD/KRW',  flag: '💱'  },
+    { id: 'vix',    name: 'VIX 공포',  flag: '😱'  },
   ];
 
   const [indexData, setIndexData] = React.useState({});
@@ -5847,11 +5850,13 @@ function MarketIndexPanel({ backendUrl }) {
 
   function signalLabel(score, id) {
     if (id === 'usdkrw') return score > 0 ? '원화 약세' : score < 0 ? '원화 강세' : '중립';
+    if (id === 'vix') return score >= 2 ? '공포 낮음' : score <= -2 ? '극도 공포' : '중립';
     return score >= 2 ? '강세' : score <= -2 ? '약세' : '중립';
   }
 
   function signalColor(score, id) {
     if (id === 'usdkrw') return score > 0 ? 'text-orange-400' : score < 0 ? 'text-emerald-400' : 'text-zinc-400';
+    if (id === 'vix') return score >= 2 ? 'text-emerald-400' : score <= -2 ? 'text-red-400' : 'text-zinc-400';
     return score >= 2 ? 'text-red-400' : score <= -2 ? 'text-blue-400' : 'text-zinc-400';
   }
 

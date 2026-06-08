@@ -209,6 +209,7 @@ app.get('/api/quotes', async (req, res) => {
 
 // ── /api/analysis ─────────────────────────────────────────────────
 app.get('/api/analysis', async (req, res) => {
+  try {
   const code    = req.query.code;
   const dartKey = process.env.DART_API_KEY || ''; // 쿼리파라미터 수신 제거 — 서버 env만 사용
   if (!code) return res.status(400).json({ error: 'code 파라미터 필요' });
@@ -395,6 +396,10 @@ app.get('/api/analysis', async (req, res) => {
   };
   saveAnalysisToDB(code, result2).catch(() => {});
   res.json(result2);
+  } catch (err) {
+    console.error('[/api/analysis] 오류:', err);
+    if (!res.headersSent) res.status(500).json({ error: '분석 중 서버 오류', detail: err.message });
+  }
 });
 
 // ── /api/market ───────────────────────────────────────────────────
@@ -425,7 +430,7 @@ app.get('/api/index-chart/:id', authMiddleware, async (req, res) => {
     return res.json({ id, data: cached.data, fromCache: true });
   }
   try {
-    const data = await fetchIndexOHLCV(symbol, '6mo');
+    const data = await fetchIndexOHLCV(symbol, '1y');
     cache.indexChart[id] = { data, ts: Date.now() };
     res.json({ id, data });
   } catch (e) {
