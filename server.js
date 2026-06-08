@@ -825,29 +825,38 @@ app.post('/api/scan/trigger', async (req, res) => {
   res.json({ ok: true, message: '스캔 시작됨 (비동기)' });
 });
 
-// ── /api/admin/db-diag (pg 연결 진단) ────────────────────────────
+// ── /api/admin/db-diag (pg 연결 진단 — 여러 URL 순서대로 시도) ──
 app.get('/api/admin/db-diag', adminMiddleware, async (req, res) => {
-  const dbUrl = process.env.DATABASE_URL ||
-    'postgresql://postgres.gvpaprczqxdhldotoxqk:enova8757%21%21@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres';
-  const client = new pg.Client({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
-  let result = { pgUrl: dbUrl.replace(/:[^:@]+@/, ':***@'), connected: false, tableExists: false, error: null };
-  try {
-    await client.connect();
-    result.connected = true;
-    const r = await client.query(`SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='kt_stocks')`);
-    result.tableExists = r.rows[0].exists;
-    if (!result.tableExists) {
-      const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
-      await client.query(sql);
-      result.migrationRan = true;
-      result.tableExists = true;
+  const PROJECT = 'gvpaprczqxdhldotoxqk';
+  const PASS    = 'enova8757%21%21';
+  const candidates = process.env.DATABASE_URL ? [process.env.DATABASE_URL] : [
+    `postgresql://postgres.${PROJECT}:${PASS}@aws-0-ap-northeast-1.pooler.supabase.com:6543/postgres`,
+    `postgresql://postgres.${PROJECT}:${PASS}@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres`,
+    `postgresql://postgres.${PROJECT}:${PASS}@aws-0-us-east-1.pooler.supabase.com:6543/postgres`,
+    `postgresql://postgres.${PROJECT}:${PASS}@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres`,
+    `postgresql://postgres:${PASS}@db.${PROJECT}.supabase.co:5432/postgres`,
+  ];
+
+  for (const url of candidates) {
+    const client = new pg.Client({ connectionString: url, ssl: { rejectUnauthorized: false }, connectionTimeoutMillis: 8000 });
+    try {
+      await client.connect();
+      const r = await client.query(`SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='kt_stocks')`);
+      const tableExists = r.rows[0].exists;
+      let migrationRan = false;
+      if (!tableExists) {
+        const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+        await client.query(sql);
+        migrationRan = true;
+      }
+      await client.end().catch(() => {});
+      return res.json({ ok: true, usedUrl: url.replace(/:[^:@]+@/, ':***@'), tableExists: tableExists || migrationRan, migrationRan });
+    } catch (e) {
+      await client.end().catch(() => {});
+      // 다음 URL 시도
     }
-  } catch (e) {
-    result.error = e.message;
-  } finally {
-    await client.end().catch(() => {});
   }
-  res.json(result);
+  res.status(500).json({ ok: false, error: '모든 pg 연결 URL 실패' });
 });
 
 // ── /api/admin/fix-market-codes (C-2 DB 일회성 수정) ────────────
@@ -897,19 +906,29 @@ app.post('/api/admin/fix-market-codes', adminMiddleware, async (req, res) => {
 
 // ── DB 스키마 자동 마이그레이션 ──────────────────────────────────
 async function runMigration() {
-  const dbUrl = process.env.DATABASE_URL ||
-    'postgresql://postgres.gvpaprczqxdhldotoxqk:enova8757%21%21@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres';
-  const client = new pg.Client({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
-  try {
-    await client.connect();
-    const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
-    await client.query(sql);
-    console.log('[Migration] schema.sql 실행 완료 (CREATE IF NOT EXISTS — 멱등)');
-  } catch (e) {
-    console.error('[Migration] 스키마 마이그레이션 실패 (서버는 계속 실행):', e.message);
-  } finally {
-    await client.end().catch(() => {});
+  const PROJECT = 'gvpaprczqxdhldotoxqk';
+  const PASS    = 'enova8757%21%21';
+  const candidates = process.env.DATABASE_URL ? [process.env.DATABASE_URL] : [
+    `postgresql://postgres.${PROJECT}:${PASS}@aws-0-ap-northeast-1.pooler.supabase.com:6543/postgres`,
+    `postgresql://postgres.${PROJECT}:${PASS}@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres`,
+    `postgresql://postgres.${PROJECT}:${PASS}@aws-0-us-east-1.pooler.supabase.com:6543/postgres`,
+    `postgresql://postgres:${PASS}@db.${PROJECT}.supabase.co:5432/postgres`,
+  ];
+  const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+  for (const url of candidates) {
+    const client = new pg.Client({ connectionString: url, ssl: { rejectUnauthorized: false }, connectionTimeoutMillis: 8000 });
+    try {
+      await client.connect();
+      await client.query(sql);
+      console.log(`[Migration] schema.sql 실행 완료 → ${url.replace(/:[^:@]+@/, ':***@')}`);
+      await client.end().catch(() => {});
+      return;
+    } catch (e) {
+      console.error(`[Migration] 연결 실패 (${url.replace(/:[^:@]+@/, ':***@')}): ${e.message}`);
+      await client.end().catch(() => {});
+    }
   }
+  console.error('[Migration] 모든 연결 URL 실패 — 서버는 계속 실행');
 }
 
 // ── 서버 시작 ─────────────────────────────────────────────────────
