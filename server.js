@@ -9,6 +9,8 @@ import jwt from 'jsonwebtoken';
 import { timingSafeEqual, createHash } from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
+import pg from 'pg';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 import { startCron } from './cron.js';
@@ -868,8 +870,27 @@ app.post('/api/admin/fix-market-codes', adminMiddleware, async (req, res) => {
   }
 });
 
+// ── DB 스키마 자동 마이그레이션 ──────────────────────────────────
+async function runMigration() {
+  const dbUrl = process.env.DATABASE_URL ||
+    'postgresql://postgres:enova8757%21%21@db.gvpaprczqxdhldotoxqk.supabase.co:5432/postgres';
+  const client = new pg.Client({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
+  try {
+    await client.connect();
+    const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+    await client.query(sql);
+    console.log('[Migration] schema.sql 실행 완료 (CREATE IF NOT EXISTS — 멱등)');
+  } catch (e) {
+    console.error('[Migration] 스키마 마이그레이션 실패 (서버는 계속 실행):', e.message);
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
 // ── 서버 시작 ─────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`KT Trading API → http://localhost:${PORT}`);
-  startCron();
+runMigration().then(() => {
+  app.listen(PORT, () => {
+    console.log(`KT Trading API → http://localhost:${PORT}`);
+    startCron();
+  });
 });
