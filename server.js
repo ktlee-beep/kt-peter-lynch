@@ -825,6 +825,31 @@ app.post('/api/scan/trigger', async (req, res) => {
   res.json({ ok: true, message: '스캔 시작됨 (비동기)' });
 });
 
+// ── /api/admin/db-diag (pg 연결 진단) ────────────────────────────
+app.get('/api/admin/db-diag', adminMiddleware, async (req, res) => {
+  const dbUrl = process.env.DATABASE_URL ||
+    'postgresql://postgres:enova8757%21%21@db.gvpaprczqxdhldotoxqk.supabase.co:5432/postgres';
+  const client = new pg.Client({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
+  let result = { pgUrl: dbUrl.replace(/:[^:@]+@/, ':***@'), connected: false, tableExists: false, error: null };
+  try {
+    await client.connect();
+    result.connected = true;
+    const r = await client.query(`SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='kt_stocks')`);
+    result.tableExists = r.rows[0].exists;
+    if (!result.tableExists) {
+      const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+      await client.query(sql);
+      result.migrationRan = true;
+      result.tableExists = true;
+    }
+  } catch (e) {
+    result.error = e.message;
+  } finally {
+    await client.end().catch(() => {});
+  }
+  res.json(result);
+});
+
 // ── /api/admin/fix-market-codes (C-2 DB 일회성 수정) ────────────
 app.post('/api/admin/fix-market-codes', adminMiddleware, async (req, res) => {
   try {
