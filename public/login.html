@@ -107,7 +107,11 @@
 localStorage.removeItem('kt_saved_pass');
 localStorage.removeItem('kt_saved_user');
 
-const BACKEND_URL = localStorage.getItem('kt_backend_url') || 'https://kt-trading-api.onrender.com';
+// 구 URL 자동 마이그레이션
+if (localStorage.getItem('kt_backend_url') === 'https://kt-trading-api.onrender.com') {
+  localStorage.removeItem('kt_backend_url');
+}
+const BACKEND_URL = localStorage.getItem('kt_backend_url') || 'https://kt-peter-lynch.onrender.com';
 
 async function doLogin(email, password) {
   const btn = document.getElementById('btn');

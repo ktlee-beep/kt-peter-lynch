@@ -61,7 +61,8 @@ const { useState, useEffect, useMemo, useRef } = React;
   let _redirecting = false;
   window.fetch = function(url, opts = {}) {
     const _token = localStorage.getItem('kt_jwt');
-    const backendBase = localStorage.getItem('kt_backend_url') || 'https://kt-trading-api.onrender.com';
+    if (localStorage.getItem('kt_backend_url') === 'https://kt-trading-api.onrender.com') { localStorage.removeItem('kt_backend_url'); }
+    const backendBase = localStorage.getItem('kt_backend_url') || 'https://kt-peter-lynch.onrender.com';
     if (_token && typeof url === 'string' && url.startsWith(backendBase)) {
       opts = { ...opts, headers: { ...opts.headers, 'Authorization': 'Bearer ' + _token } };
     }
@@ -8561,7 +8562,11 @@ function App() {
     return DEFAULT_API_KEY;
   });
   const [showKeySetup, setShowKeySetup] = useState(false);
-  const [backendUrl, setBackendUrlState] = useState(() => localStorage.getItem(STORAGE_KEYS.BACKEND_URL) || 'https://kt-trading-api.onrender.com');
+  const [backendUrl, setBackendUrlState] = useState(() => {
+    const stored = localStorage.getItem(STORAGE_KEYS.BACKEND_URL);
+    if (stored === 'https://kt-trading-api.onrender.com') { localStorage.removeItem(STORAGE_KEYS.BACKEND_URL); return 'https://kt-peter-lynch.onrender.com'; }
+    return stored || 'https://kt-peter-lynch.onrender.com';
+  });
   const [autoRefresh, setAutoRefreshState] = useState(() => localStorage.getItem(STORAGE_KEYS.AUTO_REFRESH) !== 'false');
   const [marketData, setMarketData] = useState(null);
   const [refreshStatus, setRefreshStatus] = useState({ lastUpdate: null, loading: false, error: null });
