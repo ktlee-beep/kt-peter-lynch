@@ -133,13 +133,20 @@ export default function StockSearchBar({ onSelect }) {
               onPointerDown={(e) => { e.preventDefault(); handleSelect(s); }}
               className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-slate-800 active:bg-slate-700 transition-colors text-left"
             >
-              <span className="text-sm text-white font-medium flex-1 truncate">{s.name}</span>
-              <span className="text-xs text-slate-500 font-mono">{s.code}</span>
-              <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                s.market === 'KOSPI' ? 'bg-blue-500/20 text-blue-400' :
-                s.market === 'KOSDAQ' ? 'bg-purple-500/20 text-purple-400' :
-                'bg-slate-700 text-slate-400'
-              }`}>{s.market || '기타'}</span>
+              <div className="flex-1 min-w-0">
+                <span className="text-sm text-white font-medium">{s.name}</span>
+                <div className="flex items-center gap-1.5 mt-0.5">
+                  <span className="text-[11px] text-slate-500 font-mono">{s.code}</span>
+                  <span className={`text-[10px] px-1 py-0.5 rounded font-medium ${
+                    s.market === 'KOSPI' ? 'bg-blue-500/20 text-blue-400' :
+                    s.market === 'KOSDAQ' ? 'bg-purple-500/20 text-purple-400' :
+                    'bg-slate-700 text-slate-400'
+                  }`}>{s.market || '기타'}</span>
+                  {s.sector && (
+                    <span className="text-[10px] text-slate-500">{s.sector}</span>
+                  )}
+                </div>
+              </div>
             </button>
           ))}
         </div>

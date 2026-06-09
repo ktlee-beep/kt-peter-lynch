@@ -13,6 +13,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 import { startCron } from './cron.js';
 import { SECTOR_MAP, SECTOR_NAMES } from './sector_map.js';
+import { KRX_STOCKS } from './krx_stocks.js';
 import {
   calcMA, calcRSI, calcMACD, calcBollinger, calcATR, calcMDD,
   findKeyLevels, detectFreshSignals, combinedSignal, calcScore,
@@ -524,25 +525,23 @@ app.get('/api/naver-stock/:code', async (req, res) => {
   }
 });
 
-// ── /api/stock/search — 종목명·코드 검색 ─────────────────────────
-app.get('/api/stock/search', async (req, res) => {
-  const q = (req.query.q || '').trim();
+// ── /api/stock/search — 종목명·코드 검색 (내장 KRX 1775종목) ────
+app.get('/api/stock/search', (req, res) => {
+  const q = (req.query.q || '').trim().toLowerCase();
   if (!q) return res.json({ results: [] });
-  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
-  try {
-    const url = `https://ac.stock.naver.com/ac?q=${encodeURIComponent(q)}&target=stock,index,etf,etn,elw,fund,coin`;
-    const r = await fetch(url, { headers: { 'User-Agent': UA, 'Referer': 'https://finance.naver.com/' } });
-    if (!r.ok) throw new Error(`naver HTTP ${r.status}`);
-    const d = await r.json();
-    const results = (d.items?.[0] || []).slice(0, 15).map(item => ({
-      code:   item.code,
-      name:   item.name,
-      market: item.typeCode === '1' ? 'KOSPI' : item.typeCode === '2' ? 'KOSDAQ' : item.typeCode,
-    }));
-    res.json({ results });
-  } catch (e) {
-    res.status(502).json({ error: e.message, results: [] });
+  const results = [];
+  for (const s of KRX_STOCKS) {
+    if (results.length >= 15) break;
+    if (s.code.startsWith(q) || s.name.toLowerCase().includes(q)) {
+      results.push({ ...s, sector: SECTOR_MAP[s.code] || null });
+    }
   }
+  results.sort((a, b) => {
+    const ac = a.code === q ? 0 : a.code.startsWith(q) ? 1 : 2;
+    const bc = b.code === q ? 0 : b.code.startsWith(q) ? 1 : 2;
+    return ac - bc;
+  });
+  res.json({ results });
 });
 
 // ── /api/news/home — 홈 화면용 시장 뉴스 (코드 불필요) ────────────
