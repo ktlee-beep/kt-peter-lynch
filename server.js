@@ -79,17 +79,11 @@ app.use(express.json());
 app.use(cookieParser());
 
 // ── 정적 파일 서빙 ───────────────────────────────────────────────
-// React Vite 빌드 결과물 (public/dist) — 프로덕션 우선
+// React Vite 빌드 결과물 (public/dist) 우선, public/ 에서 login.html 등 보완
 const distDir = path.join(__dirname, 'public', 'dist');
 const legacyDir = path.join(__dirname, 'public');
-import { existsSync } from 'fs';
-if (existsSync(distDir)) {
-  app.use(express.static(distDir));
-} else {
-  // Vite 빌드 전 레거시 폴백
-  app.use(express.static(legacyDir));
-  app.get('/login', (_req, res) => res.sendFile(path.join(legacyDir, 'login.html')));
-}
+app.use(express.static(distDir));   // Vite 빌드 출력
+app.use(express.static(legacyDir)); // login.html, manifest.json 등
 
 // ── 인메모리 캐시 (무버스, 매크로) ─────────────────────────────
 const cache = {
@@ -1663,10 +1657,7 @@ app.delete('/api/alert-settings/:code', authMiddleware, async (req, res) => {
 
 // ── React SPA 폴백 (모든 미매칭 GET → index.html) ────────────────
 app.get('*', (_req, res) => {
-  const indexPath = existsSync(distDir)
-    ? path.join(distDir, 'index.html')
-    : path.join(legacyDir, 'index.html');
-  res.sendFile(indexPath);
+  res.sendFile(path.join(distDir, 'index.html'));
 });
 
 // ── 서버 시작 ─────────────────────────────────────────────────────
