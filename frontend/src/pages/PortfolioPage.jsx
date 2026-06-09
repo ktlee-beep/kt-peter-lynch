@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { authHeaders } from '../contexts/AuthContext';
 import PortfolioSummary from '../components/portfolio/PortfolioSummary';
 import PortfolioStats from '../components/portfolio/PortfolioStats';
@@ -10,6 +11,7 @@ import TradeHistory from '../components/portfolio/TradeHistory';
 const TABS = ['보유', '통계', '공시', '매매 입력', '매매일지'];
 
 export default function PortfolioPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [tab, setTab] = useState('보유');
   const [holdings, setHoldings] = useState(null);
   const [watchlist, setWatchlist] = useState([]);
@@ -17,26 +19,71 @@ export default function PortfolioPage() {
   const [loadingHoldings, setLoadingHoldings] = useState(false);
   const [portfolioRevision, setPortfolioRevision] = useState(0);
   const [priceMap, setPriceMap] = useState({});
+  const [initialStock, setInitialStock] = useState(null);
+  const loadingRef = useRef(false);
+
+  // Handle ?action=trade&code=XXX&name=YYY from StockHeader "+" button
+  useEffect(() => {
+    const action = searchParams.get('action');
+    const code = searchParams.get('code');
+    const name = searchParams.get('name');
+    if (action === 'trade' && code) {
+      setTab('매매 입력');
+      setInitialStock({ code, name: name || code });
+      setSearchParams({}, { replace: true });
+    }
+  }, []);
 
   const loadHoldings = useCallback(async () => {
-    if (loadingHoldings) return;
+    if (loadingRef.current) return;
+    loadingRef.current = true;
     setLoadingHoldings(true);
     try {
       const r = await fetch('/api/portfolio/holdings', { headers: authHeaders() });
       const d = await r.json();
       const h = d.holdings || [];
       setHoldings(h);
-      setSummary({
-        investedAmount: h.reduce((s, x) => s + x.avgPrice * x.shares, 0),
-        currentValue: null,
-        totalReturn: null,
-        totalReturnPct: null,
-        stockCount: h.length,
-      });
+      const investedAmount = h.reduce((s, x) => s + x.avgPrice * x.shares, 0);
+      setSummary({ investedAmount, currentValue: null, totalReturn: null, totalReturnPct: null, stockCount: h.length });
       setPriceMap({});
+
+      if (h.length > 0) {
+        const results = await Promise.all(
+          h.map(item =>
+            fetch(`/api/naver-stock/${item.code}`, { headers: authHeaders() })
+              .then(r => r.json())
+              .then(p => ({ code: item.code, data: p }))
+              .catch(() => ({ code: item.code, data: null }))
+          )
+        );
+        const map = {};
+        results.forEach(({ code, data }) => {
+          if (!data?.price) return;
+          const holding = h.find(x => x.code === code);
+          if (!holding) return;
+          map[code] = {
+            currentPrice: data.price,
+            currentValue: data.price * holding.shares,
+            pnl: (data.price - holding.avgPrice) * holding.shares,
+            pnlPct: ((data.price / holding.avgPrice) - 1) * 100,
+          };
+        });
+        setPriceMap(map);
+
+        const totalCurrentValue = h.reduce((s, x) => s + (map[x.code]?.currentValue ?? x.avgPrice * x.shares), 0);
+        const totalReturn = totalCurrentValue - investedAmount;
+        setSummary({
+          investedAmount,
+          currentValue: totalCurrentValue,
+          totalReturn,
+          totalReturnPct: investedAmount > 0 ? (totalReturn / investedAmount) * 100 : 0,
+          stockCount: h.length,
+        });
+      }
     } catch {}
     setLoadingHoldings(false);
-  }, [loadingHoldings]);
+    loadingRef.current = false;
+  }, []);
 
   useEffect(() => {
     loadHoldings();
@@ -46,31 +93,11 @@ export default function PortfolioPage() {
       .catch(() => {});
   }, []);
 
-  const handlePriceLoad = useCallback((code, { currentPrice, pnl, pnlPct, currentValue }) => {
-    setPriceMap(prev => {
-      const next = { ...prev, [code]: { currentPrice, pnl, pnlPct, currentValue } };
-      const codes = Object.keys(next);
-      const totalCurrentValue = codes.reduce((s, c) => {
-        const h = holdings?.find(x => x.code === c);
-        return s + (next[c].currentValue || (h ? h.avgPrice * h.shares : 0));
-      }, 0);
-      const investedAmount = (holdings || []).reduce((s, x) => s + x.avgPrice * x.shares, 0);
-      const totalReturn = totalCurrentValue - investedAmount;
-      const totalReturnPct = investedAmount > 0 ? (totalReturn / investedAmount) * 100 : 0;
-      setSummary(prev => ({
-        ...prev,
-        currentValue: totalCurrentValue,
-        totalReturn,
-        totalReturnPct,
-      }));
-      return next;
-    });
-  }, [holdings]);
-
   const handleTradeAdded = () => {
     setPortfolioRevision(n => n + 1);
     setHoldings(null);
     setPriceMap({});
+    loadingRef.current = false;
     loadHoldings();
     setTab('보유');
   };
@@ -79,14 +106,15 @@ export default function PortfolioPage() {
     <div className="flex-1 flex flex-col overflow-hidden">
       <div className="px-4 pt-5 pb-3 bg-surface-950">
         <h1 className="text-xl font-bold text-white">포트폴리오</h1>
+        <p className="text-xs text-slate-500 mt-0.5">보유종목 · 매매일지 · 공시</p>
       </div>
 
-      <div className="flex border-b border-slate-800">
+      <div className="flex border-b border-slate-800 bg-surface-950 overflow-x-auto scrollbar-hide">
         {TABS.map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`flex-1 py-2.5 text-sm font-medium transition-colors ${
+            className={`flex-shrink-0 flex-1 py-2.5 text-xs font-medium transition-colors whitespace-nowrap px-1 ${
               tab === t
                 ? 'text-brand-400 border-b-2 border-brand-400'
                 : 'text-slate-500 hover:text-slate-300'
@@ -102,7 +130,7 @@ export default function PortfolioPage() {
           <>
             <PortfolioSummary summary={summary} />
             <div className="mt-2">
-              <HoldingsList holdings={holdings} onPriceLoad={handlePriceLoad} />
+              <HoldingsList holdings={holdings} priceMap={priceMap} />
             </div>
           </>
         )}
@@ -119,7 +147,7 @@ export default function PortfolioPage() {
 
         {tab === '매매 입력' && (
           <div className="pt-4">
-            <TradeForm onTradeAdded={handleTradeAdded} />
+            <TradeForm onTradeAdded={handleTradeAdded} initialStock={initialStock} />
           </div>
         )}
 

@@ -1,11 +1,11 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { authHeaders } from '../../contexts/AuthContext';
 import StockSearchBar from '../discover/StockSearchBar';
 
 const today = () => new Date().toISOString().slice(0, 10);
 
-export default function TradeForm({ onTradeAdded }) {
-  const [stock, setStock] = useState(null);
+export default function TradeForm({ onTradeAdded, initialStock }) {
+  const [stock, setStock] = useState(initialStock || null);
   const [tradeType, setTradeType] = useState('buy');
   const [shares, setShares] = useState('');
   const [price, setPrice] = useState('');
@@ -13,8 +13,23 @@ export default function TradeForm({ onTradeAdded }) {
   const [memo, setMemo] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [fetchingPrice, setFetchingPrice] = useState(false);
 
-  const handleSelectStock = (s) => setStock(s);
+  useEffect(() => {
+    if (initialStock) setStock(initialStock);
+  }, [initialStock?.code]);
+
+  const handleSelectStock = (s) => {
+    setStock(s);
+    setPrice('');
+    // Auto-fill current price
+    setFetchingPrice(true);
+    fetch(`/api/naver-stock/${s.code}`, { headers: authHeaders() })
+      .then(r => r.json())
+      .then(d => { if (d.price) setPrice(String(d.price)); })
+      .catch(() => {})
+      .finally(() => setFetchingPrice(false));
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -50,6 +65,10 @@ export default function TradeForm({ onTradeAdded }) {
     setSubmitting(false);
   };
 
+  const totalAmount = price && shares && parseInt(price) > 0 && parseInt(shares) > 0
+    ? parseInt(price.replace(/,/g, '')) * parseInt(shares)
+    : null;
+
   return (
     <form onSubmit={handleSubmit} className="px-4 space-y-3 pb-2">
       <div className="flex gap-1 bg-surface-900 rounded-xl p-1">
@@ -76,7 +95,7 @@ export default function TradeForm({ onTradeAdded }) {
         <div className="flex items-center gap-2 px-3 py-2 bg-brand-500/10 border border-brand-500/20 rounded-xl">
           <span className="text-sm font-medium text-white">{stock.name}</span>
           <span className="text-xs text-slate-500 font-mono">{stock.code}</span>
-          <button type="button" onClick={() => setStock(null)} className="ml-auto text-slate-500 hover:text-slate-300">
+          <button type="button" onClick={() => { setStock(null); setPrice(''); }} className="ml-auto text-slate-500 hover:text-slate-300">
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
             </svg>
@@ -96,7 +115,12 @@ export default function TradeForm({ onTradeAdded }) {
           />
         </div>
         <div className="bg-surface-900 rounded-xl px-3 py-2">
-          <label className="text-[10px] text-slate-500">단가 (원)</label>
+          <div className="flex items-center justify-between">
+            <label className="text-[10px] text-slate-500">단가 (원)</label>
+            {fetchingPrice && (
+              <span className="text-[9px] text-brand-400 animate-pulse">시세 조회중...</span>
+            )}
+          </div>
           <input
             type="text" inputMode="numeric"
             value={price}
@@ -128,12 +152,10 @@ export default function TradeForm({ onTradeAdded }) {
         />
       </div>
 
-      {price && shares && parseInt(price) > 0 && parseInt(shares) > 0 && (
-        <div className="text-xs text-slate-400 px-1">
-          {tradeType === 'buy' ? '매수' : '매도'} 금액:&nbsp;
-          <span className="text-white font-medium">
-            {(parseInt(price.replace(/,/g,'')) * parseInt(shares)).toLocaleString('ko-KR')}원
-          </span>
+      {totalAmount != null && (
+        <div className="flex items-center justify-between text-xs px-1">
+          <span className="text-slate-500">{tradeType === 'buy' ? '매수' : '매도'} 금액</span>
+          <span className="text-white font-semibold">{totalAmount.toLocaleString('ko-KR')}원</span>
         </div>
       )}
 
