@@ -1,0 +1,22 @@
+{
+  "name": "KT Trading — 종목분석툴",
+  "short_name": "KT Trading",
+  "description": "나만의 장기 가치투자 종목분석툴",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#020617",
+  "theme_color": "#020617",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

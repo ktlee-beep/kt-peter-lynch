@@ -71,6 +71,49 @@ CREATE TABLE IF NOT EXISTS kt_fundamentals_cache (
   updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- ── 관심종목 ──────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS kt_watchlist (
+  id         BIGSERIAL PRIMARY KEY,
+  user_email TEXT NOT NULL,
+  code       TEXT NOT NULL,
+  name       TEXT NOT NULL,
+  market     TEXT NOT NULL DEFAULT '',
+  added_at   TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (user_email, code)
+);
+
+-- ── 매매 거래 이력 (포트폴리오 원장) ────────────────────────────
+CREATE TABLE IF NOT EXISTS kt_trades (
+  id          BIGSERIAL PRIMARY KEY,
+  user_email  TEXT NOT NULL,
+  code        TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  market      TEXT NOT NULL DEFAULT '',
+  trade_type  TEXT NOT NULL CHECK (trade_type IN ('buy', 'sell')),
+  shares      INTEGER NOT NULL CHECK (shares > 0),
+  price       INTEGER NOT NULL CHECK (price > 0),
+  trade_date  DATE NOT NULL,
+  memo        TEXT DEFAULT '',
+  created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS kt_trades_user_code ON kt_trades (user_email, code);
+
+-- ── 투자 Thesis ──────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS kt_thesis (
+  id           BIGSERIAL PRIMARY KEY,
+  user_email   TEXT NOT NULL,
+  code         TEXT NOT NULL,
+  name         TEXT NOT NULL DEFAULT '',
+  story        TEXT DEFAULT '',
+  growth       TEXT DEFAULT '',
+  valuation    TEXT DEFAULT '',
+  exit_plan    TEXT DEFAULT '',
+  created_at   TIMESTAMPTZ DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (user_email, code)
+);
+CREATE INDEX IF NOT EXISTS kt_thesis_user ON kt_thesis (user_email);
+
 -- ── 앱 사용자 (마스터가 직접 발급) ───────────────────────────────
 CREATE TABLE IF NOT EXISTS app_users (
   email         TEXT PRIMARY KEY,
@@ -168,3 +211,31 @@ INSERT INTO kt_stocks (code, name, market, sector, yahoo_suffix) VALUES
   ('035900','JYP엔터테인먼트','KOSDAQ','엔터','KQ'),
   ('122870','와이지엔터테인먼트','KOSDAQ','엔터','KQ')
 ON CONFLICT (code) DO NOTHING;
+
+-- ── 알림 설정 (F056) ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS alert_settings (
+  id            uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  user_email    text NOT NULL,
+  code          text NOT NULL,
+  target_price  numeric,
+  stop_loss     numeric,
+  rsi_high      integer,
+  rsi_low       integer,
+  is_active     boolean NOT NULL DEFAULT true,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  updated_at    timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT alert_settings_user_code_key UNIQUE (user_email, code)
+);
+
+CREATE OR REPLACE FUNCTION update_alert_settings_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS alert_settings_updated_at_trigger ON alert_settings;
+CREATE TRIGGER alert_settings_updated_at_trigger
+  BEFORE UPDATE ON alert_settings
+  FOR EACH ROW EXECUTE FUNCTION update_alert_settings_updated_at();

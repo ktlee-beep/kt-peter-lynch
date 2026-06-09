@@ -80,6 +80,86 @@ export async function fetchNaverFundamentals(code) {
   } catch { return null; }
 }
 
+export async function fetchDartMultiYear(corpCode, dartKey) {
+  const curYear = new Date().getFullYear();
+  const years = [curYear - 1, curYear - 2, curYear - 3, curYear - 4, curYear - 5];
+  const toNum = (s) => {
+    const n = parseInt((s || '0').replace(/,/g, ''), 10);
+    return isNaN(n) ? null : n;
+  };
+
+  async function fetchYear(year) {
+    try {
+      const base = `https://opendart.fss.or.kr/api`;
+      const params = `crtfc_key=${dartKey}&corp_code=${corpCode}&bsns_year=${year}&reprt_code=11011&fs_div=CFS`;
+      const [isRes, bsRes] = await Promise.all([
+        fetch(`${base}/fnlttSinglAcnt.json?${params}`),
+        fetch(`${base}/fnlttSinglAcnt.json?${params.replace('fs_div=CFS', 'fs_div=OFS')}`).catch(() => null),
+      ]);
+      const isData = isRes.ok ? await isRes.json() : null;
+      const IS = isData?.status === '000' ? (isData.list || []).filter(i => i.sj_div === 'IS') : [];
+      const BS = (() => {
+        return []; // BS from IS-only call may not have BS items; handle below
+      })();
+
+      // Re-fetch BS (재무상태표) from CFS
+      const bsFull = await fetch(`${base}/fnlttSinglAcnt.json?crtfc_key=${dartKey}&corp_code=${corpCode}&bsns_year=${year}&reprt_code=11011&fs_div=CFS`);
+      const bsJson = bsFull.ok ? await bsFull.json() : null;
+      const bsList = bsJson?.status === '000' ? (bsJson.list || []) : [];
+      const BSrows = bsList.filter(i => i.sj_div === 'BS');
+      const ISrows = bsList.filter(i => i.sj_div === 'IS');
+
+      const find = (rows, kws) => {
+        for (const kw of kws) {
+          const item = rows.find(i => i.account_nm?.includes(kw));
+          if (item) return { cur: toNum(item.thstrm_amount), prev: toNum(item.frmtrm_amount) };
+        }
+        return null;
+      };
+
+      const rev  = find(ISrows, ['매출액', '수익(매출액)', '영업수익', '매출']);
+      const op   = find(ISrows, ['영업이익', '영업손익']);
+      const net  = find(ISrows, ['당기순이익', '분기순이익']);
+      const eq   = find(BSrows, ['자본총계', '총자본']);
+      const debt = find(BSrows, ['부채총계', '총부채']);
+      const ca   = find(BSrows, ['유동자산']);
+      const cl   = find(BSrows, ['유동부채']);
+
+      const revAmt = rev?.cur ?? null;
+      const opAmt  = op?.cur  ?? null;
+      const netAmt = net?.cur ?? null;
+      const equityAmt = eq?.cur ?? null;
+      const debtAmt   = debt?.cur ?? null;
+      const caAmt = ca?.cur ?? null;
+      const clAmt = cl?.cur ?? null;
+
+      const toEok = (v) => v !== null ? Math.round(v / 1e8) : null;
+      const roe = (equityAmt && netAmt && equityAmt > 0) ? (netAmt / equityAmt) * 100 : null;
+      const debtRatio = (equityAmt && debtAmt && equityAmt > 0) ? (debtAmt / equityAmt) * 100 : null;
+      const currentRatio = (caAmt && clAmt && clAmt > 0) ? (caAmt / clAmt) * 100 : null;
+      const opMargin = (revAmt && opAmt && revAmt > 0) ? (opAmt / revAmt) * 100 : null;
+
+      if (revAmt === null || revAmt === 0) return null;
+      return {
+        year,
+        revenue: toEok(revAmt),
+        operatingProfit: toEok(opAmt),
+        netIncome: toEok(netAmt),
+        equity: toEok(equityAmt),
+        debt: toEok(debtAmt),
+        roe: roe !== null ? parseFloat(roe.toFixed(2)) : null,
+        debtRatio: debtRatio !== null ? parseFloat(debtRatio.toFixed(1)) : null,
+        currentRatio: currentRatio !== null ? parseFloat(currentRatio.toFixed(1)) : null,
+        opMargin: opMargin !== null ? parseFloat(opMargin.toFixed(2)) : null,
+      };
+    } catch { return null; }
+  }
+
+  const results = await Promise.all(years.map(fetchYear));
+  // Return in chronological order, nulls where no data
+  return years.map((yr, i) => results[i] || { year: yr, revenue: null, operatingProfit: null, netIncome: null, equity: null, debt: null, roe: null, debtRatio: null, currentRatio: null, opMargin: null }).reverse();
+}
+
 export async function fetchDartFinancials(corpCode, dartKey) {
   const curYear = new Date().getFullYear();
   for (const bsnsYear of [curYear - 1, curYear - 2]) {
@@ -152,6 +232,31 @@ export async function naverStock(code) {
     return { code, source: 'Naver', market, name, price, previousClose: price - change,
       change, changeRate, volume, ts: Date.now() };
   } catch { return null; }
+}
+
+export async function fetchNaverInvestor(code) {
+  const H = { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://m.stock.naver.com/' };
+  // Try multiple Naver investor API endpoints
+  const urls = [
+    `https://m.stock.naver.com/api/stock/${code}/investor`,
+    `https://m.stock.naver.com/domestic/stock/${code}/investorTradingTrends`,
+  ];
+  for (const url of urls) {
+    try {
+      const r = await fetch(url, { headers: H });
+      if (!r.ok) continue;
+      const raw = await r.json();
+      const arr = Array.isArray(raw) ? raw : (raw.data || raw.items || raw.result || null);
+      if (!Array.isArray(arr) || !arr.length) continue;
+      return arr.slice(0, 25).map(d => ({
+        date: d.stckBsopDt || d.date || '',
+        foreign: parseInt(d.frgn_netbuy ?? d.foreignNetBuy ?? d.frgn ?? 0),
+        inst:    parseInt(d.inst_netbuy  ?? d.instNetBuy  ?? d.inst  ?? 0),
+        indiv:   parseInt(d.priv_netbuy  ?? d.privNetBuy  ?? d.indiv ?? 0),
+      })).filter(d => d.date);
+    } catch { /* try next URL */ }
+  }
+  return null;
 }
 
 export async function naverHistory(code) {

@@ -260,6 +260,124 @@ export async function batchSaveAnalysis(rows) {
   await sb.from('kt_daily_analysis').upsert(rows, { onConflict: 'code,analysis_date' });
 }
 
+// 관심종목 조회
+export async function getWatchlist(email) {
+  const sb = getSupabase();
+  const { data } = await sb
+    .from('kt_watchlist')
+    .select('code, name, market, added_at')
+    .eq('user_email', email)
+    .order('added_at', { ascending: false });
+  return data || [];
+}
+
+// 관심종목 추가 (최대 30개)
+export async function addToWatchlist(email, code, name, market) {
+  const sb = getSupabase();
+  const { count } = await sb
+    .from('kt_watchlist')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_email', email);
+  if (count >= 30) throw new Error('최대 30개까지 추가할 수 있습니다');
+  const { data, error } = await sb
+    .from('kt_watchlist')
+    .upsert({ user_email: email, code, name, market }, { onConflict: 'user_email,code' })
+    .select('code, name, market, added_at')
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+// 관심종목 삭제
+export async function removeFromWatchlist(email, code) {
+  const sb = getSupabase();
+  await sb.from('kt_watchlist').delete().eq('user_email', email).eq('code', code);
+}
+
+// 거래 이력 조회 (전체 또는 특정 종목)
+export async function getTrades(email, code = null) {
+  const sb = getSupabase();
+  let q = sb.from('kt_trades').select('id, code, name, market, trade_type, shares, price, trade_date, memo, created_at')
+    .eq('user_email', email).order('trade_date', { ascending: false }).order('created_at', { ascending: false });
+  if (code) q = q.eq('code', code);
+  const { data } = await q;
+  return data || [];
+}
+
+// 보유종목 계산 (거래 이력 집계)
+export async function getHoldings(email) {
+  const trades = await getTrades(email);
+  const map = {};
+  for (const t of trades) {
+    if (!map[t.code]) map[t.code] = { code: t.code, name: t.name, market: t.market, shares: 0, totalBuyShares: 0, totalBuyCost: 0 };
+    const m = map[t.code];
+    if (t.trade_type === 'buy') {
+      m.shares += t.shares;
+      m.totalBuyShares += t.shares;
+      m.totalBuyCost += t.shares * t.price;
+    } else {
+      m.shares -= t.shares;
+    }
+  }
+  return Object.values(map)
+    .filter(h => h.shares > 0)
+    .map(h => ({
+      code: h.code, name: h.name, market: h.market,
+      shares: h.shares,
+      avgPrice: h.totalBuyShares > 0 ? Math.round(h.totalBuyCost / h.totalBuyShares) : 0,
+    }));
+}
+
+// 거래 추가
+export async function addTrade(email, { code, name, market, trade_type, shares, price, trade_date, memo }) {
+  const sb = getSupabase();
+  const { data, error } = await sb.from('kt_trades').insert({
+    user_email: email, code, name, market: market || '', trade_type,
+    shares: parseInt(shares), price: parseInt(price),
+    trade_date, memo: memo || '',
+  }).select('id, code, name, market, trade_type, shares, price, trade_date, memo, created_at').single();
+  if (error) throw error;
+  return data;
+}
+
+// 거래 삭제 (당일 취소)
+export async function deleteTrade(email, id) {
+  const sb = getSupabase();
+  const { error } = await sb.from('kt_trades').delete().eq('id', id).eq('user_email', email);
+  if (error) throw error;
+}
+
+// ── Thesis ────────────────────────────────────────────────────────
+export async function getThesis(email, code) {
+  const sb = getSupabase();
+  const { data } = await sb.from('kt_thesis')
+    .select('*').eq('user_email', email).eq('code', code).single();
+  return data || null;
+}
+
+export async function upsertThesis(email, { code, name, story, growth, valuation, exit_plan }) {
+  const sb = getSupabase();
+  const { data, error } = await sb.from('kt_thesis').upsert({
+    user_email: email, code, name: name || '',
+    story: story || '', growth: growth || '',
+    valuation: valuation || '', exit_plan: exit_plan || '',
+    updated_at: new Date().toISOString(),
+  }, { onConflict: 'user_email,code' })
+    .select('*').single();
+  if (error) throw error;
+  return data;
+}
+
+export async function listTheses(email) {
+  const sb = getSupabase();
+  const { data, error } = await sb.from('kt_thesis')
+    .select('code, name, updated_at')
+    .eq('user_email', email)
+    .order('updated_at', { ascending: false });
+  if (error) throw error;
+  return data || [];
+}
+
 // 재무 캐시 조회
 export async function getFundamentalsCache(code) {
   const sb = getSupabase();

@@ -4,7 +4,7 @@ services:
     env: node
     region: singapore
     plan: free
-    buildCommand: npm install
+    buildCommand: npm install && cd frontend && npm install && npm run build && cd ..
     startCommand: npm start
     healthCheckPath: /healthz
     envVars:
@@ -28,7 +28,9 @@ services:
         sync: false
       - key: DART_API_KEY
         sync: false
+      - key: GEMINI_API_KEY
+        sync: false
       - key: FRONTEND_ORIGIN
-        value: https://kt-backend.dlrudxo002.workers.dev
+        value: https://kt-peter-lynch.onrender.com
       - key: SCAN_SECRET
         sync: false

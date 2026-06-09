@@ -3,7 +3,7 @@
 // 6시간마다 — 매크로 갱신
 import cron from 'node-cron';
 import { calcRSI, calcMA, calcBollinger, calcMACD } from './analysis.js';
-import { getFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks } from './db.js';
+import { getFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase } from './db.js';
 import { KS_UNIVERSE, KQ_UNIVERSE } from './data.js';
 
 // ── 스캔 유니버스 (DB에 종목이 없으면 하드코딩된 유니버스 사용) ─
@@ -196,11 +196,63 @@ async function runMacroUpdate() {
   console.log('[Cron] 매크로 갱신 완료:', fetched);
 }
 
+// ── 알림 설정 조건 평가 ──────────────────────────────────────────
+async function evaluateAlertSettings() {
+  try {
+    const { data: settings } = await getSupabase()
+      .from('alert_settings')
+      .select('user_email, code, target_price, stop_loss, rsi_high, rsi_low')
+      .eq('is_active', true)
+      .limit(5000);
+    if (!settings?.length) return;
+
+    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    const codes = [...new Set(settings.map(s => s.code))];
+    const { data: recentAnalyses } = await getSupabase()
+      .from('kt_daily_analysis')
+      .select('code, rsi, close_price, analysis_date')
+      .in('code', codes)
+      .gte('analysis_date', yesterday)
+      .order('analysis_date', { ascending: false });
+
+    // code별 최신 분석만 사용 (전일 폴백 포함)
+    const analysisMap = {};
+    for (const a of recentAnalyses || []) {
+      if (!analysisMap[a.code]) analysisMap[a.code] = a;
+    }
+
+    const triggered = [];
+    for (const s of settings) {
+      const a = analysisMap[s.code];
+      if (!a) continue;
+      const rsiHigh = s.rsi_high ?? 75;
+      const rsiLow  = s.rsi_low  ?? 30;
+      if (a.rsi != null && a.rsi > rsiHigh)
+        triggered.push({ user_email: s.user_email, code: s.code, type: 'rsi_high', value: a.rsi });
+      if (a.rsi != null && a.rsi < rsiLow)
+        triggered.push({ user_email: s.user_email, code: s.code, type: 'rsi_low', value: a.rsi });
+      if (s.target_price != null && a.close_price != null && a.close_price >= s.target_price)
+        triggered.push({ user_email: s.user_email, code: s.code, type: 'target_hit', value: a.close_price });
+      if (s.stop_loss != null && a.close_price != null && a.close_price <= s.stop_loss)
+        triggered.push({ user_email: s.user_email, code: s.code, type: 'stop_loss_hit', value: a.close_price });
+    }
+
+    if (triggered.length) {
+      console.log(`[Cron] 알림 조건 충족 ${triggered.length}건:`, triggered.map(t => `${t.code}:${t.type}`).join(', '));
+    } else {
+      console.log('[Cron] 알림 조건 충족 없음');
+    }
+  } catch (e) {
+    console.error('[Cron] 알림 평가 오류:', e.message);
+  }
+}
+
 // ── cron 등록 ────────────────────────────────────────────────────
 export function startCron() {
   // 매 영업일 20:00 KST = UTC 11:00
-  cron.schedule('0 11 * * 1-5', () => {
-    runDailyScan().catch(e => console.error('[Cron] 스캔 오류:', e));
+  cron.schedule('0 11 * * 1-5', async () => {
+    await runDailyScan().catch(e => console.error('[Cron] 스캔 오류:', e));
+    await evaluateAlertSettings().catch(e => console.error('[Cron] 알림 평가 오류:', e));
   }, { timezone: 'UTC' });
 
   // 6시간마다 매크로 갱신

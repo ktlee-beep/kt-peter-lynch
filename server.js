@@ -12,6 +12,7 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 import { startCron } from './cron.js';
+import { SECTOR_MAP, SECTOR_NAMES } from './sector_map.js';
 import {
   calcMA, calcRSI, calcMACD, calcBollinger, calcATR, calcMDD,
   findKeyLevels, detectFreshSignals, combinedSignal, calcScore,
@@ -23,14 +24,14 @@ import {
   detectLeverageETF, calcVolumePriceDivergence, runBacktestMulti,
 } from './analysis.js';
 import {
-  CORP_MAP, fetchYahooSummary, fetchDartFinancials, fetchNaverFundamentals,
+  CORP_MAP, fetchYahooSummary, fetchDartFinancials, fetchDartMultiYear, fetchNaverFundamentals, fetchNaverInvestor,
   krxStock, naverStock, naverHistory, yahooStock,
   krxHistory, yahooHistory, isValidYahooResult,
   fetchDartDisclosures, fetchYahooNews,
   KRX_INDICES, YAHOO_SYMBOLS, fetchIndex, fetchYahooSymbol, fetchIndexOHLCV,
   KS_UNIVERSE, KQ_UNIVERSE,
 } from './data.js';
-import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMacroHistory, saveMacroSnapshot, validateAppUser, getAppUsers, createAppUser, deleteAppUser, updateAppUserPassword, getSupabase } from './db.js';
+import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMacroHistory, saveMacroSnapshot, validateAppUser, getAppUsers, createAppUser, deleteAppUser, updateAppUserPassword, getSupabase, getWatchlist, addToWatchlist, removeFromWatchlist, getTrades, getHoldings, addTrade, deleteTrade, getThesis, upsertThesis, listTheses } from './db.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -77,9 +78,18 @@ app.use(cors({
 app.use(express.json());
 app.use(cookieParser());
 
-// ── 정적 파일 서빙 (index.html, login.html) ──────────────────────
-app.use(express.static(path.join(__dirname, 'public')));
-app.get('/login', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'login.html')));
+// ── 정적 파일 서빙 ───────────────────────────────────────────────
+// React Vite 빌드 결과물 (public/dist) — 프로덕션 우선
+const distDir = path.join(__dirname, 'public', 'dist');
+const legacyDir = path.join(__dirname, 'public');
+import { existsSync } from 'fs';
+if (existsSync(distDir)) {
+  app.use(express.static(distDir));
+} else {
+  // Vite 빌드 전 레거시 폴백
+  app.use(express.static(legacyDir));
+  app.get('/login', (_req, res) => res.sendFile(path.join(legacyDir, 'login.html')));
+}
 
 // ── 인메모리 캐시 (무버스, 매크로) ─────────────────────────────
 const cache = {
@@ -154,6 +164,18 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ ok: true });
 });
 
+app.get('/api/auth/me', (req, res) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    res.json({ user: { email: decoded.email, role: decoded.role } });
+  } catch {
+    res.status(401).json({ error: 'Token expired or invalid' });
+  }
+});
+
 // ── 어드민 미들웨어 ───────────────────────────────────────────────
 function adminMiddleware(req, res, next) {
   if (req.user?.role !== 'master') return res.status(403).json({ error: '마스터 계정만 접근 가능합니다' });
@@ -186,6 +208,43 @@ app.post('/api/migrate', async (req, res) => {
     res.json({ ok: true, count: results.length, results });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// ── /api/admin/init-tables (마스터 JWT + Supabase Management API) ──
+// 일회성: alert_settings 테이블 미존재 시 자동 생성
+app.post('/api/admin/init-tables', authMiddleware, adminMiddleware, async (req, res) => {
+  const projectRef = new URL(process.env.SUPABASE_URL || 'https://x.supabase.co').hostname.split('.')[0];
+  const SQL = `
+CREATE TABLE IF NOT EXISTS alert_settings (
+  id            uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  user_email    text NOT NULL,
+  code          text NOT NULL,
+  target_price  numeric,
+  stop_loss     numeric,
+  rsi_high      integer,
+  rsi_low       integer,
+  is_active     boolean NOT NULL DEFAULT true,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  updated_at    timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT alert_settings_user_code_key UNIQUE (user_email, code)
+);`;
+  try {
+    // Supabase Management API (personal access token 필요)
+    const accessToken = process.env.SUPABASE_ACCESS_TOKEN;
+    if (accessToken) {
+      const r = await fetch(`https://api.supabase.com/v1/projects/${projectRef}/database/query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
+        body: JSON.stringify({ query: SQL }),
+      });
+      if (r.ok) return res.json({ ok: true, method: 'management_api', result: await r.json() });
+      return res.status(r.status).json({ error: 'Management API 실패', status: r.status, sql: SQL });
+    }
+    // token 없으면 SQL 반환 (Supabase SQL Editor에서 수동 실행)
+    return res.json({ ok: false, message: 'SUPABASE_ACCESS_TOKEN 미설정 — 아래 SQL을 Supabase SQL Editor에서 실행하세요', sql: SQL });
+  } catch (e) {
+    res.status(500).json({ error: e.message, sql: SQL });
   }
 });
 
@@ -468,6 +527,48 @@ app.get('/api/naver-stock/:code', async (req, res) => {
     } catch (e2) {
       return res.status(502).json({ error: e2.message });
     }
+  }
+});
+
+// ── /api/stock/search — 종목명·코드 검색 ─────────────────────────
+app.get('/api/stock/search', async (req, res) => {
+  const q = (req.query.q || '').trim();
+  if (!q) return res.json({ results: [] });
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
+  try {
+    const url = `https://ac.stock.naver.com/ac?q=${encodeURIComponent(q)}&target=stock,index,etf,etn,elw,fund,coin`;
+    const r = await fetch(url, { headers: { 'User-Agent': UA, 'Referer': 'https://finance.naver.com/' } });
+    if (!r.ok) throw new Error(`naver HTTP ${r.status}`);
+    const d = await r.json();
+    const results = (d.items?.[0] || []).slice(0, 15).map(item => ({
+      code:   item.code,
+      name:   item.name,
+      market: item.typeCode === '1' ? 'KOSPI' : item.typeCode === '2' ? 'KOSDAQ' : item.typeCode,
+    }));
+    res.json({ results });
+  } catch (e) {
+    res.status(502).json({ error: e.message, results: [] });
+  }
+});
+
+// ── /api/news/home — 홈 화면용 시장 뉴스 (코드 불필요) ────────────
+app.get('/api/news/home', async (req, res) => {
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
+  try {
+    // 코스피 지수 기반 시장 뉴스 (^KS11 Yahoo 뉴스)
+    const url = 'https://query1.finance.yahoo.com/v1/finance/search?q=코스피&newsCount=10&enableFuzzyQuery=false&lang=ko-KR';
+    const r = await fetch(url, { headers: { 'User-Agent': UA } });
+    if (!r.ok) throw new Error(`Yahoo ${r.status}`);
+    const data = await r.json();
+    const news = (data.news || []).slice(0, 8).map(n => ({
+      title:     n.title,
+      publisher: n.publisher,
+      date:      new Date(n.providerPublishTime * 1000).toISOString().slice(0, 10),
+      url:       n.link,
+    }));
+    res.json({ news, serverTime: Date.now() });
+  } catch (e) {
+    res.status(502).json({ error: e.message, news: [] });
   }
 });
 
@@ -763,7 +864,7 @@ app.get('/api/history/:code', async (req, res) => {
 });
 
 // ── /api/admin/users (마스터 전용 사용자 관리) ───────────────────
-app.get('/api/admin/users', adminMiddleware, async (req, res) => {
+app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) => {
   try {
     const users = await getAppUsers();
     res.json({ users });
@@ -772,7 +873,7 @@ app.get('/api/admin/users', adminMiddleware, async (req, res) => {
   }
 });
 
-app.post('/api/admin/users', adminMiddleware, async (req, res) => {
+app.post('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) => {
   const { email, password, role = 'user', memo = '' } = req.body || {};
   if (!email || !password)
     return res.status(400).json({ error: '이메일과 비밀번호 필요' });
@@ -786,7 +887,7 @@ app.post('/api/admin/users', adminMiddleware, async (req, res) => {
   }
 });
 
-app.patch('/api/admin/users/:email', adminMiddleware, async (req, res) => {
+app.patch('/api/admin/users/:email', authMiddleware, adminMiddleware, async (req, res) => {
   const target = decodeURIComponent(req.params.email);
   const { password } = req.body || {};
   if (!password) return res.status(400).json({ error: '비밀번호 필요' });
@@ -800,7 +901,7 @@ app.patch('/api/admin/users/:email', adminMiddleware, async (req, res) => {
   }
 });
 
-app.delete('/api/admin/users/:email', adminMiddleware, async (req, res) => {
+app.delete('/api/admin/users/:email', authMiddleware, adminMiddleware, async (req, res) => {
   const target = decodeURIComponent(req.params.email);
   if (target.toLowerCase() === MASTER_EMAIL.toLowerCase())
     return res.status(400).json({ error: '마스터 계정은 삭제 불가' });
@@ -821,6 +922,751 @@ app.post('/api/scan/trigger', async (req, res) => {
   const { runDailyScan } = await import('./cron.js');
   runDailyScan().catch(console.error);
   res.json({ ok: true, message: '스캔 시작됨 (비동기)' });
+});
+
+// ── /api/screener ──────────────────────────────────────────────────
+const screenerCache = new Map(); // key -> { data, ts }
+const SCREENER_TTL = 60 * 60 * 1000; // 1h
+
+app.get('/api/screener', async (req, res) => {
+  const {
+    per_max, pbr_max, roe_min, debt_max,
+    lynch_min, piotroski_min,
+    sort = 'lynch_score', page = '1', limit = '20',
+    preset,
+  } = req.query;
+
+  // Preset → override filters
+  let filters = { per_max, pbr_max, roe_min, debt_max, lynch_min, piotroski_min };
+  if (preset === 'lynch') {
+    filters = { per_max: '20', pbr_max: '3', roe_min: '10', debt_max: '150', lynch_min: '50' };
+  } else if (preset === 'value') {
+    filters = { per_max: '10', pbr_max: '1', roe_min: '8', debt_max: '200', lynch_min: '0' };
+  } else if (preset === 'growth') {
+    filters = { per_max: '40', pbr_max: '5', roe_min: '15', debt_max: '100', lynch_min: '60' };
+  }
+
+  const cacheKey = JSON.stringify(filters) + sort;
+  const cached = screenerCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < SCREENER_TTL) {
+    const pg = parseInt(page), lm = parseInt(limit);
+    const slice = cached.data.slice((pg - 1) * lm, pg * lm);
+    return res.json({ items: slice, total: cached.data.length, page: pg, fromCache: true });
+  }
+
+  try {
+    const sb = getSupabase();
+    // 최근 7일 내 분석 데이터, 종목별 최신 1개
+    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0,10);
+    const { data: rows, error } = await sb
+      .from('kt_daily_analysis')
+      .select('code, analysis_date, lynch_score, livermore_score, piotroski_score, combined_score, rsi, close_price, change_rate, analysis_json')
+      .gte('analysis_date', cutoff)
+      .order('analysis_date', { ascending: false });
+
+    if (error) throw error;
+    if (!rows?.length) return res.json({ items: [], total: 0, page: 1, message: '스캔 데이터 없음. 스캔이 실행된 후 사용 가능합니다.' });
+
+    // Deduplicate — keep latest per code
+    const seen = new Set();
+    const deduped = [];
+    for (const r of rows) {
+      if (!seen.has(r.code)) { seen.add(r.code); deduped.push(r); }
+    }
+
+    // Parse analysis_json + apply filters
+    const pNum = (v) => { const n = parseFloat(v); return isNaN(n) ? null : n; };
+    const fPerMax   = pNum(filters.per_max);
+    const fPbrMax   = pNum(filters.pbr_max);
+    const fRoeMin   = pNum(filters.roe_min);
+    const fDebtMax  = pNum(filters.debt_max);
+    const fLynchMin = pNum(filters.lynch_min);
+    const fPioMin   = pNum(filters.piotroski_min);
+
+    const results = [];
+    for (const r of deduped) {
+      let fund = {};
+      try { const j = JSON.parse(r.analysis_json || '{}'); fund = j.fundamentals || {}; } catch {}
+
+      const per = pNum(fund.per);
+      const pbr = pNum(fund.pbr);
+      const roe = pNum(fund.roe);
+      const debt = pNum(fund.debtToEquity);
+      const mktCap = pNum(fund.marketCap); // 억 단위
+
+      if (fPerMax  !== null && (per  === null || per  > fPerMax))  continue;
+      if (fPbrMax  !== null && (pbr  === null || pbr  > fPbrMax))  continue;
+      if (fRoeMin  !== null && (roe  === null || roe  < fRoeMin))  continue;
+      if (fDebtMax !== null && debt !== null && debt > fDebtMax)   continue;
+      if (fLynchMin !== null && r.lynch_score < fLynchMin)         continue;
+      if (fPioMin  !== null && r.piotroski_score < fPioMin)        continue;
+
+      // Parse name from analysis_json
+      let name = r.code;
+      try { name = JSON.parse(r.analysis_json || '{}').name || r.code; } catch {}
+
+      results.push({
+        code: r.code, name,
+        per, pbr, roe, debtRatio: debt, marketCap: mktCap,
+        close: r.close_price, changeRate: r.change_rate, rsi: r.rsi,
+        lynchScore: r.lynch_score, piotroskiScore: r.piotroski_score,
+        combinedScore: r.combined_score, analysisDate: r.analysis_date,
+      });
+    }
+
+    // Sort
+    const sortKey = sort === 'lynch_score' ? 'lynchScore'
+      : sort === 'piotroski' ? 'piotroskiScore'
+      : sort === 'per'       ? 'per'
+      : sort === 'pbr'       ? 'pbr'
+      : sort === 'roe'       ? 'roe'
+      : 'combinedScore';
+    const ascending = ['per','pbr'].includes(sort);
+    results.sort((a, b) => {
+      const va = a[sortKey] ?? (ascending ? Infinity : -Infinity);
+      const vb = b[sortKey] ?? (ascending ? Infinity : -Infinity);
+      return ascending ? va - vb : vb - va;
+    });
+
+    screenerCache.set(cacheKey, { data: results, ts: Date.now() });
+
+    const pg = parseInt(page), lm = parseInt(limit);
+    const slice = results.slice((pg - 1) * lm, pg * lm);
+    res.json({ items: slice, total: results.length, page: pg });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── /api/alerts ────────────────────────────────────────────────────
+app.get('/api/alerts', async (req, res) => {
+  const codes = (req.query.codes || '').split(',').map(c => c.trim()).filter(Boolean).slice(0, 50);
+  if (!codes.length) return res.json({ alerts: [] });
+  try {
+    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const [analysisRes, settingsRes] = await Promise.allSettled([
+      getSupabase()
+        .from('kt_daily_analysis')
+        .select('code, analysis_date, rsi, close_price, change_rate, lynch_score, analysis_json')
+        .in('code', codes)
+        .gte('analysis_date', cutoff)
+        .order('analysis_date', { ascending: false }),
+      getSupabase()
+        .from('alert_settings')
+        .select('code, target_price, stop_loss, rsi_high, rsi_low, is_active')
+        .eq('user_email', req.user.email)
+        .eq('is_active', true)
+        .in('code', codes),
+    ]);
+
+    if (analysisRes.status === 'rejected' || analysisRes.value.error) throw analysisRes.value?.error || analysisRes.reason;
+    const rows = analysisRes.value.data || [];
+
+    // Build per-code custom thresholds map
+    const settingsMap = {};
+    if (settingsRes.status === 'fulfilled' && !settingsRes.value.error) {
+      for (const s of settingsRes.value.data || []) settingsMap[s.code] = s;
+    }
+
+    const seen = new Set();
+    const deduped = [];
+    for (const r of rows) {
+      if (!seen.has(r.code)) { seen.add(r.code); deduped.push(r); }
+    }
+
+    const alerts = [];
+    for (const r of deduped) {
+      let aj = {};
+      try { aj = JSON.parse(r.analysis_json || '{}'); } catch {}
+
+      const custom = settingsMap[r.code];
+      const rsiHighThreshold = custom?.rsi_high ?? 75;
+      const rsiLowThreshold  = custom?.rsi_low  ?? 30;
+
+      const signal = [];
+      if (r.rsi != null && r.rsi > rsiHighThreshold)
+        signal.push({ type: 'rsi_high', text: `RSI ${Math.round(r.rsi)} 과매수 (기준 ${rsiHighThreshold})`, level: 'warn' });
+      else if (r.rsi != null && r.rsi < rsiLowThreshold)
+        signal.push({ type: 'rsi_low', text: `RSI ${Math.round(r.rsi)} 과매도 (기준 ${rsiLowThreshold})`, level: 'buy' });
+
+      if (custom?.target_price != null && r.close_price != null && r.close_price >= custom.target_price)
+        signal.push({ type: 'target_hit', text: `목표가 도달 ${r.close_price.toLocaleString()} ≥ ${custom.target_price.toLocaleString()}`, level: 'buy' });
+
+      if (custom?.stop_loss != null && r.close_price != null && r.close_price <= custom.stop_loss)
+        signal.push({ type: 'stop_loss_hit', text: `손절가 도달 ${r.close_price.toLocaleString()} ≤ ${custom.stop_loss.toLocaleString()}`, level: 'sell' });
+
+      const cs = aj.combinedSignal;
+      if (cs?.signal === 'BUY' && (cs.confidence || 0) >= 65)
+        signal.push({ type: 'buy', text: `매수 신호 (${cs.confidence}%)`, level: 'buy' });
+      else if (cs?.signal === 'SELL' && (cs.confidence || 0) >= 65)
+        signal.push({ type: 'sell', text: `매도 신호 (${cs.confidence}%)`, level: 'warn' });
+
+      if (aj.near52wHigh || aj.krFlags?.near52wHigh)
+        signal.push({ type: '52w_high', text: '52주 신고가 근접', level: 'info' });
+      if (aj.near52wLow || aj.krFlags?.near52wLow)
+        signal.push({ type: '52w_low', text: '52주 신저가 근접', level: 'info' });
+
+      if (signal.length) {
+        alerts.push({
+          code: r.code, name: aj.name || r.code,
+          price: r.close_price, changeRate: r.change_rate,
+          rsi: r.rsi, signal, lynchScore: r.lynch_score,
+          analysisDate: r.analysis_date,
+          hasCustomSettings: !!custom,
+        });
+      }
+    }
+    res.json({ alerts });
+  } catch (e) {
+    res.status(500).json({ error: e.message, alerts: [] });
+  }
+});
+
+// ── /api/52w ───────────────────────────────────────────────────────
+app.get('/api/52w', async (req, res) => {
+  const direction = req.query.direction === 'low' ? 'low' : 'high';
+  try {
+    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const { data: rows, error } = await getSupabase()
+      .from('kt_daily_analysis')
+      .select('code, analysis_date, close_price, change_rate, lynch_score, analysis_json')
+      .gte('analysis_date', cutoff)
+      .order('analysis_date', { ascending: false });
+    if (error) throw error;
+
+    const seen = new Set();
+    const deduped = [];
+    for (const r of rows || []) {
+      if (!seen.has(r.code)) { seen.add(r.code); deduped.push(r); }
+    }
+
+    const results = [];
+    for (const r of deduped) {
+      let aj = {};
+      try { aj = JSON.parse(r.analysis_json || '{}'); } catch {}
+
+      const isHigh = !!(aj.near52wHigh || aj.krFlags?.near52wHigh);
+      const isLow  = !!(aj.near52wLow  || aj.krFlags?.near52wLow);
+
+      if (direction === 'high' && !isHigh) continue;
+      if (direction === 'low'  && !isLow)  continue;
+
+      results.push({
+        code: r.code, name: aj.name || r.code,
+        price: r.close_price, changeRate: r.change_rate,
+        lynchScore: r.lynch_score, analysisDate: r.analysis_date,
+        high52w: aj.high52w || null, low52w: aj.low52w || null,
+      });
+    }
+
+    results.sort((a, b) => (b.lynchScore || 0) - (a.lynchScore || 0));
+    res.json({ items: results.slice(0, 50), total: results.length, direction });
+  } catch (e) {
+    res.status(500).json({ error: e.message, items: [] });
+  }
+});
+
+// ── /api/peers ─────────────────────────────────────────────────────
+app.get('/api/peers', async (req, res) => {
+  const code = req.query.code;
+  if (!code) return res.status(400).json({ error: 'code 필요' });
+  const mySector = SECTOR_MAP[code];
+  if (!mySector) return res.json({ sector: null, peers: [] });
+
+  try {
+    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const sectorCodes = Object.entries(SECTOR_MAP)
+      .filter(([c, s]) => s === mySector)
+      .map(([c]) => c);
+
+    const { data: rows, error } = await getSupabase()
+      .from('kt_daily_analysis')
+      .select('code, analysis_date, close_price, change_rate, lynch_score, analysis_json')
+      .in('code', sectorCodes)
+      .gte('analysis_date', cutoff)
+      .order('analysis_date', { ascending: false });
+    if (error) throw error;
+
+    const seen = new Set();
+    const deduped = [];
+    for (const r of rows || []) {
+      if (!seen.has(r.code)) { seen.add(r.code); deduped.push(r); }
+    }
+
+    const pNum = v => { const n = parseFloat(v); return isNaN(n) ? null : n; };
+    const peers = deduped.map(r => {
+      let aj = {};
+      try { aj = JSON.parse(r.analysis_json || '{}'); } catch {}
+      const fund = aj.fundamentals || {};
+      return {
+        code: r.code, name: aj.name || r.code, isTarget: r.code === code,
+        price: r.close_price, changeRate: r.change_rate,
+        per: pNum(fund.per), pbr: pNum(fund.pbr), roe: pNum(fund.roe),
+        dividend: pNum(fund.dividendYield), marketCap: pNum(fund.marketCap),
+        lynchScore: r.lynch_score,
+      };
+    });
+
+    // Sort: target first, then by marketCap desc
+    peers.sort((a, b) => {
+      if (a.isTarget) return -1;
+      if (b.isTarget) return 1;
+      return (b.marketCap || 0) - (a.marketCap || 0);
+    });
+
+    res.json({ sector: mySector, peers: peers.slice(0, 8) });
+  } catch (e) {
+    res.status(500).json({ error: e.message, sector: mySector, peers: [] });
+  }
+});
+
+// ── /api/sectors ───────────────────────────────────────────────────
+const sectorsCache = { data: null, ts: 0 };
+const SECTORS_TTL = 30 * 60 * 1000; // 30 min
+
+app.get('/api/sectors', async (req, res) => {
+  if (sectorsCache.data && Date.now() - sectorsCache.ts < SECTORS_TTL) {
+    return res.json({ ...sectorsCache.data, fromCache: true });
+  }
+  try {
+    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const { data: rows, error } = await getSupabase()
+      .from('kt_daily_analysis')
+      .select('code, analysis_date, close_price, change_rate, analysis_json')
+      .gte('analysis_date', cutoff)
+      .order('analysis_date', { ascending: false });
+    if (error) throw error;
+
+    const seen = new Set();
+    const byCode = {};
+    for (const r of rows || []) {
+      if (!seen.has(r.code)) { seen.add(r.code); byCode[r.code] = r; }
+    }
+
+    // Group by sector
+    const sectorData = {};
+    for (const [code, r] of Object.entries(byCode)) {
+      const sec = SECTOR_MAP[code] || 'ETC';
+      if (!sectorData[sec]) sectorData[sec] = { changeRates: [], codes: [], names: [] };
+      sectorData[sec].changeRates.push(r.change_rate || 0);
+      sectorData[sec].codes.push(code);
+      let name = code;
+      try { name = JSON.parse(r.analysis_json || '{}').name || code; } catch {}
+      sectorData[sec].names.push({ code, name, changeRate: r.change_rate || 0, price: r.close_price });
+    }
+
+    const sectors = SECTOR_NAMES.map(name => {
+      const d = sectorData[name];
+      if (!d) return { name, avgChange: 0, count: 0, stocks: [] };
+      const avg = d.changeRates.reduce((a, b) => a + b, 0) / d.changeRates.length;
+      d.names.sort((a, b) => b.changeRate - a.changeRate);
+      return { name, avgChange: parseFloat(avg.toFixed(2)), count: d.codes.length, stocks: d.names.slice(0, 20) };
+    }).filter(s => s.count > 0);
+
+    const payload = { sectors, updatedAt: Date.now() };
+    sectorsCache.data = payload;
+    sectorsCache.ts = Date.now();
+    res.json(payload);
+  } catch (e) {
+    res.status(500).json({ error: e.message, sectors: [] });
+  }
+});
+
+// ── /api/financials ────────────────────────────────────────────────
+app.get('/api/financials', async (req, res) => {
+  const code = req.query.code;
+  if (!code) return res.status(400).json({ error: 'code 파라미터 필요' });
+  const dartKey = process.env.DART_API_KEY || '';
+  const corpCode = CORP_MAP[code];
+  if (!dartKey || !corpCode) {
+    return res.status(400).json({ error: 'DART API 키 또는 종목 코드 매핑 없음', code });
+  }
+  try {
+    const rows = await fetchDartMultiYear(corpCode, dartKey);
+    res.json({ code, rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── /api/supply ────────────────────────────────────────────────────
+// Per-stock investor (foreign/inst/indiv) net buy data for supply chart (F026)
+const supplyCache = new Map(); // code → { data, ts }
+const SUPPLY_TTL = 20 * 60 * 1000; // 20 min
+
+app.get('/api/supply', async (req, res) => {
+  const code = req.query.code;
+  if (!code) return res.status(400).json({ error: 'code 필요' });
+
+  const cached = supplyCache.get(code);
+  if (cached && Date.now() - cached.ts < SUPPLY_TTL)
+    return res.json({ code, rows: cached.data, fromCache: true });
+
+  const rows = await fetchNaverInvestor(code);
+  if (!rows) return res.json({ code, rows: [], message: '수급 데이터를 가져올 수 없습니다' });
+
+  supplyCache.set(code, { data: rows, ts: Date.now() });
+  res.json({ code, rows });
+});
+
+// /api/supply-demand — alias for /api/supply (F061)
+app.get('/api/supply-demand', async (req, res) => {
+  const code = req.query.code;
+  if (!code) return res.status(400).json({ error: 'code 필요' });
+  const cached = supplyCache.get(code);
+  if (cached && Date.now() - cached.ts < SUPPLY_TTL)
+    return res.json({ code, rows: cached.data, fromCache: true });
+  const rows = await fetchNaverInvestor(code);
+  if (!rows) return res.json({ code, rows: [], message: '수급 데이터를 가져올 수 없습니다' });
+  supplyCache.set(code, { data: rows, ts: Date.now() });
+  res.json({ code, rows });
+});
+
+// ── /api/supply-ranking ────────────────────────────────────────────
+// Top N stocks by foreign or institutional net buy (F021)
+const rankingCache = new Map(); // key → { data, ts }
+const RANKING_TTL = 30 * 60 * 1000; // 30 min
+
+app.get('/api/supply-ranking', async (req, res) => {
+  const period = ['5', '20'].includes(req.query.period) ? req.query.period : '1';
+  const type   = req.query.type === 'inst' ? 'inst' : 'foreign';
+  const cacheKey = `${type}-${period}`;
+
+  const cached = rankingCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < RANKING_TTL)
+    return res.json({ ...cached.data, fromCache: true });
+
+  // Scan top 50 KS + 20 KQ universe stocks in parallel (batched to avoid rate limit)
+  const SCAN_CODES = [...KS_UNIVERSE.slice(0, 45), ...KQ_UNIVERSE.slice(0, 15)];
+  const BATCH = 10;
+  const results = [];
+
+  for (let i = 0; i < SCAN_CODES.length; i += BATCH) {
+    const batch = SCAN_CODES.slice(i, i + BATCH);
+    const batchResults = await Promise.all(batch.map(async code => {
+      try {
+        const rows = await fetchNaverInvestor(code);
+        if (!rows || !rows.length) return null;
+        const days = parseInt(period);
+        const subset = rows.slice(0, days);
+        const net = subset.reduce((s, d) => s + (type === 'inst' ? d.inst : d.foreign), 0);
+        if (net === 0) return null;
+        // Get name from Naver
+        return { code, net, period, type };
+      } catch { return null; }
+    }));
+    results.push(...batchResults.filter(Boolean));
+  }
+
+  // Sort by net buy
+  results.sort((a, b) => b.net - a.net);
+  const top = results.slice(0, 15);
+
+  // Enrich with names from screener cache or Naver
+  const sb = getSupabase();
+  const codes = top.map(t => t.code);
+  let nameMap = {};
+  try {
+    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const { data: nameRows } = await sb.from('kt_daily_analysis')
+      .select('code, analysis_json').in('code', codes).gte('analysis_date', cutoff)
+      .order('analysis_date', { ascending: false });
+    const seenCodes = new Set();
+    for (const r of nameRows || []) {
+      if (!seenCodes.has(r.code)) {
+        seenCodes.add(r.code);
+        try { nameMap[r.code] = JSON.parse(r.analysis_json || '{}').name || r.code; } catch {}
+      }
+    }
+  } catch {}
+
+  const items = top.map(t => ({ ...t, name: nameMap[t.code] || t.code }));
+  const payload = { items, total: results.length, type, period, scannedAt: Date.now() };
+  rankingCache.set(cacheKey, { data: payload, ts: Date.now() });
+  res.json(payload);
+});
+
+// ── /api/gemini ────────────────────────────────────────────────────
+app.get('/api/gemini/analyze', async (req, res) => {
+  const code = req.query.code;
+  if (!code) return res.status(400).json({ error: 'code 파라미터 필요' });
+  try {
+    const analysisRes = await fetch(`http://localhost:${PORT}/api/analysis?code=${code}`, {
+      headers: { authorization: req.headers.authorization },
+    });
+    if (!analysisRes.ok) return res.status(502).json({ error: '종목 데이터 조회 실패' });
+    const analysisData = await analysisRes.json();
+    if (analysisData.error) return res.status(400).json({ error: analysisData.error });
+    const { analyzeStock } = await import('./gemini.js');
+    const result = await analyzeStock(analysisData);
+    res.json(result);
+  } catch (e) {
+    res.status(429).json({ error: e.message });
+  }
+});
+
+app.get('/api/gemini/validate-thesis', async (req, res) => {
+  const { code } = req.query;
+  if (!code) return res.status(400).json({ error: 'code required' });
+  try {
+    const { data: rows } = await getSupabase()
+      .from('theses')
+      .select('story,growth,valuation,exit_plan,name')
+      .eq('user_email', req.user.email)
+      .eq('code', code)
+      .maybeSingle();
+    if (!rows) return res.status(404).json({ error: 'Thesis가 없습니다. 먼저 Thesis를 작성하세요.' });
+    const { validateThesis } = await import('./gemini.js');
+    const result = await validateThesis(rows, rows.name || code);
+    res.json(result);
+  } catch (e) {
+    res.status(e.message?.includes('한도') ? 429 : 500).json({ error: e.message });
+  }
+});
+
+// ── /api/calendar ──────────────────────────────────────────────────
+const calendarCache = new Map(); // key=codes_hash, { data, ts }
+const CALENDAR_TTL = 60 * 60 * 1000; // 1h
+
+app.get('/api/calendar', async (req, res) => {
+  const codes = (req.query.codes || '').split(',').filter(Boolean).slice(0, 30);
+  if (!codes.length) return res.json({ items: [] });
+  const dartKey = process.env.DART_API_KEY;
+  if (!dartKey) return res.json({ items: [] });
+
+  const cacheKey = [...codes].sort().join(',');
+  const hit = calendarCache.get(cacheKey);
+  if (hit && Date.now() - hit.ts < CALENDAR_TTL) return res.json(hit.data);
+
+  try {
+    const results = await Promise.allSettled(
+      codes.map(async (code) => {
+        const corpCode = CORP_MAP[code];
+        if (!corpCode) return [];
+        const discs = await fetchDartDisclosures(corpCode, dartKey);
+        return discs.map(d => ({ ...d, code, name: '' }));
+      })
+    );
+    const items = results
+      .flatMap(r => r.status === 'fulfilled' ? r.value : [])
+      .sort((a, b) => b.date.localeCompare(a.date))
+      .slice(0, 50);
+
+    // Enrich with stock names from watchlist/portfolio (best-effort)
+    const nameMap = {};
+    try {
+      const { data: wl } = await getSupabase()
+        .from('kt_watchlist')
+        .select('code,name')
+        .eq('user_email', req.user.email);
+      (wl || []).forEach(r => { nameMap[r.code] = r.name; });
+      const { data: ph } = await getSupabase()
+        .from('kt_trades')
+        .select('code,name')
+        .eq('user_email', req.user.email);
+      (ph || []).forEach(r => { nameMap[r.code] = r.name; });
+    } catch {}
+    items.forEach(item => { if (nameMap[item.code]) item.name = nameMap[item.code]; });
+
+    const payload = { items };
+    calendarCache.set(cacheKey, { data: payload, ts: Date.now() });
+    res.json(payload);
+  } catch (e) {
+    res.status(500).json({ error: e.message, items: [] });
+  }
+});
+
+app.get('/api/gemini/market', async (req, res) => {
+  try {
+    const macroRes = await fetch(`http://localhost:${PORT}/api/macro`, {
+      headers: { authorization: req.headers.authorization },
+    });
+    const macroData = await macroRes.json();
+    const { analyzeMarket } = await import('./gemini.js');
+    const result = await analyzeMarket(macroData);
+    res.json(result);
+  } catch (e) {
+    res.status(429).json({ error: e.message });
+  }
+});
+
+// ── /api/portfolio ─────────────────────────────────────────────────
+app.get('/api/portfolio/holdings', async (req, res) => {
+  try {
+    const holdings = await getHoldings(req.user.email);
+    res.json({ holdings });
+  } catch (e) {
+    res.status(500).json({ error: e.message, holdings: [] });
+  }
+});
+
+app.get('/api/portfolio/trades', async (req, res) => {
+  const code = req.query.code || null;
+  try {
+    const trades = await getTrades(req.user.email, code);
+    res.json({ trades });
+  } catch (e) {
+    res.status(500).json({ error: e.message, trades: [] });
+  }
+});
+
+app.post('/api/portfolio/trade', async (req, res) => {
+  const { code, name, market, trade_type, shares, price, trade_date, memo } = req.body || {};
+  if (!code || !name || !trade_type || !shares || !price || !trade_date)
+    return res.status(400).json({ error: 'code, name, trade_type, shares, price, trade_date 필요' });
+  if (!['buy', 'sell'].includes(trade_type))
+    return res.status(400).json({ error: 'trade_type은 buy 또는 sell' });
+  try {
+    const trade = await addTrade(req.user.email, { code, name, market, trade_type, shares, price, trade_date, memo });
+    res.json({ ok: true, trade });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.delete('/api/portfolio/trade/:id', async (req, res) => {
+  const id = parseInt(req.params.id);
+  if (!id) return res.status(400).json({ error: 'id 필요' });
+  try {
+    await deleteTrade(req.user.email, id);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── /api/thesis ────────────────────────────────────────────────────
+app.get('/api/thesis', async (req, res) => {
+  const code = req.query.code;
+  if (!code) {
+    try { const items = await listTheses(req.user.email); return res.json({ items }); }
+    catch (e) { return res.status(500).json({ error: e.message, items: [] }); }
+  }
+  try {
+    const thesis = await getThesis(req.user.email, code);
+    res.json(thesis || { code, story: '', growth: '', valuation: '', exit_plan: '' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put('/api/thesis', async (req, res) => {
+  const { code, name, story, growth, valuation, exit_plan } = req.body;
+  if (!code) return res.status(400).json({ error: 'code 필요' });
+  try {
+    const result = await upsertThesis(req.user.email, { code, name, story, growth, valuation, exit_plan });
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/thesis/:code', async (req, res) => {
+  const code = req.params.code;
+  try {
+    const { error } = await getSupabase().from('kt_thesis')
+      .delete().eq('user_email', req.user.email).eq('code', code);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── /api/watchlist ─────────────────────────────────────────────────
+app.get('/api/watchlist', async (req, res) => {
+  try {
+    const items = await getWatchlist(req.user.email);
+    res.json({ items });
+  } catch (e) {
+    res.status(500).json({ error: e.message, items: [] });
+  }
+});
+
+app.post('/api/watchlist', async (req, res) => {
+  const { code, name, market } = req.body || {};
+  if (!code || !name) return res.status(400).json({ error: 'code, name 필요' });
+  try {
+    const item = await addToWatchlist(req.user.email, code, name, market || '');
+    res.json({ ok: true, item });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.delete('/api/watchlist/:code', async (req, res) => {
+  const code = req.params.code.replace(/\D/g, '').slice(0, 6);
+  if (!code) return res.status(400).json({ error: 'code 필요' });
+  try {
+    await removeFromWatchlist(req.user.email, code);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── /api/alert-settings ────────────────────────────────────────────
+app.get('/api/alert-settings', authMiddleware, async (req, res) => {
+  try {
+    const { data, error } = await getSupabase()
+      .from('alert_settings')
+      .select('*')
+      .eq('user_email', req.user.email)
+      .order('code');
+    if (error) throw error;
+    res.json({ settings: data || [] });
+  } catch (e) {
+    res.status(500).json({ error: e.message, settings: [] });
+  }
+});
+
+app.post('/api/alert-settings', authMiddleware, async (req, res) => {
+  const { code, target_price, stop_loss, rsi_high, rsi_low, is_active } = req.body || {};
+  if (!code) return res.status(400).json({ error: 'code 필요' });
+  const row = {
+    user_email: req.user.email,
+    code: code.trim().slice(0, 6),
+    target_price: target_price != null ? Number(target_price) : null,
+    stop_loss: stop_loss != null ? Number(stop_loss) : null,
+    rsi_high: rsi_high != null ? Number(rsi_high) : null,
+    rsi_low: rsi_low != null ? Number(rsi_low) : null,
+    is_active: is_active !== false,
+  };
+  try {
+    const { data, error } = await getSupabase()
+      .from('alert_settings')
+      .upsert(row, { onConflict: 'user_email,code' })
+      .select()
+      .single();
+    if (error) throw error;
+    res.json({ ok: true, setting: data });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.delete('/api/alert-settings/:code', authMiddleware, async (req, res) => {
+  const code = req.params.code.replace(/\D/g, '').slice(0, 6);
+  if (!code) return res.status(400).json({ error: 'code 필요' });
+  try {
+    const { error } = await getSupabase()
+      .from('alert_settings')
+      .delete()
+      .eq('user_email', req.user.email)
+      .eq('code', code);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── React SPA 폴백 (모든 미매칭 GET → index.html) ────────────────
+app.get('*', (_req, res) => {
+  const indexPath = existsSync(distDir)
+    ? path.join(distDir, 'index.html')
+    : path.join(legacyDir, 'index.html');
+  res.sendFile(indexPath);
 });
 
 // ── 서버 시작 ─────────────────────────────────────────────────────
