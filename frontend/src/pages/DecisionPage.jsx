@@ -17,7 +17,7 @@ export default function DecisionPage() {
         <p className="text-xs text-slate-500 mt-0.5">매수 전 체크리스트 · 포지션 계산 · 손익비</p>
       </div>
 
-      <div className="flex border-b border-slate-800">
+      <div className="flex border-b border-slate-800 bg-surface-950">
         {TABS.map(t => (
           <button
             key={t}

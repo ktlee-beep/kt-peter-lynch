@@ -14,10 +14,20 @@ const ITEMS = [
 ];
 
 export default function BuyChecklist() {
-  const [checked, setChecked] = useState({});
+  const [checked, setChecked] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('buy-checklist') || '{}'); }
+    catch { return {}; }
+  });
 
-  const toggle = (id) => setChecked(prev => ({ ...prev, [id]: !prev[id] }));
-  const reset = () => setChecked({});
+  const toggle = (id) => setChecked(prev => {
+    const next = { ...prev, [id]: !prev[id] };
+    localStorage.setItem('buy-checklist', JSON.stringify(next));
+    return next;
+  });
+  const reset = () => {
+    setChecked({});
+    localStorage.removeItem('buy-checklist');
+  };
 
   const total = ITEMS.length;
   const done = ITEMS.filter(i => checked[i.id]).length;

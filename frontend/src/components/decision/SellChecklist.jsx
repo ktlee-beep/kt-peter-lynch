@@ -25,10 +25,20 @@ const LEVEL_LABELS = {
 };
 
 export default function SellChecklist() {
-  const [checked, setChecked] = useState({});
+  const [checked, setChecked] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('sell-checklist') || '{}'); }
+    catch { return {}; }
+  });
 
-  const toggle = (id) => setChecked(prev => ({ ...prev, [id]: !prev[id] }));
-  const reset = () => setChecked({});
+  const toggle = (id) => setChecked(prev => {
+    const next = { ...prev, [id]: !prev[id] };
+    localStorage.setItem('sell-checklist', JSON.stringify(next));
+    return next;
+  });
+  const reset = () => {
+    setChecked({});
+    localStorage.removeItem('sell-checklist');
+  };
 
   const criticals = SELL_ITEMS.filter(i => i.level === 'critical' && checked[i.id]).length;
   const majors    = SELL_ITEMS.filter(i => i.level === 'major' && checked[i.id]).length;

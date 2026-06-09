@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { authHeaders } from '../../contexts/AuthContext';
+import StockSearchBar from '../discover/StockSearchBar';
 
-const EMPTY_FORM = { code: '', target_price: '', stop_loss: '', rsi_high: '75', rsi_low: '30' };
+const EMPTY_FORM = { stock: null, target_price: '', stop_loss: '', rsi_high: '75', rsi_low: '30' };
 
 export default function AlertSettings() {
   const [settings, setSettings] = useState(null);
@@ -23,11 +24,12 @@ export default function AlertSettings() {
   useEffect(() => { load(); }, []);
 
   const save = async () => {
-    if (!form.code.trim()) return;
+    if (!form.stock) return;
     setSaving(true);
     try {
       const body = {
-        code: form.code.trim(),
+        code: form.stock.code,
+        name: form.stock.name,
         target_price: form.target_price !== '' ? Number(form.target_price) : null,
         stop_loss: form.stop_loss !== '' ? Number(form.stop_loss) : null,
         rsi_high: form.rsi_high !== '' ? Number(form.rsi_high) : null,
@@ -86,17 +88,27 @@ export default function AlertSettings() {
       {showForm && (
         <div className="bg-surface-900 rounded-2xl p-4 space-y-3">
           <p className="text-xs font-medium text-slate-400">새 알림 규칙</p>
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="text-[10px] text-slate-600 mb-1 block">종목코드 *</label>
-              <input
-                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-brand-400"
-                placeholder="005930"
-                maxLength={6}
-                value={form.code}
-                onChange={e => setForm(p => ({ ...p, code: e.target.value.replace(/\D/g, '') }))}
-              />
+
+          <div className="rounded-xl overflow-hidden border border-slate-800">
+            <StockSearchBar onSelect={s => setForm(p => ({ ...p, stock: s }))} />
+          </div>
+          {form.stock && (
+            <div className="flex items-center gap-2 px-3 py-2 bg-brand-500/10 border border-brand-500/20 rounded-xl">
+              <span className="text-sm font-medium text-white">{form.stock.name}</span>
+              <span className="text-xs text-slate-500 font-mono">{form.stock.code}</span>
+              <button
+                type="button"
+                onClick={() => setForm(p => ({ ...p, stock: null }))}
+                className="ml-auto text-slate-500 hover:text-slate-300"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                </svg>
+              </button>
             </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-2">
             <div>
               <label className="text-[10px] text-slate-600 mb-1 block">목표가</label>
               <input
@@ -118,7 +130,7 @@ export default function AlertSettings() {
               />
             </div>
             <div>
-              <label className="text-[10px] text-slate-600 mb-1 block">RSI 과매수 임계값</label>
+              <label className="text-[10px] text-slate-600 mb-1 block">RSI 과매수</label>
               <input
                 type="number"
                 className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-400"
@@ -127,7 +139,7 @@ export default function AlertSettings() {
               />
             </div>
             <div>
-              <label className="text-[10px] text-slate-600 mb-1 block">RSI 과매도 임계값</label>
+              <label className="text-[10px] text-slate-600 mb-1 block">RSI 과매도</label>
               <input
                 type="number"
                 className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-400"
@@ -136,10 +148,11 @@ export default function AlertSettings() {
               />
             </div>
           </div>
+
           <div className="flex gap-2 pt-1">
             <button
               onClick={save}
-              disabled={saving || !form.code.trim()}
+              disabled={saving || !form.stock}
               className="flex-1 bg-brand-400 text-slate-900 rounded-xl py-2.5 text-sm font-semibold disabled:opacity-50"
             >
               {saving ? '저장 중...' : '저장'}
@@ -166,7 +179,10 @@ export default function AlertSettings() {
           {settings.map(s => (
             <div key={s.code} className={`bg-surface-900 rounded-2xl p-3.5 ${!s.is_active ? 'opacity-50' : ''}`}>
               <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-semibold text-white">{s.code}</span>
+                <div>
+                  <span className="text-sm font-semibold text-white">{s.name || s.code}</span>
+                  {s.name && <span className="text-[11px] text-slate-500 ml-1.5 font-mono">{s.code}</span>}
+                </div>
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => toggle(s)}
