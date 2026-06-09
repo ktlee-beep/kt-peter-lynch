@@ -52,7 +52,7 @@ if (!JWT_SECRET) {
   console.error('[FATAL] JWT_SECRET 환경변수가 설정되지 않았습니다. Render 대시보드에서 설정하세요.');
   process.exit(1);
 }
-const MASTER_EMAIL    = process.env.MASTER_EMAIL || 'dlrudxo002@gmail.com';
+const MASTER_EMAIL    = process.env.MASTER_EMAIL || 'ktlee@enova.co.kr';
 const MASTER_PASS     = process.env.MASTER_PASS;
 if (!MASTER_PASS) {
   console.error('[FATAL] MASTER_PASS 환경변수가 설정되지 않았습니다. Render 대시보드에서 설정하세요.');
