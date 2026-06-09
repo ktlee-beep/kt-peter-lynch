@@ -81,13 +81,21 @@ export default function StockPage() {
 
   if (!code) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center pb-20">
-        <p className="text-slate-400 text-sm mb-3">종목 코드가 없습니다</p>
+      <div className="flex-1 flex flex-col items-center justify-center pb-20 px-6">
+        <div className="w-20 h-20 rounded-2xl bg-surface-900 flex items-center justify-center mb-5">
+          <svg className="w-10 h-10 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
+          </svg>
+        </div>
+        <h2 className="text-lg font-semibold text-slate-300 mb-2">종목을 선택하세요</h2>
+        <p className="text-sm text-slate-500 text-center leading-relaxed mb-6">
+          발굴 탭에서 관심 종목을 검색하거나<br />관심종목 목록에서 선택하세요
+        </p>
         <button
           onClick={() => navigate('/discover')}
-          className="text-brand-400 text-sm underline"
+          className="px-6 py-3 bg-brand-500 text-white rounded-xl text-sm font-semibold"
         >
-          발굴 탭에서 종목을 검색하세요
+          종목 검색하기
         </button>
       </div>
     );
@@ -102,7 +110,7 @@ export default function StockPage() {
         toggling={toggling}
       />
 
-      <div className="flex border-b border-slate-800">
+      <div className="flex border-b border-slate-800 bg-surface-950">
         {TABS.map(t => (
           <button
             key={t}
@@ -121,12 +129,39 @@ export default function StockPage() {
       <div className="flex-1 overflow-y-auto pb-20 scrollbar-hide">
         {error && (
           <div className="px-4 py-8 text-center">
-            <p className="text-sm text-red-400">{error}</p>
-            <p className="text-xs text-slate-500 mt-1">종목 코드: {code}</p>
+            <p className="text-sm text-red-400 mb-1">{error}</p>
+            <p className="text-xs text-slate-500 mb-4">종목 코드: {code}</p>
+            <button
+              onClick={() => {
+                setError('');
+                setLoading(true);
+                fetch(`/api/analysis?code=${encodeURIComponent(code)}`, { headers: authHeaders() })
+                  .then(r => r.json())
+                  .then(d => { if (d.error) { setError(d.error); } else { setData(d); } setLoading(false); })
+                  .catch(e => { setError(e.message); setLoading(false); });
+              }}
+              className="px-4 py-2 bg-surface-900 text-slate-300 text-sm rounded-xl border border-slate-700"
+            >
+              다시 시도
+            </button>
           </div>
         )}
 
-        {!error && tab === '종합' && (
+        {!error && loading && !data && tab === '종합' && (
+          <div className="space-y-3 pt-2">
+            <div className="flex gap-2 px-4">
+              {[1,2,3,4].map(i => <div key={i} className="flex-1 h-14 bg-surface-900 rounded-xl animate-pulse" />)}
+            </div>
+            <div className="mx-4 h-52 bg-surface-900 rounded-xl animate-pulse" />
+            <div className="mx-4 h-32 bg-surface-900 rounded-xl animate-pulse" />
+            <div className="mx-4 h-28 bg-surface-900 rounded-xl animate-pulse" />
+            <div className="space-y-2 px-4">
+              {[1,2,3].map(i => <div key={i} className="h-16 bg-surface-900 rounded-xl animate-pulse" />)}
+            </div>
+          </div>
+        )}
+
+        {!error && (!loading || data) && tab === '종합' && (
           <>
             <CoreIndicators fundamentals={loading ? null : data?.fundamentals} />
             <PriceChart
