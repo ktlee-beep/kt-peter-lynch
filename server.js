@@ -90,10 +90,12 @@ app.use(express.static(legacyDir)); // login.html, manifest.json 등
 const cache = {
   movers:     { data: null, ts: 0 },
   macro:      { data: null, ts: 0 },
+  market:     { data: null, ts: 0 },
   indexChart: {},   // keyed by id, each { data, ts }
 };
 const CACHE_TTL_MOVERS     = 60 * 60 * 1000; // 1시간
 const CACHE_TTL_MACRO      = 30 * 60 * 1000; // 30분
+const CACHE_TTL_MARKET     =  5 * 60 * 1000; // 5분
 const CACHE_TTL_INDEX_CHART = 60 * 60 * 1000; // 1시간
 
 // ── 인증 미들웨어 ────────────────────────────────────────────────
@@ -458,11 +460,16 @@ app.get('/api/analysis', async (req, res) => {
 
 // ── /api/market ───────────────────────────────────────────────────
 app.get('/api/market', async (req, res) => {
+  if (cache.market.data && Date.now() - cache.market.ts < CACHE_TTL_MARKET) {
+    return res.json({ ...cache.market.data, fromCache: true });
+  }
   const [krxResults, yahooResults] = await Promise.all([
     Promise.all(KRX_INDICES.map(e => fetchIndex(e))),
     Promise.all(YAHOO_SYMBOLS.map(fetchYahooSymbol)),
   ]);
-  res.json({ market: [...krxResults, ...yahooResults], serverTime: Date.now() });
+  const data = { market: [...krxResults, ...yahooResults], serverTime: Date.now() };
+  cache.market = { data, ts: Date.now() };
+  res.json(data);
 });
 
 // ── /api/index-chart/:id — 지수 일봉 OHLCV (이동평균 계산용) ─────
