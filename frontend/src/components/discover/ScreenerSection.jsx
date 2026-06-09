@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { authHeaders } from '../../contexts/AuthContext';
 
@@ -97,13 +97,13 @@ function ResultItem({ item }) {
 }
 
 export default function ScreenerSection() {
-  const [open, setOpen] = useState(false);
-  const [preset, setPreset] = useState(null);
-  const [perMax,  setPerMax]  = useState(null);
-  const [pbrMax,  setPbrMax]  = useState(null);
-  const [roeMin,  setRoeMin]  = useState(null);
-  const [debtMax, setDebtMax] = useState(null);
-  const [lynchMin, setLynchMin] = useState(null);
+  const [open, setOpen] = useState(true);
+  const [preset, setPreset] = useState('lynch');
+  const [perMax,  setPerMax]  = useState(20);
+  const [pbrMax,  setPbrMax]  = useState(3);
+  const [roeMin,  setRoeMin]  = useState(10);
+  const [debtMax, setDebtMax] = useState(150);
+  const [lynchMin, setLynchMin] = useState(50);
   const [sortBy,  setSortBy]  = useState('lynch_score');
   const [page,    setPage]    = useState(1);
   const [results, setResults] = useState(null);
@@ -111,6 +111,9 @@ export default function ScreenerSection() {
   const [loading, setLoading] = useState(false);
   const [error,   setError]   = useState(null);
   const [noData,  setNoData]  = useState(false);
+
+  // 페이지 진입 시 린치 프리셋으로 자동 실행
+  useEffect(() => { runScreener(1); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const applyPreset = (key) => {
     setPreset(key);
