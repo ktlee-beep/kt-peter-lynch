@@ -1,5 +1,6 @@
-const GEMINI_MODEL = 'gemini-2.0-flash';
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+// 최신 모델 우선 시도, 실패 시 이전 모델 폴백
+const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 const cache = new Map();
 const CACHE_TTL = 24 * 60 * 60 * 1000;
@@ -13,36 +14,67 @@ function setCache(key, data) {
   cache.set(key, { data, ts: Date.now() });
 }
 
+function extractJson(text) {
+  if (!text) return {};
+  // 마크다운 코드펜스 제거 (```json ... ``` 또는 ``` ... ```)
+  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const clean = fenceMatch ? fenceMatch[1].trim() : text.trim();
+  try {
+    return JSON.parse(clean);
+  } catch {
+    // 첫 번째 { ... } 블록만 추출 시도
+    const objMatch = clean.match(/\{[\s\S]*\}/);
+    if (objMatch) {
+      try { return JSON.parse(objMatch[0]); } catch {}
+    }
+    return { raw: clean };
+  }
+}
+
 async function callGemini(prompt) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY 환경변수 미설정');
 
-  const res = await fetch(`${GEMINI_URL}?key=${apiKey}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.4,
-        maxOutputTokens: 600,
-        responseMimeType: 'application/json',
-      },
-    }),
-  });
+  let lastErr;
+  for (const model of GEMINI_MODELS) {
+    try {
+      const res = await fetch(`${GEMINI_BASE}/${model}:generateContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.4,
+            maxOutputTokens: 800,
+            responseMimeType: 'application/json',
+          },
+        }),
+        signal: AbortSignal.timeout(25000),
+      });
 
-  if (!res.ok) {
-    const err = await res.text();
-    if (res.status === 429) throw new Error('Gemini 요청 한도 초과 (15req/min). 잠시 후 다시 시도하세요.');
-    throw new Error(`Gemini API 오류 ${res.status}: ${err.slice(0, 120)}`);
-  }
+      if (res.status === 404) { lastErr = new Error(`모델 미지원: ${model}`); continue; } // 다음 모델 시도
+      if (res.status === 429) throw new Error('Gemini 요청 한도 초과 (15req/min). 잠시 후 다시 시도하세요.');
+      if (!res.ok) {
+        const err = await res.text();
+        lastErr = new Error(`Gemini API 오류 ${res.status}: ${err.slice(0, 120)}`);
+        continue;
+      }
 
-  const d = await res.json();
-  const text = d.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { raw: text };
+      const d = await res.json();
+      // 안전 필터 차단 확인
+      const finishReason = d.candidates?.[0]?.finishReason;
+      if (finishReason === 'SAFETY' || finishReason === 'BLOCKED') {
+        throw new Error('Gemini 안전 필터에 의해 차단되었습니다.');
+      }
+      const text = d.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) throw new Error('Gemini 응답이 비어있습니다.');
+      return extractJson(text);
+    } catch (e) {
+      if (e.message.includes('한도') || e.message.includes('차단')) throw e;
+      lastErr = e;
+    }
   }
+  throw lastErr || new Error('Gemini API 호출 실패');
 }
 
 export async function analyzeStock(data) {
