@@ -6,8 +6,8 @@ import HomePage from './pages/HomePage';
 import DiscoverPage from './pages/DiscoverPage';
 import StockPage from './pages/StockPage';
 import PortfolioPage from './pages/PortfolioPage';
-import DecisionPage from './pages/DecisionPage';
 import ToolsPage from './pages/ToolsPage';
+import ReportPage from './pages/ReportPage';
 
 function ProtectedLayout() {
   const { user, loading } = useAuth();
@@ -29,7 +29,8 @@ function ProtectedLayout() {
         <Route path="/discover"  element={<DiscoverPage />} />
         <Route path="/stock"     element={<StockPage />} />
         <Route path="/portfolio" element={<PortfolioPage />} />
-        <Route path="/decision"  element={<DecisionPage />} />
+        <Route path="/decision"  element={<Navigate to="/tools" replace />} />
+        <Route path="/report"    element={<ReportPage />} />
         <Route path="/tools"     element={<ToolsPage />} />
         <Route path="*"          element={<Navigate to="/" replace />} />
       </Routes>

@@ -964,7 +964,7 @@ app.get('/api/screener', async (req, res) => {
       .gte('analysis_date', cutoff)
       .order('analysis_date', { ascending: false });
 
-    if (error) throw error;
+    if (error) return res.json({ items: [], total: 0, page: parseInt(page), message: '스캔 데이터 없음. 오늘 오후 8시 스캔 후 사용 가능합니다.' });
     if (!rows?.length) return res.json({ items: [], total: 0, page: 1, message: '스캔 데이터 없음. 스캔이 실행된 후 사용 가능합니다.' });
 
     // Deduplicate — keep latest per code
@@ -1132,7 +1132,7 @@ app.get('/api/52w', async (req, res) => {
       .select('code, analysis_date, close_price, change_rate, lynch_score, analysis_json')
       .gte('analysis_date', cutoff)
       .order('analysis_date', { ascending: false });
-    if (error) throw error;
+    if (error) return res.json({ items: [], total: 0, direction, message: '스캔 데이터 없음. 오늘 오후 8시 스캔 후 사용 가능합니다.' });
 
     const seen = new Set();
     const deduped = [];
@@ -1235,7 +1235,7 @@ app.get('/api/sectors', async (req, res) => {
       .select('code, analysis_date, close_price, change_rate, analysis_json')
       .gte('analysis_date', cutoff)
       .order('analysis_date', { ascending: false });
-    if (error) throw error;
+    if (error) return res.json({ sectors: [], message: '스캔 데이터 없음. 오늘 오후 8시 스캔 후 사용 가능합니다.' });
 
     const seen = new Set();
     const byCode = {};
@@ -1286,6 +1286,41 @@ app.get('/api/financials', async (req, res) => {
     res.json({ code, rows });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// ── /api/disclosures ───────────────────────────────────────────────
+// DART 최근 공시 (리포트용, 90일 이내 최대 5건)
+const disclosureCache = new Map(); // code → { data, ts }
+const DISCLOSURE_TTL = 60 * 60 * 1000; // 1h
+
+app.get('/api/disclosures', async (req, res) => {
+  const code = req.query.code;
+  if (!code) return res.status(400).json({ error: 'code 필요' });
+  const dartKey = process.env.DART_API_KEY || '';
+  const corpCode = CORP_MAP[code];
+  if (!dartKey || !corpCode) return res.json({ code, items: [] });
+
+  const cached = disclosureCache.get(code);
+  if (cached && Date.now() - cached.ts < DISCLOSURE_TTL)
+    return res.json({ code, items: cached.data, fromCache: true });
+
+  try {
+    const fmt = (d) => d.toISOString().slice(0, 10).replace(/-/g, '');
+    const end = new Date();
+    const bgn = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+    const url = `https://opendart.fss.or.kr/api/list.json?crtfc_key=${dartKey}&corp_code=${corpCode}&bgn_de=${fmt(bgn)}&end_de=${fmt(end)}&page_count=5`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const data = await r.json();
+    const items = data.status === '000'
+      ? (data.list || []).slice(0, 5).map(it => ({
+          date: it.rcept_dt || '', title: it.report_nm || '', corp: it.corp_name || '',
+        }))
+      : [];
+    disclosureCache.set(code, { data: items, ts: Date.now() });
+    res.json({ code, items });
+  } catch {
+    res.json({ code, items: [] });
   }
 });
 
@@ -1590,7 +1625,8 @@ app.post('/api/watchlist', async (req, res) => {
     const item = await addToWatchlist(req.user.email, code, name, market || '');
     res.json({ ok: true, item });
   } catch (e) {
-    res.status(400).json({ error: e.message });
+    const status = e.message?.includes('최대') || e.message?.includes('이미') ? 400 : 500;
+    res.status(status).json({ error: e.message });
   }
 });
 

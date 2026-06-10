@@ -9,10 +9,10 @@ import PortfolioSummaryBar from '../components/home/PortfolioSummaryBar';
 import { useAuth } from '../contexts/AuthContext';
 
 const PHILOSOPHY = [
-  { q: '이야기가 되는가?',  sub: '사업 이해',  path: '/stock' },
-  { q: '숫자가 받쳐주나?',  sub: '재무 검증',  path: '/stock' },
-  { q: '지금 가격이 싼가?', sub: '밸류에이션', path: '/stock' },
-  { q: '언제 팔 건가?',     sub: '매도 기준',  path: '/decision' },
+  { q: '이야기가 되는가?',  sub: '사업 이해',  path: '/discover' },
+  { q: '숫자가 받쳐주나?',  sub: '재무 검증',  path: '/discover' },
+  { q: '지금 가격이 싼가?', sub: '밸류에이션', path: '/discover' },
+  { q: '언제 팔 건가?',     sub: '매도 기준',  path: '/tools?tool=sell' },
 ];
 
 export default function HomePage() {

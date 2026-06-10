@@ -58,6 +58,7 @@ export default function DiscoverPage() {
   const [watchlistRevision, setWatchlistRevision] = useState(0);
   const [selectedStock, setSelectedStock]         = useState(null);
   const [adding, setAdding]                       = useState(false);
+  const [discoverOpen, setDiscoverOpen]           = useState(false);
 
   const handleSearchSelect = useCallback((stock) => {
     setSelectedStock(stock);
@@ -87,8 +88,8 @@ export default function DiscoverPage() {
   return (
     <div className="flex-1 overflow-y-auto pb-20 scrollbar-hide">
       <div className="px-4 pt-5 pb-3">
-        <h1 className="text-xl font-bold text-white">발굴</h1>
-        <p className="text-xs text-slate-500 mt-0.5">종목 검색 · 관심종목 · 스크리너</p>
+        <h1 className="text-xl font-bold text-white">관심</h1>
+        <p className="text-xs text-slate-500 mt-0.5">관심종목 추적 · 새 종목 발굴</p>
       </div>
 
       <StockSearchBar onSelect={handleSearchSelect} />
@@ -98,13 +99,33 @@ export default function DiscoverPage() {
         onWatchlistChange={() => setWatchlistRevision(n => n + 1)}
       />
 
-      <ScreenerSection />
+      {/* 새 종목 찾기 — 기본 접힘, 열 때만 마운트(API 호출 지연) */}
+      <div className="mt-6 px-4">
+        <button
+          onClick={() => setDiscoverOpen(o => !o)}
+          className="w-full flex items-center justify-between bg-surface-900 rounded-xl px-4 py-3.5"
+        >
+          <div className="flex items-center gap-2">
+            <svg className="w-4 h-4 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+            </svg>
+            <span className="text-sm font-semibold text-white">새 종목 찾기</span>
+            <span className="text-[10px] text-slate-500">스크리너 · 52주 · 섹터 · 수급</span>
+          </div>
+          <svg className={`w-4 h-4 text-slate-500 transition-transform ${discoverOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+        </button>
+      </div>
 
-      <New52wSection />
-
-      <SectorBrowser />
-
-      <SupplyRanking />
+      {discoverOpen && (
+        <>
+          <ScreenerSection />
+          <New52wSection />
+          <SectorBrowser />
+          <SupplyRanking />
+        </>
+      )}
 
       <div className="h-6" />
 
