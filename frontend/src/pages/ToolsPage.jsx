@@ -11,6 +11,7 @@ import SellChecklist from '../components/decision/SellChecklist';
 import PositionCalculator from '../components/decision/PositionCalculator';
 import RiskRewardCalc from '../components/decision/RiskRewardCalc';
 import AlertSettings from '../components/decision/AlertSettings';
+import ScanResults from '../components/tools/ScanResults';
 
 const CATEGORIES = [
   {
@@ -28,6 +29,7 @@ const CATEGORIES = [
     label: '트레이딩 도구',
     sub: '전략 검증 · 리포트',
     tools: [
+      { id: 'scan',     emoji: '🏆', name: '오늘의 추천',  desc: '린치·리버모어 점수 스캔', component: true },
       { id: 'report',   emoji: '📑', name: '종목 리포트',  desc: '종목 선택 후 발행', link: '/discover' },
       { id: 'backtest', emoji: '🧪', name: '백테스팅',     desc: '3전략 비교', component: true },
       { id: 'opening',  emoji: '🎬', name: '시초가 시뮬',  desc: '5가지 시나리오', component: true },
@@ -53,6 +55,7 @@ const CATEGORIES = [
 ];
 
 const COMPONENTS = {
+  scan: ScanResults,
   buy: BuyChecklist,
   sell: SellChecklist,
   position: PositionCalculator,

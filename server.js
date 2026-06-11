@@ -37,6 +37,16 @@ import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMa
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ── 전역 크래시 가드 ─────────────────────────────────────────────
+// 비동기 라우트에서 throw된 예외가 프로세스 전체를 죽이지 않도록 보호
+// (예: Supabase env 미설정 시 getSupabase() throw → 이후 모든 조회 불능 방지)
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason?.message || reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err?.message || err);
+});
+
 // ── 보안 헤더 ────────────────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false })); // CSP는 인라인 React SPA 호환 위해 비활성
 
@@ -180,9 +190,21 @@ function adminMiddleware(req, res, next) {
 }
 
 // ── /api/migrate (일회성 스키마 초기화, JWT 불필요 — SCAN_SECRET으로 보호) ──
-app.post('/api/migrate', async (req, res) => {
+// SCAN_SECRET 또는 마스터 JWT 둘 중 하나로 인증 (운영 셀프서비스용)
+function isScanSecretOrMaster(req) {
   const secret = req.headers['x-scan-secret'];
-  if (!process.env.SCAN_SECRET || secret !== process.env.SCAN_SECRET) {
+  if (process.env.SCAN_SECRET && secret === process.env.SCAN_SECRET) return true;
+  const authHeader = req.headers['authorization'];
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!token) return false;
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    return decoded.role === 'master';
+  } catch { return false; }
+}
+
+app.post('/api/migrate', async (req, res) => {
+  if (!isScanSecretOrMaster(req)) {
     return res.status(403).json({ error: 'Forbidden' });
   }
   try {
@@ -499,6 +521,44 @@ app.get('/api/index-chart/:id', authMiddleware, async (req, res) => {
   }
 });
 
+// ── /api/index/ma — 지수 이동평균 분석 (도구 탭 '지수 분석') ──────
+const INDEX_MA_CACHE = new Map(); // symbol → { data, ts }
+const INDEX_MA_TTL = 30 * 60 * 1000;
+app.get('/api/index/ma', async (req, res) => {
+  const symbol = String(req.query.code || '^KS11');
+  const allowed = ['^KS11', '^KQ11', '^GSPC', '^IXIC', '^DJI'];
+  if (!allowed.includes(symbol)) return res.status(400).json({ error: `지원하지 않는 지수: ${symbol}` });
+
+  const cached = INDEX_MA_CACHE.get(symbol);
+  if (cached && Date.now() - cached.ts < INDEX_MA_TTL) return res.json({ ...cached.data, fromCache: true });
+
+  try {
+    const rows = await fetchIndexOHLCV(symbol, '2y'); // MA240 계산 위해 2년
+    const closes = rows.map(r => r.close);
+    if (closes.length < 20) throw new Error('데이터 부족');
+    const last = (n) => closes.length >= n
+      ? closes.slice(-n).reduce((s, v) => s + v, 0) / n
+      : null;
+    const current = closes[closes.length - 1];
+    const ma20 = last(20), ma60 = last(60), ma120 = last(120), ma240 = last(240);
+
+    const mas = [ma20, ma60, ma120, ma240].filter(v => v != null);
+    const aboveCount = mas.filter(v => current > v).length;
+    let phase;
+    if (aboveCount === mas.length)      phase = 'all_above';
+    else if (aboveCount === 0)          phase = 'all_below';
+    else if (ma20 != null && current > ma20 && ma120 != null && current < ma120) phase = 'recovering';
+    else                                phase = 'mixed';
+
+    const signal = phase === 'all_above' ? 'BUY' : phase === 'all_below' ? 'AVOID' : 'CAUTION';
+    const data = { symbol, current, ma20, ma60, ma120, ma240, phase, signal, days: closes.length, serverTime: Date.now() };
+    INDEX_MA_CACHE.set(symbol, { data, ts: Date.now() });
+    res.json(data);
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
 // ── /api/naver-stock/:code (CORS 프록시) ──────────────────────────
 app.get('/api/naver-stock/:code', async (req, res) => {
   const code = req.params.code.replace(/\D/g, '').slice(0, 6);
@@ -555,8 +615,8 @@ app.get('/api/stock/search', (req, res) => {
 app.get('/api/news/home', async (req, res) => {
   const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
   try {
-    // 코스피 지수 기반 시장 뉴스 (^KS11 Yahoo 뉴스)
-    const url = 'https://query1.finance.yahoo.com/v1/finance/search?q=코스피&newsCount=10&enableFuzzyQuery=false&lang=ko-KR';
+    // 코스피 지수 기반 시장 뉴스 — Yahoo는 한글 쿼리에 400 반환하므로 ^KS11 심볼 사용
+    const url = 'https://query1.finance.yahoo.com/v1/finance/search?q=%5EKS11&newsCount=10&enableFuzzyQuery=false';
     const r = await fetch(url, { headers: { 'User-Agent': UA } });
     if (!r.ok) throw new Error(`Yahoo ${r.status}`);
     const data = await r.json();
@@ -915,8 +975,7 @@ app.delete('/api/admin/users/:email', authMiddleware, adminMiddleware, async (re
 
 // ── /api/scan/trigger (수동 스캔 트리거, 내부용) ─────────────────
 app.post('/api/scan/trigger', async (req, res) => {
-  const secret = req.headers['x-scan-secret'];
-  if (!process.env.SCAN_SECRET || secret !== process.env.SCAN_SECRET) {
+  if (!isScanSecretOrMaster(req)) {
     return res.status(403).json({ error: 'Forbidden' });
   }
   const { runDailyScan } = await import('./cron.js');
@@ -1398,10 +1457,10 @@ app.get('/api/supply-ranking', async (req, res) => {
   const top = results.slice(0, 15);
 
   // Enrich with names from screener cache or Naver
-  const sb = getSupabase();
   const codes = top.map(t => t.code);
   let nameMap = {};
   try {
+    const sb = getSupabase();
     const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     const { data: nameRows } = await sb.from('kt_daily_analysis')
       .select('code, analysis_json').in('code', codes).gte('analysis_date', cutoff)
@@ -1415,7 +1474,10 @@ app.get('/api/supply-ranking', async (req, res) => {
     }
   } catch {}
 
-  const items = top.map(t => ({ ...t, name: nameMap[t.code] || t.code }));
+  const items = top.map(t => ({
+    ...t,
+    name: nameMap[t.code] || KRX_STOCKS.find(s => s.code === t.code)?.name || t.code,
+  }));
   const payload = { items, total: results.length, type, period, scannedAt: Date.now() };
   rankingCache.set(cacheKey, { data: payload, ts: Date.now() });
   res.json(payload);
