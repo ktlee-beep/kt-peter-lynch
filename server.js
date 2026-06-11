@@ -37,6 +37,10 @@ import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMa
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ── 종목명 조회 (내장 KRX 1775종목) ──────────────────────────────
+const KRX_NAME_MAP = new Map(KRX_STOCKS.map(s => [s.code, s.name]));
+const krxName = (code) => KRX_NAME_MAP.get(code) || null;
+
 // ── 전역 크래시 가드 ─────────────────────────────────────────────
 // 비동기 라우트에서 throw된 예외가 프로세스 전체를 죽이지 않도록 보호
 // (예: Supabase env 미설정 시 getSupabase() throw → 이후 모든 조회 불능 방지)
@@ -1019,7 +1023,7 @@ app.get('/api/screener', async (req, res) => {
     const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0,10);
     const { data: rows, error } = await sb
       .from('kt_daily_analysis')
-      .select('code, analysis_date, lynch_score, livermore_score, piotroski_score, combined_score, rsi, close_price, change_rate, analysis_json')
+      .select('code, analysis_date, lynch_score, livermore_score, piotroski_score, combined_score, rsi, close_price, change_rate, analysis_json, kt_stocks (name)')
       .gte('analysis_date', cutoff)
       .order('analysis_date', { ascending: false });
 
@@ -1053,16 +1057,15 @@ app.get('/api/screener', async (req, res) => {
       const debt = pNum(fund.debtToEquity);
       const mktCap = pNum(fund.marketCap); // 억 단위
 
-      if (fPerMax  !== null && (per  === null || per  > fPerMax))  continue;
-      if (fPbrMax  !== null && (pbr  === null || pbr  > fPbrMax))  continue;
-      if (fRoeMin  !== null && (roe  === null || roe  < fRoeMin))  continue;
-      if (fDebtMax !== null && debt !== null && debt > fDebtMax)   continue;
+      // 지표 누락(null)은 제외하지 않음 — 경량 스캔은 PER/PBR만 제공, ROE/부채비율은 없을 수 있음
+      if (fPerMax  !== null && per  !== null && per  > fPerMax)  continue;
+      if (fPbrMax  !== null && pbr  !== null && pbr  > fPbrMax)  continue;
+      if (fRoeMin  !== null && roe  !== null && roe  < fRoeMin)  continue;
+      if (fDebtMax !== null && debt !== null && debt > fDebtMax) continue;
       if (fLynchMin !== null && r.lynch_score < fLynchMin)         continue;
       if (fPioMin  !== null && r.piotroski_score < fPioMin)        continue;
 
-      // Parse name from analysis_json
-      let name = r.code;
-      try { name = JSON.parse(r.analysis_json || '{}').name || r.code; } catch {}
+      const name = r.kt_stocks?.name || krxName(r.code) || r.code;
 
       results.push({
         code: r.code, name,
@@ -1188,7 +1191,7 @@ app.get('/api/52w', async (req, res) => {
     const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     const { data: rows, error } = await getSupabase()
       .from('kt_daily_analysis')
-      .select('code, analysis_date, close_price, change_rate, lynch_score, analysis_json')
+      .select('code, analysis_date, close_price, change_rate, lynch_score, analysis_json, kt_stocks (name)')
       .gte('analysis_date', cutoff)
       .order('analysis_date', { ascending: false });
     if (error) return res.json({ items: [], total: 0, direction, message: '스캔 데이터 없음. 오늘 오후 8시 스캔 후 사용 가능합니다.' });
@@ -1211,7 +1214,7 @@ app.get('/api/52w', async (req, res) => {
       if (direction === 'low'  && !isLow)  continue;
 
       results.push({
-        code: r.code, name: aj.name || r.code,
+        code: r.code, name: r.kt_stocks?.name || krxName(r.code) || aj.name || r.code,
         price: r.close_price, changeRate: r.change_rate,
         lynchScore: r.lynch_score, analysisDate: r.analysis_date,
         high52w: aj.high52w || null, low52w: aj.low52w || null,
@@ -1258,7 +1261,7 @@ app.get('/api/peers', async (req, res) => {
       try { aj = JSON.parse(r.analysis_json || '{}'); } catch {}
       const fund = aj.fundamentals || {};
       return {
-        code: r.code, name: aj.name || r.code, isTarget: r.code === code,
+        code: r.code, name: krxName(r.code) || aj.name || r.code, isTarget: r.code === code,
         price: r.close_price, changeRate: r.change_rate,
         per: pNum(fund.per), pbr: pNum(fund.pbr), roe: pNum(fund.roe),
         dividend: pNum(fund.dividendYield), marketCap: pNum(fund.marketCap),
@@ -1309,8 +1312,8 @@ app.get('/api/sectors', async (req, res) => {
       if (!sectorData[sec]) sectorData[sec] = { changeRates: [], codes: [], names: [] };
       sectorData[sec].changeRates.push(r.change_rate || 0);
       sectorData[sec].codes.push(code);
-      let name = code;
-      try { name = JSON.parse(r.analysis_json || '{}').name || code; } catch {}
+      let name = krxName(code) || code;
+      if (name === code) { try { name = JSON.parse(r.analysis_json || '{}').name || code; } catch {} }
       sectorData[sec].names.push({ code, name, changeRate: r.change_rate || 0, price: r.close_price });
     }
 

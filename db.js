@@ -391,3 +391,12 @@ export async function getFundamentalsCache(code) {
     .single();
   return data ? JSON.parse(data.raw_json) : null;
 }
+
+export async function setFundamentalsCache(code, fundamentals) {
+  const sb = getSupabase();
+  await sb.from('kt_fundamentals_cache').upsert({
+    code,
+    raw_json: JSON.stringify(fundamentals),
+    updated_at: new Date().toISOString(),
+  });
+}

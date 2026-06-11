@@ -3,8 +3,8 @@
 // 6시간마다 — 매크로 갱신
 import cron from 'node-cron';
 import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermoreScore } from './analysis.js';
-import { getFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase } from './db.js';
-import { KS_UNIVERSE, KQ_UNIVERSE } from './data.js';
+import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase } from './db.js';
+import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals } from './data.js';
 
 // ── 스캔 유니버스 (DB에 종목이 없으면 하드코딩된 유니버스 사용) ─
 function getScanUniverse() {
@@ -75,8 +75,12 @@ async function analyzeStockLean(code) {
     if (buyPts >= 3)  { signal = 'BUY';  confidence = Math.min(35 + buyPts * 10, 95); }
     if (sellPts >= 3) { signal = 'SELL'; confidence = Math.min(35 + sellPts * 10, 95); }
 
-    // 린치·리버모어 본채점 — 일봉에서 계산한 지표 그대로 사용
-    const fundamentals = await getFundamentalsCache(code).catch(() => null);
+    // 펀더멘털: 캐시 우선, 없으면 Naver에서 수집 후 캐시 (스크리너 PER/PBR/ROE 필터 데이터원)
+    let fundamentals = await getFundamentalsCache(code).catch(() => null);
+    if (!fundamentals) {
+      fundamentals = await fetchNaverFundamentals(code).catch(() => null);
+      if (fundamentals) await setFundamentalsCache(code, fundamentals).catch(() => {});
+    }
     const dart = fundamentals?.dart ?? null;
     const { pScore } = calcLynchScore(
       cur, ma5, ma20, ma60, rsiVal ?? 50, volRatio ?? 1, changeRate, dart, fundamentals,
@@ -94,6 +98,7 @@ async function analyzeStockLean(code) {
       pScore,
       lScore,
       fScore: null,
+      fundamentals, // 스크리너 PER/PBR/ROE 필터용
     };
   } catch {
     return null;
