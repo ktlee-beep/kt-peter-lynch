@@ -130,7 +130,7 @@ export default function StockSearchBar({ onSelect }) {
           {dropdownItems.map((s) => (
             <button
               key={s.code}
-              onPointerDown={(e) => { e.preventDefault(); handleSelect(s); }}
+              onClick={() => handleSelect(s)}
               className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-slate-800 active:bg-slate-700 transition-colors text-left"
             >
               <div className="flex-1 min-w-0">
