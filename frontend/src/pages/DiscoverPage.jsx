@@ -14,7 +14,7 @@ function StockActionSheet({ stock, onClose, onAddWatchlist, adding }) {
   if (!stock) return null;
   return (
     <>
-      <div className="fixed inset-0 bg-black/50 z-40" onClick={onClose} />
+      <div className="fixed inset-0 bg-black/50 z-40" onPointerDown={(e) => { e.preventDefault(); onClose(); }} />
       <div className="fixed bottom-0 left-0 right-0 z-50 bg-surface-900 rounded-t-2xl px-4 pt-4 pb-8 safe-bottom">
         <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-4" />
         <div className="flex items-center gap-3 mb-4 px-1">
