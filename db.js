@@ -227,12 +227,15 @@ export async function createScanBatch(batchId, totalStocks) {
 // 배치 진행 업데이트
 export async function updateScanBatch(batchId, processed, failed, buySignals) {
   const sb = getSupabase();
-  await sb.rpc('kt_increment_batch', {
+  // supabase-js rpc는 Postgres 오류 시 reject가 아닌 { error } resolve이므로
+  // .catch() 폴백은 실행되지 않는다 — error 필드를 직접 확인해 폴백
+  const { error } = await sb.rpc('kt_increment_batch', {
     p_batch_id:   batchId,
     p_processed:  processed,
     p_failed:     failed,
     p_buy:        buySignals,
-  }).catch(async () => {
+  });
+  if (error) {
     const { data } = await sb.from('kt_scan_batches').select('processed, failed, buy_signals').eq('batch_id', batchId).single();
     if (data) {
       await sb.from('kt_scan_batches').update({
@@ -241,7 +244,7 @@ export async function updateScanBatch(batchId, processed, failed, buySignals) {
         buy_signals: (data.buy_signals || 0) + buySignals,
       }).eq('batch_id', batchId);
     }
-  });
+  }
 }
 
 // 배치 완료 처리

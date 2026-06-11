@@ -2,7 +2,7 @@
 // 매일 17:00 KST (UTC 08:00) — 전체 종목 스캔
 // 6시간마다 — 매크로 갱신
 import cron from 'node-cron';
-import { calcRSI, calcMA, calcBollinger, calcMACD } from './analysis.js';
+import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermoreScore } from './analysis.js';
 import { getFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase } from './db.js';
 import { KS_UNIVERSE, KQ_UNIVERSE } from './data.js';
 
@@ -75,8 +75,16 @@ async function analyzeStockLean(code) {
     if (buyPts >= 3)  { signal = 'BUY';  confidence = Math.min(35 + buyPts * 10, 95); }
     if (sellPts >= 3) { signal = 'SELL'; confidence = Math.min(35 + sellPts * 10, 95); }
 
+    // 린치·리버모어 본채점 — 일봉에서 계산한 지표 그대로 사용
     const fundamentals = await getFundamentalsCache(code).catch(() => null);
-    const pScore = fundamentals ? calcLynchScoreSimple(fundamentals) : 0;
+    const dart = fundamentals?.dart ?? null;
+    const { pScore } = calcLynchScore(
+      cur, ma5, ma20, ma60, rsiVal ?? 50, volRatio ?? 1, changeRate, dart, fundamentals,
+    );
+    const { lScore } = calcLivermoreScore(
+      cur, ma5, ma20, ma60, rsiVal ?? 50, volRatio ?? 1, changeRate, high52w,
+      macdVal?.lastCross ?? null, bb,
+    );
 
     return {
       code, close: cur, changeRate, volRatio, rsi: rsiVal, source: 'naver',
@@ -84,22 +92,12 @@ async function analyzeStockLean(code) {
       ma5, ma20, ma60, near52wHigh,
       combinedSignal: { signal, confidence, buyPts, sellPts },
       pScore,
-      lScore: 0,
+      lScore,
       fScore: null,
     };
   } catch {
     return null;
   }
-}
-
-function calcLynchScoreSimple(fund) {
-  let score = 0;
-  if (fund.peg !== null && fund.peg < 1)          score += 15;
-  if (fund.roe !== null && fund.roe > 10)          score += 10;
-  if (fund.per !== null && fund.per < 20)          score += 10;
-  if (fund.pbr !== null && fund.pbr < 3)           score += 5;
-  if (fund.revenueGrowth !== null && fund.revenueGrowth > 10) score += 10;
-  return Math.min(score, 100);
 }
 
 // ── 전체 스캔 (청크 단위 처리) ───────────────────────────────────

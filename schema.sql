@@ -39,6 +39,15 @@ CREATE TABLE IF NOT EXISTS kt_daily_analysis (
 CREATE INDEX IF NOT EXISTS idx_kt_daily_date_signal ON kt_daily_analysis (analysis_date, signal);
 CREATE INDEX IF NOT EXISTS idx_kt_daily_code ON kt_daily_analysis (code);
 
+-- PostgREST 임베디드 조인(kt_stocks (name, market, sector))에 FK 필수
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'kt_daily_analysis_code_fkey') THEN
+    ALTER TABLE kt_daily_analysis
+      ADD CONSTRAINT kt_daily_analysis_code_fkey
+      FOREIGN KEY (code) REFERENCES kt_stocks(code) ON DELETE CASCADE;
+  END IF;
+END $$;
+
 -- ── 스캔 배치 로그 ────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS kt_scan_batches (
   batch_id      TEXT PRIMARY KEY,
