@@ -69,13 +69,15 @@ export async function fetchNaverFundamentals(code) {
       const x = parseFloat(String(v).replace(/,/g, ''));
       return isNaN(x) ? null : x;
     };
+    const ms = n(d.marketSum);
     return {
       per:           n(d.per),
       eps:           n(d.eps),
       roe:           n(d.roe),
       pbr:           n(d.pbr),
       dividendYield: n(d.yield),
-      marketCap:     n(d.marketSum),   // 억원 단위
+      // Naver marketSum은 백만원 단위 → 억원으로 변환(÷100). 프런트/스크리너는 모두 억원 가정.
+      marketCap:     ms != null ? ms / 100 : null,
     };
   } catch { return null; }
 }
