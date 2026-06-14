@@ -29,7 +29,7 @@ import {
   krxStock, naverStock, naverHistory, yahooStock,
   krxHistory, yahooHistory, isValidYahooResult,
   fetchDartDisclosures, fetchYahooNews,
-  KRX_INDICES, YAHOO_SYMBOLS, fetchIndex, fetchYahooSymbol, fetchIndexOHLCV,
+  KRX_INDICES, YAHOO_SYMBOLS, fetchIndex, fetchYahooSymbol, fetchIndexOHLCV, fetchKospiFutures,
   KS_UNIVERSE, KQ_UNIVERSE,
 } from './data.js';
 import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMacroHistory, saveMacroSnapshot, validateAppUser, getAppUsers, createAppUser, deleteAppUser, updateAppUserPassword, getSupabase, getWatchlist, addToWatchlist, removeFromWatchlist, getTrades, getHoldings, addTrade, deleteTrade, getThesis, upsertThesis, listTheses } from './db.js';
@@ -489,11 +489,13 @@ app.get('/api/market', async (req, res) => {
   if (cache.market.data && Date.now() - cache.market.ts < CACHE_TTL_MARKET) {
     return res.json({ ...cache.market.data, fromCache: true });
   }
-  const [krxResults, yahooResults] = await Promise.all([
+  const [krxResults, yahooResults, kospiFut] = await Promise.all([
     Promise.all(KRX_INDICES.map(e => fetchIndex(e))),
     Promise.all(YAHOO_SYMBOLS.map(fetchYahooSymbol)),
+    fetchKospiFutures(),
   ]);
-  const data = { market: [...krxResults, ...yahooResults], serverTime: Date.now() };
+  // 코스피·코스닥 바로 뒤에 선물 카드가 오도록 KRX 결과 다음에 합류
+  const data = { market: [...krxResults, kospiFut, ...yahooResults], serverTime: Date.now() };
   cache.market = { data, ts: Date.now() };
   res.json(data);
 });

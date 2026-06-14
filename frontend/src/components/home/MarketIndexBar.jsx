@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { authHeaders } from '../../contexts/AuthContext';
 
-const ORDER = ['kospi', 'kosdaq', 'sp500', 'nasdaq', 'dow', 'usdkrw', 'us10y', 'vix'];
+const ORDER = ['kospi', 'kosdaq', 'kf', 'sp500', 'nasdaq', 'dow', 'usdkrw', 'us10y', 'vix'];
 
 function fmt(id, price) {
   if (!price) return '-';

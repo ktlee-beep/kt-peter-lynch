@@ -455,6 +455,38 @@ export async function fetchIndex(entry) {
   } catch { return { id: entry.id, name: entry.name, error: true }; }
 }
 
+// 코스피200 선물 — Hyperliquid 'xyz' 빌더 dex의 KR200 무기한 선물(perp).
+// 정규장·시간외 무관 24시간 시세 → 장 마감 후 다음날 방향 신호. (hlkr.co.kr 방식)
+// 공식 KRX 정규 선물이 아닌 24h 참고용 합성가이므로 name에 '(24h)' 명시.
+export async function fetchKospiFutures() {
+  const FALLBACK = { id: 'kf', name: '코스피200 선물(24h)', error: true };
+  try {
+    const r = await fetch('https://api.hyperliquid.xyz/info', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'metaAndAssetCtxs', dex: 'xyz' }),
+    });
+    if (!r.ok) return FALLBACK;
+    const data = await r.json();
+    const universe = data?.[0]?.universe || [];
+    const ctxs     = data?.[1] || [];
+    const idx = universe.findIndex(u => u.name === 'xyz:KR200');
+    if (idx < 0) return FALLBACK;
+    const c = ctxs[idx] || {};
+    const price = parseFloat(c.markPx ?? c.midPx);
+    const prev  = parseFloat(c.prevDayPx);
+    if (!Number.isFinite(price)) return FALLBACK;
+    const hasPrev = Number.isFinite(prev) && prev > 0;
+    return {
+      id: 'kf', name: '코스피200 선물(24h)', source: 'HL(perp)',
+      price,
+      previousClose: hasPrev ? prev : null,
+      change:        hasPrev ? price - prev : null,
+      changeRate:    hasPrev ? (price - prev) / prev * 100 : null,
+    };
+  } catch { return FALLBACK; }
+}
+
 export async function fetchYahooSymbol(entry) {
   try {
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${entry.symbol}?interval=1d&range=2d`;
