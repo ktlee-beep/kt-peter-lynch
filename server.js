@@ -32,7 +32,7 @@ import {
   KRX_INDICES, YAHOO_SYMBOLS, fetchIndex, fetchYahooSymbol, fetchIndexOHLCV, fetchKospiFutures,
   KS_UNIVERSE, KQ_UNIVERSE,
 } from './data.js';
-import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMacroHistory, saveMacroSnapshot, validateAppUser, getAppUsers, createAppUser, deleteAppUser, updateAppUserPassword, getSupabase, getWatchlist, addToWatchlist, removeFromWatchlist, getTrades, getHoldings, addTrade, deleteTrade, getThesis, upsertThesis, listTheses, getLatestMorningBrief, getUsScan } from './db.js';
+import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMacroHistory, saveMacroSnapshot, validateAppUser, getAppUsers, createAppUser, deleteAppUser, updateAppUserPassword, getSupabase, getWatchlist, addToWatchlist, removeFromWatchlist, getTrades, getHoldings, addTrade, deleteTrade, getThesis, upsertThesis, listTheses, getLatestMorningBrief, getUsScan, clearDartCache } from './db.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1626,6 +1626,16 @@ app.post('/api/scan/us/trigger', async (req, res) => {
   const { runUsScan } = await import('./cron.js');
   runUsScan().catch(console.error);
   res.json({ ok: true, message: '미국 스캔 시작됨 (비동기)' });
+});
+
+// ── DART 재무 캐시 전체 삭제 (마스터) — 스코어링 변경 후 강제 재수집 ──
+app.post('/api/admin/clear-dart-cache', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const n = await clearDartCache();
+    res.json({ ok: true, cleared: n });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ── DART 기업코드 매핑 갱신 (마스터) — 전체 상장사 corp_code 적재 ──

@@ -435,6 +435,15 @@ export async function setDartCache(code, dart) {
   await kvSet(`__dart__${code}`, dart ?? null);
 }
 
+// DART 재무 캐시 전체 삭제 (스코어링 로직 변경 시 강제 재수집용)
+export async function clearDartCache() {
+  const sb = getSupabase();
+  const { error, count } = await sb.from('kt_fundamentals_cache')
+    .delete({ count: 'exact' }).like('code', '__dart__%');
+  if (error) throw error;
+  return count ?? 0;
+}
+
 // ── 아침 브리핑 ────────────────────────────────────────────────────
 // 매 영업일 08:00 KST cron이 단일 키(__morning_brief__)에 최신 1건 저장.
 export async function saveMorningBrief(brief) {
