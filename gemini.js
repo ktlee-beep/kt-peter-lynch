@@ -54,8 +54,11 @@ async function callGemini(prompt) {
     try {
       // Gemma는 JSON 모드(responseMimeType)·systemInstruction 미지원 → 생략하고
       // 프롬프트의 "JSON으로만 응답" 지시 + extractJson으로 파싱
-      const generationConfig = { temperature: 0.4, maxOutputTokens: 800 };
+      const generationConfig = { temperature: 0.4, maxOutputTokens: 2048 };
       if (!isGemma) generationConfig.responseMimeType = 'application/json';
+      // Gemini 2.5는 thinking 기본 ON → 사고 토큰이 출력 예산을 잠식해 응답이 잘림.
+      // thinkingBudget 0으로 비활성화하여 출력 토큰을 확보.
+      if (model.startsWith('gemini-2.5')) generationConfig.thinkingConfig = { thinkingBudget: 0 };
 
       const res = await fetch(`${GEMINI_BASE}/${model}:generateContent?key=${apiKey}`, {
         method: 'POST',
