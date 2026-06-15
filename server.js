@@ -1628,31 +1628,6 @@ app.post('/api/scan/us/trigger', async (req, res) => {
   res.json({ ok: true, message: '미국 스캔 시작됨 (비동기)' });
 });
 
-// ── /api/sectors — 섹터 강도·대장주 (한국 BUY 신호 집계) ──────────
-app.get('/api/sectors', async (req, res) => {
-  try {
-    const buys = await getScanResults({ signal: 'BUY', limit: 300 });
-    const map = {};
-    for (const r of buys) {
-      const sec = r.sector || SECTOR_MAP[r.code] || '기타';
-      if (!map[sec]) map[sec] = { sector: sec, count: 0, scoreSum: 0, leader: null };
-      const g = map[sec];
-      g.count++;
-      const score = r.combined_score ?? Math.round(((r.lynch_score || 0) + (r.livermore_score || 0)) / 2);
-      g.scoreSum += score;
-      if (!g.leader || score > g.leader.score) {
-        g.leader = { code: r.code, name: r.name, score, changeRate: r.change_rate, lynch: r.lynch_score, livermore: r.livermore_score };
-      }
-    }
-    const sectors = Object.values(map)
-      .map(g => ({ sector: g.sector, buyCount: g.count, avgScore: Math.round(g.scoreSum / g.count), leader: g.leader }))
-      .sort((a, b) => (b.buyCount - a.buyCount) || (b.avgScore - a.avgScore));
-    res.json({ sectors, serverTime: Date.now() });
-  } catch (e) {
-    res.status(500).json({ error: e.message, sectors: [] });
-  }
-});
-
 // ── DART 기업코드 매핑 갱신 (마스터) — 전체 상장사 corp_code 적재 ──
 app.post('/api/admin/refresh-corpcodes', authMiddleware, adminMiddleware, async (req, res) => {
   try {

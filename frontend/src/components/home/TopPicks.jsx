@@ -30,7 +30,7 @@ export default function TopPicks() {
       .then(d => {
         if (cancelled) return;
         const val = tab === 'kr' ? (d.results || [])
-          : tab === 'sector' ? (d.sectors || [])
+          : tab === 'sector' ? [...(d.sectors || [])].sort((a, b) => (b.avgChange ?? 0) - (a.avgChange ?? 0))
           : (d.stocks || []);
         setCache(c => ({ ...c, [tab]: val }));
         setLoading(false);
@@ -99,20 +99,20 @@ export default function TopPicks() {
         ) : tab === 'sector' ? (
           <ul className="space-y-1.5">
             {data.slice(0, 6).map((s, i) => (
-              <li key={s.sector} className="flex items-center justify-between gap-2 bg-surface-950 rounded-lg px-3 py-2">
+              <li key={s.name} className="flex items-center justify-between gap-2 bg-surface-950 rounded-lg px-3 py-2">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5">
                     <span className="text-[10px] text-slate-600 w-3.5">{i + 1}</span>
-                    <span className="text-sm text-white">{s.sector}</span>
-                    <span className="text-[9px] bg-green-500/15 text-green-400 px-1.5 rounded-full">매수 {s.buyCount}</span>
+                    <span className="text-sm text-white">{s.name}</span>
+                    <span className="text-[9px] bg-slate-800 text-slate-400 px-1.5 rounded-full">{s.count}종목</span>
                   </div>
-                  {s.leader && (
+                  {s.stocks?.[0] && (
                     <p className="text-[10px] text-slate-500 mt-0.5 ml-5">
-                      대장주 {s.leader.name} <span className={scoreColor(s.leader.score)}>{s.leader.score}점</span>
+                      대장주 {s.stocks[0].name} <span className={chgColor(s.stocks[0].changeRate)}>{fmtChg(s.stocks[0].changeRate)}</span>
                     </p>
                   )}
                 </div>
-                <span className="text-[11px] text-slate-500 flex-shrink-0">평균 <span className={scoreColor(s.avgScore)}>{s.avgScore}</span></span>
+                <span className={`text-[11px] font-semibold flex-shrink-0 ${chgColor(s.avgChange)}`}>{fmtChg(s.avgChange)}</span>
               </li>
             ))}
           </ul>
@@ -139,7 +139,7 @@ export default function TopPicks() {
         )}
 
         <p className="text-[9px] text-slate-700 text-right mt-2">
-          {tab === 'us' ? '다우30·나스닥 핵심 · 기술점수' : tab === 'sector' ? '한국 매수신호 섹터 집계' : '린치·리버모어·DART F-Score 스캔'} · 참고용
+          {tab === 'us' ? '다우30·나스닥 핵심 · 기술점수' : tab === 'sector' ? '섹터별 평균 등락·대장주 (최근 스캔)' : '린치·리버모어·DART F-Score 스캔'} · 참고용
         </p>
       </div>
     </div>
