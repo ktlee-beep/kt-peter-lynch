@@ -40,6 +40,60 @@ function AccountSection() {
   );
 }
 
+// ── AI 키 설정 (마스터 전용) — Gemini/Gemma ───────────────────────
+function AiKeySection() {
+  const [status, setStatus] = useState(null);
+  const [key, setKey]       = useState('');
+  const [busy, setBusy]     = useState(false);
+  const [msg, setMsg]       = useState('');
+
+  const loadStatus = () => {
+    fetch('/api/admin/ai-key', { headers: authHeaders() })
+      .then(r => r.json()).then(setStatus).catch(() => {});
+  };
+  useEffect(loadStatus, []);
+
+  const save = async () => {
+    if (!key.trim()) { setMsg('키를 입력하세요'); return; }
+    setBusy(true); setMsg('');
+    try {
+      const r = await fetch('/api/admin/ai-key', {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: key.trim() }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '저장 실패');
+      setKey(''); setMsg(`저장됨 (${d.masked}). AI 코멘트·아침 브리핑이 곧 작동합니다.`);
+      loadStatus();
+    } catch (e) { setMsg(e.message); } finally { setBusy(false); }
+  };
+
+  const inputCls = 'w-full bg-surface-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-brand-500';
+
+  return (
+    <Section title="AI 키 (Gemini · Gemma)" subtitle="마스터 전용">
+      <div className="flex items-center gap-2 mb-3 text-xs">
+        <span className="text-slate-500">현재:</span>
+        {status?.set
+          ? <span className="text-green-400">설정됨 · {status.masked} <span className="text-slate-600">({status.source})</span></span>
+          : <span className="text-yellow-400">미설정 — AI 기능이 작동하지 않습니다</span>}
+      </div>
+      <input className={inputCls} type="password" placeholder="AIza... (Google AI Studio 키)"
+        value={key} onChange={e => setKey(e.target.value)} />
+      <button onClick={save} disabled={busy}
+        className="w-full mt-2 bg-brand-500 hover:bg-brand-600 disabled:opacity-50 text-white font-medium rounded-lg py-2.5 text-sm transition-colors">
+        {busy ? '저장 중...' : '키 저장'}
+      </button>
+      {msg && <p className="text-[11px] text-slate-400 mt-2">{msg}</p>}
+      <p className="text-[10px] text-slate-600 mt-3 leading-relaxed">
+        aistudio.google.com/apikey 에서 무료 발급. 이 키로 Gemini·Gemma 모두 사용.
+        키는 서버 DB에만 저장되며 외부로 전송되지 않습니다.
+      </p>
+    </Section>
+  );
+}
+
 // ── 가입자 관리 (마스터 전용) ─────────────────────────────────────
 function UserManagement() {
   const [users, setUsers]     = useState([]);
@@ -252,6 +306,7 @@ export default function SettingsPage() {
 
       <div className="flex-1 overflow-y-auto pb-20 scrollbar-hide">
         <AccountSection />
+        {isMaster && <AiKeySection />}
         {isMaster && <UserManagement />}
         {isMaster && <AdminTools />}
         {!isMaster && (

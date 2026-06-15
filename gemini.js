@@ -1,7 +1,19 @@
 // 최신 모델 우선 시도, 실패(미지원/한도)면 다음 모델 폴백.
 // Gemma도 동일 Google API·동일 키 사용. Gemini 한도 초과 시 Gemma로 자동 폴백.
+import { getAppConfig } from './db.js';
+
 const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemma-4-31b-it', 'gemma-4-4b-it'];
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+
+// 키 조회: Render 환경변수 우선, 없으면 DB(설정 화면 입력값). 60초 캐시.
+let _keyCache = { value: null, ts: 0 };
+async function getApiKey() {
+  if (process.env.GEMINI_API_KEY) return process.env.GEMINI_API_KEY;
+  if (_keyCache.value && Date.now() - _keyCache.ts < 60000) return _keyCache.value;
+  const k = await getAppConfig('gemini_api_key').catch(() => null);
+  _keyCache = { value: k, ts: Date.now() };
+  return k;
+}
 
 const cache = new Map();
 const CACHE_TTL = 24 * 60 * 60 * 1000;
@@ -33,8 +45,8 @@ function extractJson(text) {
 }
 
 async function callGemini(prompt) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error('GEMINI_API_KEY 환경변수 미설정');
+  const apiKey = await getApiKey();
+  if (!apiKey) throw new Error('AI 키 미설정 — 설정 화면에서 Gemini/Gemma 키를 입력하세요');
 
   let lastErr;
   for (const model of GEMINI_MODELS) {

@@ -399,6 +399,16 @@ async function kvSet(key, obj) {
   }, { onConflict: 'code' });
 }
 
+// ── 앱 설정 (KV) — Render 환경변수 없이 키 등을 DB에 보관 ──────────
+export async function setAppConfig(key, value) {
+  await kvSet(`__config__${key}`, { value });
+}
+export async function getAppConfig(key) {
+  const row = await kvGet(`__config__${key}`);
+  if (!row) return null;
+  try { return JSON.parse(row.raw_json)?.value ?? null; } catch { return null; }
+}
+
 // ── 미국 스캔 결과 (KV 단일 블롭) ─────────────────────────────────
 export async function saveUsScan(payload) { await kvSet('__us_scan__', payload); }
 export async function getUsScan() {

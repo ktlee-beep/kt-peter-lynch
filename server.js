@@ -32,7 +32,7 @@ import {
   KRX_INDICES, YAHOO_SYMBOLS, fetchIndex, fetchYahooSymbol, fetchIndexOHLCV, fetchKospiFutures,
   KS_UNIVERSE, KQ_UNIVERSE,
 } from './data.js';
-import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMacroHistory, saveMacroSnapshot, validateAppUser, getAppUsers, createAppUser, deleteAppUser, updateAppUserPassword, getSupabase, getWatchlist, addToWatchlist, removeFromWatchlist, getTrades, getHoldings, addTrade, deleteTrade, getThesis, upsertThesis, listTheses, getLatestMorningBrief, getUsScan, clearDartCache } from './db.js';
+import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMacroHistory, saveMacroSnapshot, validateAppUser, getAppUsers, createAppUser, deleteAppUser, updateAppUserPassword, getSupabase, getWatchlist, addToWatchlist, removeFromWatchlist, getTrades, getHoldings, addTrade, deleteTrade, getThesis, upsertThesis, listTheses, getLatestMorningBrief, getUsScan, clearDartCache, setAppConfig, getAppConfig } from './db.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1626,6 +1626,29 @@ app.post('/api/scan/us/trigger', async (req, res) => {
   const { runUsScan } = await import('./cron.js');
   runUsScan().catch(console.error);
   res.json({ ok: true, message: '미국 스캔 시작됨 (비동기)' });
+});
+
+// ── AI 키 설정 (마스터) — Render 환경변수 없이 DB에 보관 ─────────
+app.get('/api/admin/ai-key', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const envKey = process.env.GEMINI_API_KEY;
+    const dbKey  = envKey ? null : await getAppConfig('gemini_api_key');
+    const k = envKey || dbKey;
+    res.json({
+      set: !!k,
+      source: envKey ? 'env(Render)' : (dbKey ? 'db(설정화면)' : 'none'),
+      masked: k ? `${k.slice(0, 4)}...${k.slice(-4)}` : null,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/admin/ai-key', authMiddleware, adminMiddleware, async (req, res) => {
+  const key = (req.body?.key || '').trim();
+  if (key.length < 20) return res.status(400).json({ error: '유효한 키를 입력하세요 (AI Studio 키는 보통 AIza로 시작)' });
+  try {
+    await setAppConfig('gemini_api_key', key);
+    res.json({ ok: true, masked: `${key.slice(0, 4)}...${key.slice(-4)}` });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── DART 재무 캐시 전체 삭제 (마스터) — 스코어링 변경 후 강제 재수집 ──
