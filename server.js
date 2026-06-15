@@ -1172,7 +1172,7 @@ app.get('/api/alerts', async (req, res) => {
 
       if (signal.length) {
         alerts.push({
-          code: r.code, name: aj.name || r.code,
+          code: r.code, name: krxName(r.code) || aj.name || r.code,
           price: r.close_price, changeRate: r.change_rate,
           rsi: r.rsi, signal, lynchScore: r.lynch_score,
           analysisDate: r.analysis_date,
