@@ -16,6 +16,7 @@ export default function TopPicks() {
   const [tab, setTab] = useState('kr');
   const [cache, setCache] = useState({});   // { kr: [...], sector: [...], us: {...} }
   const [loading, setLoading] = useState(false);
+  const [expandedUs, setExpandedUs] = useState(null);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -118,23 +119,47 @@ export default function TopPicks() {
           </ul>
         ) : (
           <ul className="space-y-1.5">
-            {data.slice(0, 8).map((s, i) => (
-              <li key={s.ticker} className="flex items-center justify-between gap-2 bg-surface-950 rounded-lg px-3 py-2">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[10px] text-slate-600 w-3.5">{i + 1}</span>
-                    <span className="text-sm text-white truncate">{s.name}</span>
-                    <span className="text-[9px] text-slate-600 flex-shrink-0">{s.ticker}</span>
-                    {s.signal === 'BUY' && <span className="text-[9px] bg-green-500/15 text-green-400 px-1.5 rounded-full flex-shrink-0">BUY</span>}
-                  </div>
-                </div>
-                <div className="flex items-center gap-2.5 flex-shrink-0 text-[11px]">
-                  <span className="text-slate-500">리버모어 <span className={scoreColor(s.livermoreScore)}>{s.livermoreScore}</span></span>
-                  {s.pos52w != null && <span className="text-slate-600">52주 {s.pos52w}%</span>}
-                  <span className={`${chgColor(s.changeRate)} w-12 text-right`}>{fmtChg(s.changeRate)}</span>
-                </div>
-              </li>
-            ))}
+            {data.slice(0, 8).map((s, i) => {
+              const open = expandedUs === s.ticker;
+              return (
+                <li key={s.ticker} className="bg-surface-950 rounded-lg overflow-hidden">
+                  <button
+                    onClick={() => setExpandedUs(open ? null : s.ticker)}
+                    className="w-full flex items-center justify-between gap-2 px-3 py-2 hover:bg-slate-800 transition-colors text-left"
+                  >
+                    <div className="min-w-0 flex-1 flex items-center gap-1.5">
+                      <span className="text-[10px] text-slate-600 w-3.5">{i + 1}</span>
+                      <span className="text-sm text-white truncate">{s.name}</span>
+                      <span className="text-[9px] text-slate-600 flex-shrink-0">{s.ticker}</span>
+                      {s.signal === 'BUY' && <span className="text-[9px] bg-green-500/15 text-green-400 px-1.5 rounded-full flex-shrink-0">BUY</span>}
+                    </div>
+                    <div className="flex items-center gap-2.5 flex-shrink-0 text-[11px]">
+                      <span className="text-slate-500">리버모어 <span className={scoreColor(s.livermoreScore)}>{s.livermoreScore}</span></span>
+                      <span className={`${chgColor(s.changeRate)} w-12 text-right`}>{fmtChg(s.changeRate)}</span>
+                    </div>
+                  </button>
+                  {open && (
+                    <div className="px-3 pb-2.5 pt-1 border-t border-slate-800/70">
+                      <div className="grid grid-cols-3 gap-x-2 gap-y-1.5 text-[11px] mt-1.5">
+                        <div><span className="text-slate-600">현재가</span> <span className="text-slate-300">${Number(s.price).toFixed(2)}</span></div>
+                        <div><span className="text-slate-600">RSI</span> <span className="text-slate-300">{s.rsi != null ? Number(s.rsi).toFixed(0) : '-'}</span></div>
+                        <div><span className="text-slate-600">52주</span> <span className="text-slate-300">{s.pos52w ?? '-'}%</span></div>
+                        <div><span className="text-slate-600">신호</span> <span className={s.signal === 'BUY' ? 'text-green-400' : s.signal === 'SELL' ? 'text-red-400' : 'text-slate-400'}>{s.signal}</span></div>
+                        <div><span className="text-slate-600">신뢰도</span> <span className="text-slate-300">{s.confidence ?? '-'}</span></div>
+                        <div><span className="text-slate-600">MACD</span> <span className={s.macdCross === 'golden' ? 'text-green-400' : s.macdCross === 'dead' ? 'text-red-400' : 'text-slate-400'}>{s.macdCross === 'golden' ? '골든' : s.macdCross === 'dead' ? '데드' : '-'}</span></div>
+                      </div>
+                      <a
+                        href={`https://finance.yahoo.com/quote/${s.ticker}`}
+                        target="_blank" rel="noopener noreferrer"
+                        className="inline-block mt-2 text-[11px] text-brand-400 hover:text-brand-300"
+                      >
+                        Yahoo Finance에서 차트 보기 →
+                      </a>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         )}
 

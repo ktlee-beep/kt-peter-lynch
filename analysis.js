@@ -627,8 +627,9 @@ export function calcPiotroski(dart, fund) {
     else { details.push({ text, pass: false }); }
   };
 
-  // 수익성 — DART 공시 기반
-  chk(dart?.opMargin,      v => v > 0,  '영업이익 흑자');
+  // 수익성 — DART 공시 기반 (금융사는 매출 대신 영업이익·순이익으로 평가)
+  chk(dart?.opProfit,      v => v > 0,  '영업이익 흑자');
+  chk(dart?.netGrowth,     v => v > 0,  '순이익 증가');
   chk(dart?.revenueGrowth, v => v > 0,  '매출 성장');
   chk(dart?.opGrowth,      v => v > 0,  '영업이익 증가');
   chk(dart?.opMargin,      v => v > 8,  '영업이익률 8% 이상');

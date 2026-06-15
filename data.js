@@ -202,12 +202,20 @@ export async function fetchDartFinancials(corpCode, dartKey) {
         return null;
       };
       const rev = find(['매출액', '수익(매출액)', '영업수익', '매출']);
-      const op  = find(['영업이익', '영업손익']);
-      if (!rev || rev.cur === 0) continue;
-      const revenueGrowth = rev.prev ? ((rev.cur - rev.prev) / Math.abs(rev.prev)) * 100 : null;
-      const opMargin      = rev.cur  > 0 && op ? (op.cur / rev.cur) * 100 : null;
-      const opGrowth      = op && op.prev > 0  ? ((op.cur - op.prev) / Math.abs(op.prev)) * 100 : null;
-      return { revenueGrowth, opMargin, opGrowth, year: bsnsYear };
+      const op  = find(['영업이익', '영업손익']);  // '영업이익(손실)' 포함 (includes 매칭)
+      const net = find(['당기순이익', '당기순손익']);
+      // 금융사 등은 매출액이 없으므로 영업이익만 있어도 진행
+      if ((!rev || rev.cur === 0) && (!op || op.cur === 0)) continue;
+      const hasRev = rev && rev.cur !== 0;
+      const revenueGrowth = hasRev && rev.prev ? ((rev.cur - rev.prev) / Math.abs(rev.prev)) * 100 : null;
+      const opMargin      = hasRev && rev.cur > 0 && op ? (op.cur / rev.cur) * 100 : null;
+      const opGrowth      = op && op.prev > 0   ? ((op.cur - op.prev) / Math.abs(op.prev)) * 100 : null;
+      const netGrowth     = net && net.prev > 0 ? ((net.cur - net.prev) / Math.abs(net.prev)) * 100 : null;
+      return {
+        revenueGrowth, opMargin, opGrowth, netGrowth,
+        opProfit: op?.cur ?? null, netProfit: net?.cur ?? null,
+        year: bsnsYear,
+      };
     } catch {}
   }
   return null;
