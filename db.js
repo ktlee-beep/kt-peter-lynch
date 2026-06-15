@@ -381,75 +381,66 @@ export async function listTheses(email) {
   return data || [];
 }
 
+// ── 범용 KV 저장소 ─────────────────────────────────────────────────
+// 기존 kt_fundamentals_cache(code TEXT PK, raw_json TEXT, updated_at) 테이블을
+// 네임스페이스 키(__prefix__)로 재사용. 신규 테이블 DDL 권한이 없는 운영
+// 환경(DATABASE_URL 미설정)에서도 REST만으로 동작시키기 위함. 6자리 종목코드와
+// 키가 겹치지 않으므로 재무 캐시와 충돌 없음.
+async function kvGet(key) {
+  const sb = getSupabase();
+  const { data } = await sb.from('kt_fundamentals_cache')
+    .select('raw_json, updated_at').eq('code', key).maybeSingle();
+  return data || null;
+}
+async function kvSet(key, obj) {
+  const sb = getSupabase();
+  await sb.from('kt_fundamentals_cache').upsert({
+    code: key, raw_json: JSON.stringify(obj), updated_at: new Date().toISOString(),
+  }, { onConflict: 'code' });
+}
+
 // ── DART 기업코드 매핑 (전체 상장사 code → corp_code) ─────────────
+// 단일 블롭(__corpmap__)으로 저장 — 약 3,900개, ~100KB
 export async function upsertCorpCodes(rows) {
   if (!rows?.length) return 0;
-  const sb = getSupabase();
-  const CHUNK = 500;
-  let n = 0;
-  for (let i = 0; i < rows.length; i += CHUNK) {
-    const slice = rows.slice(i, i + CHUNK).map(r => ({
-      code: r.code, corp_code: r.corp_code, corp_name: r.corp_name || '',
-      updated_at: new Date().toISOString(),
-    }));
-    const { error } = await sb.from('kt_corp_codes').upsert(slice, { onConflict: 'code' });
-    if (!error) n += slice.length;
-  }
-  return n;
+  const map = {};
+  for (const r of rows) map[r.code] = r.corp_code;
+  await kvSet('__corpmap__', map);
+  return Object.keys(map).length;
 }
 
 export async function loadCorpCodeMap() {
-  const sb = getSupabase();
-  const map = {};
-  const PAGE = 1000; // Supabase 기본 행 제한 → 페이지네이션
-  for (let from = 0; ; from += PAGE) {
-    const { data, error } = await sb.from('kt_corp_codes').select('code, corp_code').range(from, from + PAGE - 1);
-    if (error || !data?.length) break;
-    for (const r of data) map[r.code] = r.corp_code;
-    if (data.length < PAGE) break;
-  }
-  return map;
+  const row = await kvGet('__corpmap__');
+  if (!row) return {};
+  try { return JSON.parse(row.raw_json) || {}; } catch { return {}; }
 }
 
 // ── DART 재무 캐시 (분기 데이터 → 기본 90일 TTL) ──────────────────
 export async function getDartCache(code, maxDays = 90) {
-  const sb = getSupabase();
-  const { data } = await sb.from('kt_dart_cache').select('dart_json, updated_at').eq('code', code).maybeSingle();
-  if (!data) return undefined;
-  if (Date.now() - new Date(data.updated_at).getTime() > maxDays * 86400000) return undefined;
-  try { return JSON.parse(data.dart_json); } catch { return undefined; }
+  const row = await kvGet(`__dart__${code}`);
+  if (!row) return undefined;
+  if (Date.now() - new Date(row.updated_at).getTime() > maxDays * 86400000) return undefined;
+  try { return JSON.parse(row.raw_json); } catch { return undefined; }
 }
 
 export async function setDartCache(code, dart) {
-  const sb = getSupabase();
-  await sb.from('kt_dart_cache').upsert({
-    code, dart_json: JSON.stringify(dart ?? null), updated_at: new Date().toISOString(),
-  }, { onConflict: 'code' });
+  await kvSet(`__dart__${code}`, dart ?? null);
 }
 
 // ── 아침 브리핑 ────────────────────────────────────────────────────
-// 매 영업일 08:00 KST cron이 1일 1행 저장. 앱 홈 카드가 최신 1건 조회.
+// 매 영업일 08:00 KST cron이 단일 키(__morning_brief__)에 최신 1건 저장.
 export async function saveMorningBrief(brief) {
-  const sb = getSupabase();
   const today = new Date().toISOString().slice(0, 10);
-  await sb.from('kt_morning_brief').upsert({
-    brief_date: today,
-    brief_json: JSON.stringify(brief),
-    created_at: new Date().toISOString(),
-  }, { onConflict: 'brief_date' });
+  await kvSet('__morning_brief__', { ...brief, briefDate: today });
 }
 
 export async function getLatestMorningBrief() {
-  const sb = getSupabase();
-  const { data } = await sb.from('kt_morning_brief')
-    .select('brief_date, brief_json, created_at')
-    .order('brief_date', { ascending: false })
-    .limit(1);
-  const row = data?.[0];
+  const row = await kvGet('__morning_brief__');
   if (!row) return null;
-  let brief;
-  try { brief = JSON.parse(row.brief_json); } catch { return null; }
-  return { ...brief, briefDate: row.brief_date, createdAt: row.created_at };
+  try {
+    const brief = JSON.parse(row.raw_json);
+    return { ...brief, createdAt: row.updated_at };
+  } catch { return null; }
 }
 
 // 재무 캐시 조회
