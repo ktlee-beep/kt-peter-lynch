@@ -73,6 +73,21 @@ CREATE TABLE IF NOT EXISTS kt_macro_snapshots (
   raw_json     TEXT
 );
 
+-- ── DART 기업코드 매핑 (전체 상장사 code → corp_code) ─────────────
+CREATE TABLE IF NOT EXISTS kt_corp_codes (
+  code        TEXT PRIMARY KEY,
+  corp_code   TEXT NOT NULL,
+  corp_name   TEXT,
+  updated_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ── DART 재무 캐시 (분기 데이터, 90일 TTL) ────────────────────────
+CREATE TABLE IF NOT EXISTS kt_dart_cache (
+  code        TEXT PRIMARY KEY,
+  dart_json   TEXT NOT NULL,
+  updated_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- ── 아침 브리핑 (매 영업일 08:00 KST 생성, 1일 1행) ───────────────
 CREATE TABLE IF NOT EXISTS kt_morning_brief (
   brief_date  DATE PRIMARY KEY,

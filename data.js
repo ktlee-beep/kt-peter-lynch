@@ -1,5 +1,6 @@
 // KT Trading — 외부 데이터 수집 (KRX, Yahoo, Naver, OpenDart)
 // env.* → process.env.* 으로 변환
+import AdmZip from 'adm-zip';
 
 export const CORP_MAP = {
   '005930': '00126380', '000660': '00164779', '373220': '01515323',
@@ -160,6 +161,25 @@ export async function fetchDartMultiYear(corpCode, dartKey) {
   const results = await Promise.all(years.map(fetchYear));
   // Return in chronological order, nulls where no data
   return years.map((yr, i) => results[i] || { year: yr, revenue: null, operatingProfit: null, netIncome: null, equity: null, debt: null, roe: null, debtRatio: null, currentRatio: null, opMargin: null }).reverse();
+}
+
+// DART 전체 상장사 corp_code 매핑 다운로드 (corpCode.xml ZIP → 상장사만 추출)
+// 반환: [{ code(6자리), corp_code(8자리), corp_name }] — 약 3,900개
+export async function fetchCorpCodeMap(dartKey) {
+  const r = await fetch(`https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key=${dartKey}`);
+  if (!r.ok) throw new Error(`DART corpCode HTTP ${r.status}`);
+  const buf = Buffer.from(await r.arrayBuffer());
+  const entry = new AdmZip(buf).getEntries().find(e => e.entryName.toUpperCase().endsWith('.XML'));
+  if (!entry) throw new Error('corpCode.xml 항목 없음');
+  const xml = entry.getData().toString('utf8');
+  const rows = [];
+  for (const b of xml.match(/<list>[\s\S]*?<\/list>/g) || []) {
+    const corp  = (b.match(/<corp_code>([^<]*)<\/corp_code>/)  || [])[1]?.trim();
+    const name  = (b.match(/<corp_name>([^<]*)<\/corp_name>/)  || [])[1]?.trim();
+    const stock = (b.match(/<stock_code>([^<]*)<\/stock_code>/) || [])[1]?.trim();
+    if (corp && stock && /^\d{6}$/.test(stock)) rows.push({ code: stock, corp_code: corp, corp_name: name || '' });
+  }
+  return rows;
 }
 
 export async function fetchDartFinancials(corpCode, dartKey) {

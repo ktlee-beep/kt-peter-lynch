@@ -2,9 +2,9 @@
 // 매일 17:00 KST (UTC 08:00) — 전체 종목 스캔
 // 6시간마다 — 매크로 갱신
 import cron from 'node-cron';
-import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermoreScore } from './analysis.js';
-import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief } from './db.js';
-import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures } from './data.js';
+import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermoreScore, calcPiotroski } from './analysis.js';
+import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief, loadCorpCodeMap, upsertCorpCodes, getDartCache, setDartCache } from './db.js';
+import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures, CORP_MAP, fetchCorpCodeMap, fetchDartFinancials } from './data.js';
 
 // ── 스캔 유니버스 (DB에 종목이 없으면 하드코딩된 유니버스 사용) ─
 function getScanUniverse() {
@@ -15,7 +15,8 @@ function getScanUniverse() {
 }
 
 // ── 경량 종목 분석 (Naver 일봉 기반) ────────────────────────────
-async function analyzeStockLean(code) {
+// corpResolver(code)→corp_code, dartKey: DART 재무로 진짜 Piotroski 산출
+async function analyzeStockLean(code, corpResolver = null, dartKey = '') {
   try {
     const naverUrl = `https://fchart.stock.naver.com/sise.nhn?symbol=${code}&timeframe=day&count=120&requestType=0`;
     const nr = await fetch(naverUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
@@ -81,7 +82,16 @@ async function analyzeStockLean(code) {
       fundamentals = await fetchNaverFundamentals(code).catch(() => null);
       if (fundamentals) await setFundamentalsCache(code, fundamentals).catch(() => {});
     }
-    const dart = fundamentals?.dart ?? null;
+
+    // DART 재무: 90일 캐시 우선 → 진짜 Piotroski F-Score 입력 (분기 데이터)
+    let dart = await getDartCache(code).catch(() => undefined);
+    if (dart === undefined) {
+      const corp = corpResolver ? corpResolver(code) : null;
+      dart = (corp && dartKey) ? await fetchDartFinancials(corp, dartKey).catch(() => null) : null;
+      await setDartCache(code, dart).catch(() => {});
+    }
+    const fScore = calcPiotroski(dart, fundamentals);
+
     const { pScore } = calcLynchScore(
       cur, ma5, ma20, ma60, rsiVal ?? 50, volRatio ?? 1, changeRate, dart, fundamentals,
     );
@@ -97,12 +107,24 @@ async function analyzeStockLean(code) {
       combinedSignal: { signal, confidence, buyPts, sellPts },
       pScore,
       lScore,
-      fScore: null,
+      fScore,       // 진짜 Piotroski (DART 통합) — 기존 null에서 실제 산출로 교체
+      dart,         // 스크리너/리포트에서 매출성장·영업이익률 활용
       fundamentals, // 스크리너 PER/PBR/ROE 필터용
     };
   } catch {
     return null;
   }
+}
+
+// ── DART 기업코드 매핑 갱신 (전체 상장사 code→corp_code) ─────────
+export async function refreshCorpCodes() {
+  const dartKey = process.env.DART_API_KEY;
+  if (!dartKey) { console.log('[Cron] DART_API_KEY 없음 — corp_code 갱신 스킵'); return { ok: false, count: 0, error: 'DART_API_KEY 미설정' }; }
+  console.log('[Cron] DART 기업코드 매핑 갱신 시작');
+  const rows = await fetchCorpCodeMap(dartKey);
+  const n = await upsertCorpCodes(rows);
+  console.log(`[Cron] DART 기업코드 ${n}/${rows.length}개 저장`);
+  return { ok: true, count: n, total: rows.length };
 }
 
 // ── 전체 스캔 (청크 단위 처리) ───────────────────────────────────
@@ -118,6 +140,17 @@ export async function runDailyScan() {
   }
   if (!stocks.length) stocks = getScanUniverse();
 
+  // corp_code 매핑 로드 — 비어 있으면 DART에서 1회 부트스트랩 (A: 전체 상장사 매핑)
+  let corpMap = await loadCorpCodeMap().catch(() => ({}));
+  if (Object.keys(corpMap).length === 0) {
+    await refreshCorpCodes().catch(e => console.error('[Cron] corp_code 부트스트랩 실패:', e.message));
+    corpMap = await loadCorpCodeMap().catch(() => ({}));
+  }
+  const dartKey = process.env.DART_API_KEY || '';
+  // 최신 DART 맵 우선, 하드코딩 CORP_MAP 폴백 (하드코딩엔 오류·누락 존재)
+  const corpResolver = (code) => corpMap[code] || CORP_MAP[code] || null;
+  console.log(`[Cron] corp_code 매핑 ${Object.keys(corpMap).length}개, DART키 ${dartKey ? '있음' : '없음'}`);
+
   const batchId = `${today}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     await createScanBatch(batchId, stocks.length);
@@ -128,7 +161,7 @@ export async function runDailyScan() {
 
   for (let i = 0; i < stocks.length; i += CHUNK_SIZE) {
     const chunk = stocks.slice(i, i + CHUNK_SIZE);
-    const results = await Promise.allSettled(chunk.map(({ code }) => analyzeStockLean(code)));
+    const results = await Promise.allSettled(chunk.map(({ code }) => analyzeStockLean(code, corpResolver, dartKey)));
 
     const rows = [];
     let chunkBuy = 0, chunkFail = 0;
@@ -146,7 +179,7 @@ export async function runDailyScan() {
         confidence:      a.combinedSignal?.confidence ?? 0,
         lynch_score:     a.pScore  ?? 0,
         livermore_score: a.lScore  ?? 0,
-        piotroski_score: 0,
+        piotroski_score: a.fScore?.score ?? 0,
         combined_score:  Math.round(((a.pScore ?? 0) + (a.lScore ?? 0)) / 2),
         rsi:             a.rsi       ?? null,
         macd_cross:      a.macd?.lastCross ?? null,

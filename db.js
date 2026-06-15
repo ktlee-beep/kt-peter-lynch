@@ -381,6 +381,52 @@ export async function listTheses(email) {
   return data || [];
 }
 
+// ── DART 기업코드 매핑 (전체 상장사 code → corp_code) ─────────────
+export async function upsertCorpCodes(rows) {
+  if (!rows?.length) return 0;
+  const sb = getSupabase();
+  const CHUNK = 500;
+  let n = 0;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const slice = rows.slice(i, i + CHUNK).map(r => ({
+      code: r.code, corp_code: r.corp_code, corp_name: r.corp_name || '',
+      updated_at: new Date().toISOString(),
+    }));
+    const { error } = await sb.from('kt_corp_codes').upsert(slice, { onConflict: 'code' });
+    if (!error) n += slice.length;
+  }
+  return n;
+}
+
+export async function loadCorpCodeMap() {
+  const sb = getSupabase();
+  const map = {};
+  const PAGE = 1000; // Supabase 기본 행 제한 → 페이지네이션
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await sb.from('kt_corp_codes').select('code, corp_code').range(from, from + PAGE - 1);
+    if (error || !data?.length) break;
+    for (const r of data) map[r.code] = r.corp_code;
+    if (data.length < PAGE) break;
+  }
+  return map;
+}
+
+// ── DART 재무 캐시 (분기 데이터 → 기본 90일 TTL) ──────────────────
+export async function getDartCache(code, maxDays = 90) {
+  const sb = getSupabase();
+  const { data } = await sb.from('kt_dart_cache').select('dart_json, updated_at').eq('code', code).maybeSingle();
+  if (!data) return undefined;
+  if (Date.now() - new Date(data.updated_at).getTime() > maxDays * 86400000) return undefined;
+  try { return JSON.parse(data.dart_json); } catch { return undefined; }
+}
+
+export async function setDartCache(code, dart) {
+  const sb = getSupabase();
+  await sb.from('kt_dart_cache').upsert({
+    code, dart_json: JSON.stringify(dart ?? null), updated_at: new Date().toISOString(),
+  }, { onConflict: 'code' });
+}
+
 // ── 아침 브리핑 ────────────────────────────────────────────────────
 // 매 영업일 08:00 KST cron이 1일 1행 저장. 앱 홈 카드가 최신 1건 조회.
 export async function saveMorningBrief(brief) {

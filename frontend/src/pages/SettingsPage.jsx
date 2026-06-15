@@ -190,6 +190,26 @@ function AdminTools() {
     } catch (e) { setLog(`아침 브리핑 생성 오류: ${e.message}`); } finally { setBusy(''); }
   };
 
+  const refreshCorp = async () => {
+    setBusy('corp'); setLog('');
+    try {
+      const r = await fetch('/api/admin/refresh-corpcodes', { method: 'POST', headers: authHeaders() });
+      const d = await r.json();
+      if (!r.ok || d.ok === false) throw new Error(d.error || '실패');
+      setLog(`DART 기업코드 갱신 완료: ${d.count}개 저장 (전체 상장사 ${d.total ?? '?'}개)\n다음 스캔부터 전 종목 DART 재무·피오트로스키가 반영됩니다.`);
+    } catch (e) { setLog(`DART 기업코드 갱신 오류: ${e.message}`); } finally { setBusy(''); }
+  };
+
+  const runScan = async () => {
+    setBusy('scan'); setLog('');
+    try {
+      const r = await fetch('/api/scan/trigger', { method: 'POST', headers: authHeaders() });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '실패');
+      setLog(`${d.message || '스캔 시작됨'}\n(전체 종목 스캔은 수 분 소요. 완료 후 스크리너·오늘의 추천에 반영됩니다.)`);
+    } catch (e) { setLog(`스캔 실행 오류: ${e.message}`); } finally { setBusy(''); }
+  };
+
   const btnCls = 'w-full text-left bg-surface-950 hover:bg-slate-800 rounded-xl px-4 py-3 transition-colors disabled:opacity-50';
 
   return (
@@ -202,6 +222,14 @@ function AdminTools() {
         <button onClick={genBrief} disabled={!!busy} className={btnCls}>
           <div className="text-sm font-semibold text-white">{busy === 'brief' ? '실행 중...' : '아침 브리핑 즉시 생성'}</div>
           <div className="text-[11px] text-slate-500 mt-0.5">08:00 스케줄을 기다리지 않고 지금 브리핑 생성</div>
+        </button>
+        <button onClick={refreshCorp} disabled={!!busy} className={btnCls}>
+          <div className="text-sm font-semibold text-white">{busy === 'corp' ? '실행 중...' : 'DART 기업코드 갱신'}</div>
+          <div className="text-[11px] text-slate-500 mt-0.5">전체 상장사 corp_code 적재 — 스캔 DART 재무·F-Score의 전제</div>
+        </button>
+        <button onClick={runScan} disabled={!!busy} className={btnCls}>
+          <div className="text-sm font-semibold text-white">{busy === 'scan' ? '실행 중...' : '지금 전체 스캔 실행'}</div>
+          <div className="text-[11px] text-slate-500 mt-0.5">20:00을 기다리지 않고 즉시 스캔 — DART F-Score 반영 확인용</div>
         </button>
       </div>
       {log && (

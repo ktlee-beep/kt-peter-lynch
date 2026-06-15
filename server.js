@@ -1610,6 +1610,17 @@ app.post('/api/brief/generate', async (req, res) => {
   res.json({ ok: true, message: '아침 브리핑 생성 시작됨 (비동기)' });
 });
 
+// ── DART 기업코드 매핑 갱신 (마스터) — 전체 상장사 corp_code 적재 ──
+app.post('/api/admin/refresh-corpcodes', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { refreshCorpCodes } = await import('./cron.js');
+    const r = await refreshCorpCodes();
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── /api/portfolio ─────────────────────────────────────────────────
 app.get('/api/portfolio/holdings', async (req, res) => {
   try {
