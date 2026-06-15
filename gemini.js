@@ -136,6 +136,41 @@ USD/KRW: ${macroData.usdkrw} | VIX: ${macroData.vix} | 미국채10년: ${macroDa
   return result;
 }
 
+// 개장 전 아침 브리핑 — 밤사이 매크로 + 야간선물 + 전일 스캔 상위 매수후보 종합
+export async function generateMorningBrief(ctx) {
+  const { macro, futures, picks } = ctx || {};
+  const pickLines = (picks || []).slice(0, 5).map(p =>
+    `- ${p.name ?? p.code}(${p.code}) 종가 ${p.close_price?.toLocaleString?.('ko-KR') ?? p.close_price ?? '?'}원, `
+    + `등락 ${p.change_rate ?? '?'}%, 린치 ${p.lynch_score ?? '?'}, RSI ${p.rsi ?? '?'}`
+  ).join('\n') || '- (전일 BUY 신호 종목 없음)';
+  const fut = futures && !futures.error && futures.price != null
+    ? `${futures.price?.toLocaleString?.('ko-KR') ?? futures.price} (${futures.changeRate > 0 ? '+' : ''}${futures.changeRate?.toFixed?.(2) ?? '?'}%)`
+    : '데이터 없음';
+
+  const prompt = `당신은 한국 주식 개장 전 아침 브리핑 AI입니다. 피터 린치 가치투자 관점.
+오늘 한국 증시 개장(09:00) 전, 투자자에게 줄 간결하고 실용적인 아침 브리핑을 작성하세요.
+
+[밤사이 시장] 국면: ${macro?.label ?? '미상'} (점수 ${macro?.score ?? '?'})
+${(macro?.notes || []).map(n => '· ' + n).join('\n')}
+
+[코스피200 야간선물 24h] ${fut}
+
+[전일 스캔 상위 매수후보]
+${pickLines}
+
+응답 형식 (JSON만, 다른 텍스트 없이, 모두 한국어):
+{
+  "headline": "오늘 시장 한 줄 요약 (개장 방향 암시)",
+  "overnight": "밤사이 미국장·환율·금리 핵심 2~3문장",
+  "kospiOutlook": "야간선물·매크로 종합 오늘 코스피 개장 방향 전망 1~2문장",
+  "picks": [{"name": "종목명", "reason": "주목 이유 1문장"}],
+  "caution": "오늘 유의할 리스크 1문장",
+  "strategy": "오늘의 한 줄 대응 전략"
+}`;
+
+  return await callGemini(prompt);
+}
+
 export async function validateThesis(thesis, stockName) {
   const thesisText = [
     thesis.story ? `사업이해: ${thesis.story}` : '',

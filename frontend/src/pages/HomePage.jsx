@@ -2,6 +2,7 @@ import { useNavigate } from 'react-router-dom';
 import MarketIndexBar from '../components/home/MarketIndexBar';
 import MarketPhaseBanner from '../components/home/MarketPhaseBanner';
 import MarketAIComment from '../components/home/MarketAIComment';
+import MorningBrief from '../components/home/MorningBrief';
 import TodayTodo from '../components/home/TodayTodo';
 import NewsFeed from '../components/home/NewsFeed';
 import AlertsCard from '../components/home/AlertsCard';
@@ -49,6 +50,9 @@ export default function HomePage() {
       <div className="mt-3">
         <MarketIndexBar />
       </div>
+
+      {/* AI 아침 브리핑 (개장 전, 매 영업일 08:00 생성) */}
+      <MorningBrief />
 
       {/* 시장 국면 배너 */}
       <div className="mt-3">

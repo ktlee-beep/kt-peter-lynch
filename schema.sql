@@ -73,6 +73,13 @@ CREATE TABLE IF NOT EXISTS kt_macro_snapshots (
   raw_json     TEXT
 );
 
+-- ── 아침 브리핑 (매 영업일 08:00 KST 생성, 1일 1행) ───────────────
+CREATE TABLE IF NOT EXISTS kt_morning_brief (
+  brief_date  DATE PRIMARY KEY,
+  brief_json  TEXT NOT NULL,
+  created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- ── 재무 캐시 ─────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS kt_fundamentals_cache (
   code        TEXT PRIMARY KEY,

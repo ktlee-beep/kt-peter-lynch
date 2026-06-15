@@ -32,7 +32,7 @@ import {
   KRX_INDICES, YAHOO_SYMBOLS, fetchIndex, fetchYahooSymbol, fetchIndexOHLCV, fetchKospiFutures,
   KS_UNIVERSE, KQ_UNIVERSE,
 } from './data.js';
-import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMacroHistory, saveMacroSnapshot, validateAppUser, getAppUsers, createAppUser, deleteAppUser, updateAppUserPassword, getSupabase, getWatchlist, addToWatchlist, removeFromWatchlist, getTrades, getHoldings, addTrade, deleteTrade, getThesis, upsertThesis, listTheses } from './db.js';
+import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMacroHistory, saveMacroSnapshot, validateAppUser, getAppUsers, createAppUser, deleteAppUser, updateAppUserPassword, getSupabase, getWatchlist, addToWatchlist, removeFromWatchlist, getTrades, getHoldings, addTrade, deleteTrade, getThesis, upsertThesis, listTheses, getLatestMorningBrief } from './db.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1590,6 +1590,24 @@ app.get('/api/gemini/market', async (req, res) => {
   } catch (e) {
     res.status(429).json({ error: e.message });
   }
+});
+
+// ── /api/brief/morning — 아침 브리핑 (앱 내 카드용) ──────────────
+app.get('/api/brief/morning', async (req, res) => {
+  try {
+    const brief = await getLatestMorningBrief();
+    res.json({ brief });
+  } catch (e) {
+    res.status(500).json({ error: e.message, brief: null });
+  }
+});
+
+// 수동 생성 트리거 (마스터/SCAN_SECRET) — 08:00 기다리지 않고 즉시 생성
+app.post('/api/brief/generate', async (req, res) => {
+  if (!isScanSecretOrMaster(req)) return res.status(403).json({ error: 'Forbidden' });
+  const { runMorningBrief } = await import('./cron.js');
+  runMorningBrief().catch(console.error);
+  res.json({ ok: true, message: '아침 브리핑 생성 시작됨 (비동기)' });
 });
 
 // ── /api/portfolio ─────────────────────────────────────────────────

@@ -3,8 +3,8 @@
 // 6시간마다 — 매크로 갱신
 import cron from 'node-cron';
 import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermoreScore } from './analysis.js';
-import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase } from './db.js';
-import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals } from './data.js';
+import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief } from './db.js';
+import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures } from './data.js';
 
 // ── 스캔 유니버스 (DB에 종목이 없으면 하드코딩된 유니버스 사용) ─
 function getScanUniverse() {
@@ -199,6 +199,74 @@ async function runMacroUpdate() {
   console.log('[Cron] 매크로 갱신 완료:', fetched);
 }
 
+// ── 아침 브리핑 (매 영업일 08:00 KST) ───────────────────────────
+// 개장 전 밤사이 매크로를 경량 수집 (server.js /api/macro 규칙 축약판)
+async function buildMorningMacro() {
+  const targets = [
+    ['usdkrw', 'KRW=X'], ['kospi', '%5EKS11'], ['vix', '%5EVIX'],
+    ['us10y', '%5ETNX'], ['sp500', '%5EGSPC'], ['nasdaq', '%5EIXIC'],
+  ];
+  const data = {};
+  await Promise.allSettled(targets.map(async ([k, sym]) => {
+    try {
+      const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=5d`,
+        { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      if (!r.ok) return;
+      const meta = (await r.json()).chart?.result?.[0]?.meta;
+      if (!meta) return;
+      const cur = meta.regularMarketPrice;
+      const prev = meta.previousClose || meta.chartPreviousClose || cur;
+      if (!cur || !prev) return;
+      data[k] = { current: +cur.toFixed(2), changePct: +((cur - prev) / prev * 100).toFixed(2) };
+    } catch {}
+  }));
+
+  let score = 0;
+  const notes = [];
+  const { usdkrw, kospi, vix, us10y, sp500, nasdaq } = data;
+  if (sp500) {
+    if (sp500.changePct > 1)       { score++; notes.push(`S&P500 +${sp500.changePct}% — 미국 증시 강세`); }
+    else if (sp500.changePct < -1) { score--; notes.push(`S&P500 ${sp500.changePct}% — 미국 약세, 한국 연동 주의`); }
+    else                            notes.push(`S&P500 ${sp500.changePct > 0 ? '+' : ''}${sp500.changePct}%`);
+  }
+  if (nasdaq) notes.push(`나스닥 ${nasdaq.changePct > 0 ? '+' : ''}${nasdaq.changePct}%`);
+  if (vix) {
+    if (vix.current > 25)      { score -= 2; notes.push(`VIX ${vix.current} — 공포 구간`); }
+    else if (vix.current < 14) { score++;    notes.push(`VIX ${vix.current} — 시장 안정`); }
+    else                        notes.push(`VIX ${vix.current}`);
+  }
+  if (usdkrw) {
+    notes.push(`원/달러 ${usdkrw.current.toFixed(0)}원 (${usdkrw.changePct > 0 ? '+' : ''}${usdkrw.changePct}%)`);
+    if (usdkrw.changePct > 0.5) score--;
+    else if (usdkrw.changePct < -0.5) score++;
+  }
+  if (us10y) notes.push(`미국채10Y ${us10y.current}%`);
+  if (kospi) notes.push(`전일 KOSPI ${kospi.changePct > 0 ? '+' : ''}${kospi.changePct}%`);
+  const label = score >= 2 ? '긍정' : score <= -2 ? '부정' : '중립';
+  return { label, score, notes };
+}
+
+export async function runMorningBrief() {
+  console.log('[Cron] 아침 브리핑 생성 시작');
+  try {
+    const [macro, futures, picks] = await Promise.all([
+      buildMorningMacro(),
+      fetchKospiFutures().catch(() => null),
+      getScanResults({ signal: 'BUY', limit: 5 }).catch(() => []),
+    ]);
+    const { generateMorningBrief } = await import('./gemini.js');
+    const brief = await generateMorningBrief({ macro, futures, picks });
+    brief.macro = macro; // 카드 표시용 매크로 노트
+    brief.futures = futures && !futures.error
+      ? { price: futures.price, changeRate: futures.changeRate }
+      : null;
+    await saveMorningBrief(brief);
+    console.log('[Cron] 아침 브리핑 생성 완료:', brief.headline || '(headline 없음)');
+  } catch (e) {
+    console.error('[Cron] 아침 브리핑 오류:', e.message);
+  }
+}
+
 // ── 알림 설정 조건 평가 ──────────────────────────────────────────
 async function evaluateAlertSettings() {
   try {
@@ -263,5 +331,10 @@ export function startCron() {
     runMacroUpdate().catch(e => console.error('[Cron] 매크로 오류:', e));
   });
 
-  console.log('[Cron] 스케줄 등록 완료 (스캔: 매 영업일 20:00 KST, 매크로: 6시간마다)');
+  // 매 영업일 08:00 KST = UTC 23:00 (전일) → UTC 요일 0-4(일~목) = KST 월~금
+  cron.schedule('0 23 * * 0-4', () => {
+    runMorningBrief().catch(e => console.error('[Cron] 아침 브리핑 오류:', e));
+  }, { timezone: 'UTC' });
+
+  console.log('[Cron] 스케줄 등록 완료 (스캔: 매 영업일 20:00 KST, 아침 브리핑: 매 영업일 08:00 KST, 매크로: 6시간마다)');
 }

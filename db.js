@@ -381,6 +381,31 @@ export async function listTheses(email) {
   return data || [];
 }
 
+// ── 아침 브리핑 ────────────────────────────────────────────────────
+// 매 영업일 08:00 KST cron이 1일 1행 저장. 앱 홈 카드가 최신 1건 조회.
+export async function saveMorningBrief(brief) {
+  const sb = getSupabase();
+  const today = new Date().toISOString().slice(0, 10);
+  await sb.from('kt_morning_brief').upsert({
+    brief_date: today,
+    brief_json: JSON.stringify(brief),
+    created_at: new Date().toISOString(),
+  }, { onConflict: 'brief_date' });
+}
+
+export async function getLatestMorningBrief() {
+  const sb = getSupabase();
+  const { data } = await sb.from('kt_morning_brief')
+    .select('brief_date, brief_json, created_at')
+    .order('brief_date', { ascending: false })
+    .limit(1);
+  const row = data?.[0];
+  if (!row) return null;
+  let brief;
+  try { brief = JSON.parse(row.brief_json); } catch { return null; }
+  return { ...brief, briefDate: row.brief_date, createdAt: row.created_at };
+}
+
 // 재무 캐시 조회
 export async function getFundamentalsCache(code) {
   const sb = getSupabase();
