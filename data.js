@@ -522,6 +522,67 @@ export async function fetchYahooSymbol(entry) {
   } catch { return { ...entry, error: true }; }
 }
 
+// ── 미국 유니버스 (다우30 + 나스닥100 핵심) — [티커, 이름, 섹터] ──
+export const US_UNIVERSE = [
+  // 빅테크/반도체
+  ['AAPL','애플','IT'], ['MSFT','마이크로소프트','IT'], ['GOOGL','알파벳','IT'],
+  ['AMZN','아마존','유통소비재'], ['META','메타','IT'], ['NVDA','엔비디아','반도체'],
+  ['AVGO','브로드컴','반도체'], ['AMD','AMD','반도체'], ['INTC','인텔','반도체'],
+  ['QCOM','퀄컴','반도체'], ['TXN','텍사스인스트루먼트','반도체'], ['MU','마이크론','반도체'],
+  ['AMAT','어플라이드머티어리얼즈','반도체'], ['LRCX','램리서치','반도체'], ['ADI','아나로그디바이스','반도체'],
+  ['TSLA','테슬라','자동차'], ['NFLX','넷플릭스','IT'], ['ADBE','어도비','IT'],
+  ['CRM','세일즈포스','IT'], ['ORCL','오라클','IT'], ['CSCO','시스코','IT'],
+  ['IBM','IBM','IT'], ['NOW','서비스나우','IT'], ['INTU','인튜이트','IT'],
+  ['PLTR','팔란티어','IT'], ['PANW','팔로알토','IT'], ['SNPS','시놉시스','반도체'],
+  ['KLAC','KLA','반도체'], ['MRVL','마벨','반도체'],
+  // 소비재/유통
+  ['COST','코스트코','유통소비재'], ['WMT','월마트','유통소비재'], ['HD','홈디포','유통소비재'],
+  ['MCD','맥도날드','유통소비재'], ['NKE','나이키','유통소비재'], ['SBUX','스타벅스','유통소비재'],
+  ['PEP','펩시코','식품음료'], ['KO','코카콜라','식품음료'], ['PG','P&G','유통소비재'],
+  ['DIS','디즈니','IT'], ['BKNG','부킹','유통소비재'], ['MDLZ','몬델리즈','식품음료'],
+  // 금융
+  ['JPM','JP모건','금융'], ['V','비자','금융'], ['MA','마스터카드','금융'],
+  ['BAC','뱅크오브아메리카','금융'], ['WFC','웰스파고','금융'], ['GS','골드만삭스','금융'],
+  ['MS','모건스탠리','금융'], ['AXP','아메리칸익스프레스','금융'], ['BLK','블랙록','금융'],
+  // 헬스케어/바이오
+  ['UNH','유나이티드헬스','바이오'], ['JNJ','존슨앤존슨','바이오'], ['LLY','일라이릴리','바이오'],
+  ['ABBV','애브비','바이오'], ['MRK','머크','바이오'], ['PFE','화이자','바이오'],
+  ['TMO','써모피셔','바이오'], ['AMGN','암젠','바이오'], ['GILD','길리어드','바이오'],
+  ['ISRG','인튜이티브서지컬','바이오'], ['VRTX','버텍스','바이오'], ['REGN','리제네론','바이오'],
+  // 산업/에너지/기타
+  ['XOM','엑슨모빌','에너지화학'], ['CVX','셰브론','에너지화학'], ['CAT','캐터필러','산업재'],
+  ['BA','보잉','조선방산'], ['GE','GE에어로스페이스','조선방산'], ['HON','하니웰','산업재'],
+  ['RTX','RTX','조선방산'], ['LMT','록히드마틴','조선방산'], ['UNP','유니온퍼시픽','물류운송'],
+  ['UPS','UPS','물류운송'], ['DE','디어','산업재'], ['LIN','린데','에너지화학'],
+  // 통신/미디어
+  ['T','AT&T','통신'], ['VZ','버라이즌','통신'], ['CMCSA','컴캐스트','통신'],
+  ['TMUS','T모바일','통신'],
+];
+
+// 미국 개별종목 일봉 (Yahoo) — 미국 스캔용
+export async function fetchUsStockDaily(ticker, range = '8mo') {
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=${range}`;
+    const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (!r.ok) return null;
+    const result = (await r.json()).chart?.result?.[0];
+    const meta = result?.meta;
+    const q = result?.indicators?.quote?.[0];
+    if (!meta || !q) return null;
+    const ts = result.timestamp || [];
+    const valid = (q.close || []).map((c, i) => c != null ? i : -1).filter(i => i >= 0);
+    if (valid.length < 30) return null;
+    return {
+      closes:  valid.map(i => q.close[i]),
+      highs:   valid.map(i => q.high[i]),
+      lows:    valid.map(i => q.low[i]),
+      volumes: valid.map(i => q.volume[i] || 0),
+      price: meta.regularMarketPrice ?? q.close[valid.at(-1)],
+      prevClose: meta.previousClose ?? meta.chartPreviousClose ?? null,
+    };
+  } catch { return null; }
+}
+
 export async function fetchIndexOHLCV(symbol, range = '6mo') {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=${range}`;
   const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });

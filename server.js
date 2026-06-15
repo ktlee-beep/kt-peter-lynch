@@ -32,7 +32,7 @@ import {
   KRX_INDICES, YAHOO_SYMBOLS, fetchIndex, fetchYahooSymbol, fetchIndexOHLCV, fetchKospiFutures,
   KS_UNIVERSE, KQ_UNIVERSE,
 } from './data.js';
-import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMacroHistory, saveMacroSnapshot, validateAppUser, getAppUsers, createAppUser, deleteAppUser, updateAppUserPassword, getSupabase, getWatchlist, addToWatchlist, removeFromWatchlist, getTrades, getHoldings, addTrade, deleteTrade, getThesis, upsertThesis, listTheses, getLatestMorningBrief } from './db.js';
+import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMacroHistory, saveMacroSnapshot, validateAppUser, getAppUsers, createAppUser, deleteAppUser, updateAppUserPassword, getSupabase, getWatchlist, addToWatchlist, removeFromWatchlist, getTrades, getHoldings, addTrade, deleteTrade, getThesis, upsertThesis, listTheses, getLatestMorningBrief, getUsScan } from './db.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1608,6 +1608,49 @@ app.post('/api/brief/generate', async (req, res) => {
   const { runMorningBrief } = await import('./cron.js');
   runMorningBrief().catch(console.error);
   res.json({ ok: true, message: '아침 브리핑 생성 시작됨 (비동기)' });
+});
+
+// ── /api/scan/us — 미국 스캔 결과 (다우30+나스닥100 핵심) ─────────
+app.get('/api/scan/us', async (req, res) => {
+  try {
+    const data = await getUsScan();
+    res.json(data || { stocks: [], count: 0 });
+  } catch (e) {
+    res.status(500).json({ error: e.message, stocks: [] });
+  }
+});
+
+// 미국 스캔 수동 트리거 (마스터/SCAN_SECRET)
+app.post('/api/scan/us/trigger', async (req, res) => {
+  if (!isScanSecretOrMaster(req)) return res.status(403).json({ error: 'Forbidden' });
+  const { runUsScan } = await import('./cron.js');
+  runUsScan().catch(console.error);
+  res.json({ ok: true, message: '미국 스캔 시작됨 (비동기)' });
+});
+
+// ── /api/sectors — 섹터 강도·대장주 (한국 BUY 신호 집계) ──────────
+app.get('/api/sectors', async (req, res) => {
+  try {
+    const buys = await getScanResults({ signal: 'BUY', limit: 300 });
+    const map = {};
+    for (const r of buys) {
+      const sec = r.sector || SECTOR_MAP[r.code] || '기타';
+      if (!map[sec]) map[sec] = { sector: sec, count: 0, scoreSum: 0, leader: null };
+      const g = map[sec];
+      g.count++;
+      const score = r.combined_score ?? Math.round(((r.lynch_score || 0) + (r.livermore_score || 0)) / 2);
+      g.scoreSum += score;
+      if (!g.leader || score > g.leader.score) {
+        g.leader = { code: r.code, name: r.name, score, changeRate: r.change_rate, lynch: r.lynch_score, livermore: r.livermore_score };
+      }
+    }
+    const sectors = Object.values(map)
+      .map(g => ({ sector: g.sector, buyCount: g.count, avgScore: Math.round(g.scoreSum / g.count), leader: g.leader }))
+      .sort((a, b) => (b.buyCount - a.buyCount) || (b.avgScore - a.avgScore));
+    res.json({ sectors, serverTime: Date.now() });
+  } catch (e) {
+    res.status(500).json({ error: e.message, sectors: [] });
+  }
 });
 
 // ── DART 기업코드 매핑 갱신 (마스터) — 전체 상장사 corp_code 적재 ──

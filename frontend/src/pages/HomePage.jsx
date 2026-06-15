@@ -3,6 +3,7 @@ import MarketIndexBar from '../components/home/MarketIndexBar';
 import MarketPhaseBanner from '../components/home/MarketPhaseBanner';
 import MarketAIComment from '../components/home/MarketAIComment';
 import MorningBrief from '../components/home/MorningBrief';
+import TopPicks from '../components/home/TopPicks';
 import TodayTodo from '../components/home/TodayTodo';
 import NewsFeed from '../components/home/NewsFeed';
 import AlertsCard from '../components/home/AlertsCard';
@@ -50,6 +51,9 @@ export default function HomePage() {
       <div className="mt-3">
         <MarketIndexBar />
       </div>
+
+      {/* 오늘의 추천 — 한국·섹터·미국 (A+B+C) */}
+      <TopPicks />
 
       {/* AI 아침 브리핑 (개장 전, 매 영업일 08:00 생성) */}
       <MorningBrief />

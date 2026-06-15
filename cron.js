@@ -3,8 +3,8 @@
 // 6시간마다 — 매크로 갱신
 import cron from 'node-cron';
 import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermoreScore, calcPiotroski } from './analysis.js';
-import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief, loadCorpCodeMap, upsertCorpCodes, getDartCache, setDartCache } from './db.js';
-import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures, CORP_MAP, fetchCorpCodeMap, fetchDartFinancials } from './data.js';
+import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief, loadCorpCodeMap, upsertCorpCodes, getDartCache, setDartCache, saveUsScan } from './db.js';
+import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures, CORP_MAP, fetchCorpCodeMap, fetchDartFinancials, US_UNIVERSE, fetchUsStockDaily } from './data.js';
 
 // ── 스캔 유니버스 (DB에 종목이 없으면 하드코딩된 유니버스 사용) ─
 function getScanUniverse() {
@@ -114,6 +114,60 @@ async function analyzeStockLean(code, corpResolver = null, dartKey = '') {
   } catch {
     return null;
   }
+}
+
+// ── 미국 스캔 (다우30+나스닥100 핵심, Yahoo 기술점수) ──────────────
+async function analyzeUsStock(ticker, name, sector) {
+  const d = await fetchUsStockDaily(ticker).catch(() => null);
+  if (!d) return null;
+  const { closes, highs, lows, volumes } = d;
+  const cur  = d.price ?? closes.at(-1);
+  const prev = d.prevClose ?? closes.at(-2) ?? cur;
+  const changeRate = prev > 0 ? (cur - prev) / prev * 100 : 0;
+  const rsi  = calcRSI(closes).at(-1);
+  const macd = calcMACD(closes);
+  const bb   = calcBollinger(closes);
+  const ma5  = calcMA(closes, 5).at(-1), ma20 = calcMA(closes, 20).at(-1), ma60 = calcMA(closes, 60).at(-1);
+  const volRatio = volumes.length >= 21 ? volumes.at(-1) / (volumes.slice(-21, -1).reduce((a, b) => a + b, 0) / 20) : 1;
+  const high52 = Math.max(...closes.slice(-125));
+  const near52 = cur > 0 && high52 > 0 ? cur / high52 >= 0.95 : false;
+  const { lScore } = calcLivermoreScore(cur, ma5, ma20, ma60, rsi ?? 50, volRatio ?? 1, changeRate, high52, macd?.lastCross ?? null, bb);
+
+  // 매수/매도 신호 — 한국 경량 스캔과 동일 규칙
+  let buyPts = 0, sellPts = 0;
+  if (rsi != null) { if (rsi >= 50 && rsi <= 70) buyPts++; else if (rsi < 35) buyPts++; if (rsi > 75) sellPts++; }
+  if (macd?.lastCross === 'golden') buyPts += 2; if (macd?.lastCross === 'dead') sellPts += 2;
+  if (ma5 && ma20 && ma60 && ma5 > ma20 && ma20 > ma60) buyPts += 2; else if (ma5 && ma20 && ma5 < ma20) sellPts++;
+  if (bb) { if (bb.percentB < 15) buyPts++; if (bb.percentB > 88) sellPts++; }
+  if (volRatio != null && volRatio >= 2) buyPts++;
+  if (near52) buyPts++;
+  let signal = 'HOLD', confidence = 50;
+  if (buyPts >= 3) { signal = 'BUY';  confidence = Math.min(35 + buyPts * 10, 95); }
+  if (sellPts >= 3) { signal = 'SELL'; confidence = Math.min(35 + sellPts * 10, 95); }
+
+  return {
+    ticker, name, sector, price: cur, changeRate,
+    rsi: rsi ?? null, livermoreScore: lScore, signal, confidence,
+    near52wHigh: near52, pos52w: high52 > 0 ? Math.round(cur / high52 * 100) : null,
+    macdCross: macd?.lastCross ?? null,
+  };
+}
+
+export async function runUsScan() {
+  console.log('[Cron] 미국 스캔 시작');
+  const out = [];
+  const CHUNK = 15;
+  for (let i = 0; i < US_UNIVERSE.length; i += CHUNK) {
+    const chunk = US_UNIVERSE.slice(i, i + CHUNK);
+    const res = await Promise.allSettled(chunk.map(([tk, nm, sec]) => analyzeUsStock(tk, nm, sec)));
+    for (const r of res) if (r.status === 'fulfilled' && r.value) out.push(r.value);
+    await new Promise(r => setTimeout(r, 400));
+  }
+  out.sort((a, b) => (b.livermoreScore - a.livermoreScore) || (b.confidence - a.confidence));
+  const payload = { stocks: out, scannedAt: new Date().toISOString(), count: out.length };
+  await saveUsScan(payload).catch(e => console.error('[Cron] 미국 스캔 저장 실패:', e.message));
+  console.log(`[Cron] 미국 스캔 완료 — ${out.length}종목, BUY ${out.filter(s => s.signal === 'BUY').length}`);
+  return payload;
 }
 
 // ── DART 기업코드 매핑 갱신 (전체 상장사 code→corp_code) ─────────
@@ -369,5 +423,10 @@ export function startCron() {
     runMorningBrief().catch(e => console.error('[Cron] 아침 브리핑 오류:', e));
   }, { timezone: 'UTC' });
 
-  console.log('[Cron] 스케줄 등록 완료 (스캔: 매 영업일 20:00 KST, 아침 브리핑: 매 영업일 08:00 KST, 매크로: 6시간마다)');
+  // 미국 스캔 — 미 증시 마감(05~06시 KST) 후 07:00 KST = UTC 22:00(전일)
+  cron.schedule('0 22 * * 0-4', () => {
+    runUsScan().catch(e => console.error('[Cron] 미국 스캔 오류:', e));
+  }, { timezone: 'UTC' });
+
+  console.log('[Cron] 스케줄 등록 완료 (KR스캔 20:00 / 아침브리핑 08:00 / 미국스캔 07:00 KST, 매크로 6시간)');
 }

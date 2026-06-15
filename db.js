@@ -399,6 +399,14 @@ async function kvSet(key, obj) {
   }, { onConflict: 'code' });
 }
 
+// ── 미국 스캔 결과 (KV 단일 블롭) ─────────────────────────────────
+export async function saveUsScan(payload) { await kvSet('__us_scan__', payload); }
+export async function getUsScan() {
+  const row = await kvGet('__us_scan__');
+  if (!row) return null;
+  try { return JSON.parse(row.raw_json); } catch { return null; }
+}
+
 // ── DART 기업코드 매핑 (전체 상장사 code → corp_code) ─────────────
 // 단일 블롭(__corpmap__)으로 저장 — 약 3,900개, ~100KB
 export async function upsertCorpCodes(rows) {
