@@ -1,5 +1,6 @@
-// 최신 모델 우선 시도, 실패 시 이전 모델 폴백
-const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+// 최신 모델 우선 시도, 실패(미지원/한도)면 다음 모델 폴백.
+// Gemma도 동일 Google API·동일 키 사용. Gemini 한도 초과 시 Gemma로 자동 폴백.
+const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemma-4-31b-it', 'gemma-4-4b-it'];
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 const cache = new Map();
@@ -37,26 +38,25 @@ async function callGemini(prompt) {
 
   let lastErr;
   for (const model of GEMINI_MODELS) {
+    const isGemma = model.startsWith('gemma');
     try {
+      // Gemma는 JSON 모드(responseMimeType)·systemInstruction 미지원 → 생략하고
+      // 프롬프트의 "JSON으로만 응답" 지시 + extractJson으로 파싱
+      const generationConfig = { temperature: 0.4, maxOutputTokens: 800 };
+      if (!isGemma) generationConfig.responseMimeType = 'application/json';
+
       const res = await fetch(`${GEMINI_BASE}/${model}:generateContent?key=${apiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.4,
-            maxOutputTokens: 800,
-            responseMimeType: 'application/json',
-          },
-        }),
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig }),
         signal: AbortSignal.timeout(25000),
       });
 
       if (res.status === 404) { lastErr = new Error(`모델 미지원: ${model}`); continue; } // 다음 모델 시도
-      if (res.status === 429) throw new Error('Gemini 요청 한도 초과 (15req/min). 잠시 후 다시 시도하세요.');
+      if (res.status === 429) { lastErr = new Error('요청 한도 초과'); continue; }           // 한도 → 다음 모델(Gemma) 시도
       if (!res.ok) {
         const err = await res.text();
-        lastErr = new Error(`Gemini API 오류 ${res.status}: ${err.slice(0, 120)}`);
+        lastErr = new Error(`API 오류 ${res.status}: ${err.slice(0, 120)}`);
         continue;
       }
 
@@ -64,17 +64,16 @@ async function callGemini(prompt) {
       // 안전 필터 차단 확인
       const finishReason = d.candidates?.[0]?.finishReason;
       if (finishReason === 'SAFETY' || finishReason === 'BLOCKED') {
-        throw new Error('Gemini 안전 필터에 의해 차단되었습니다.');
+        lastErr = new Error('안전 필터 차단'); continue;
       }
       const text = d.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!text) throw new Error('Gemini 응답이 비어있습니다.');
+      if (!text) { lastErr = new Error('응답이 비어있음'); continue; }
       return extractJson(text);
     } catch (e) {
-      if (e.message.includes('한도') || e.message.includes('차단')) throw e;
-      lastErr = e;
+      lastErr = e; // 타임아웃·네트워크 등 → 다음 모델 시도
     }
   }
-  throw lastErr || new Error('Gemini API 호출 실패');
+  throw lastErr || new Error('AI 모델 호출 실패 (모든 모델 시도 실패)');
 }
 
 export async function analyzeStock(data) {
