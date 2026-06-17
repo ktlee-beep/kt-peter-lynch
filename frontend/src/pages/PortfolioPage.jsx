@@ -86,6 +86,54 @@ export default function PortfolioPage() {
     loadingRef.current = false;
   }, []);
 
+  // 시세만 조용히 재조회 (스켈레톤 깜빡임 없이 priceMap·summary 갱신) — 60초 자동 갱신용
+  const refreshPrices = useCallback(async (list) => {
+    if (!list || list.length === 0) return;
+    try {
+      const results = await Promise.all(
+        list.map(item =>
+          fetch(`/api/naver-stock/${item.code}`, { headers: authHeaders() })
+            .then(r => r.json())
+            .then(p => ({ code: item.code, data: p }))
+            .catch(() => ({ code: item.code, data: null }))
+        )
+      );
+      const map = {};
+      results.forEach(({ code, data }) => {
+        if (!data?.price) return;
+        const holding = list.find(x => x.code === code);
+        if (!holding) return;
+        map[code] = {
+          currentPrice: data.price,
+          currentValue: data.price * holding.shares,
+          pnl: (data.price - holding.avgPrice) * holding.shares,
+          pnlPct: ((data.price / holding.avgPrice) - 1) * 100,
+        };
+      });
+      setPriceMap(map);
+      const investedAmount = list.reduce((s, x) => s + x.avgPrice * x.shares, 0);
+      const totalCurrentValue = list.reduce((s, x) => s + (map[x.code]?.currentValue ?? x.avgPrice * x.shares), 0);
+      const totalReturn = totalCurrentValue - investedAmount;
+      setSummary({
+        investedAmount,
+        currentValue: totalCurrentValue,
+        totalReturn,
+        totalReturnPct: investedAmount > 0 ? (totalReturn / investedAmount) * 100 : 0,
+        stockCount: list.length,
+      });
+    } catch {}
+  }, []);
+
+  // 화면이 보이는 동안 60초마다 시세 자동 갱신 (백그라운드면 정지 → API·배터리 절약)
+  useEffect(() => {
+    if (!holdings || holdings.length === 0) return;
+    const tick = () => { if (document.visibilityState === 'visible') refreshPrices(holdings); };
+    const id = setInterval(tick, 60000);
+    const onVis = () => { if (document.visibilityState === 'visible') refreshPrices(holdings); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { clearInterval(id); document.removeEventListener('visibilitychange', onVis); };
+  }, [holdings, refreshPrices]);
+
   useEffect(() => {
     loadHoldings();
     fetch('/api/watchlist', { headers: authHeaders() })
