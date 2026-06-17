@@ -106,7 +106,7 @@ export default function StockSearchBar({ onSelect }) {
           className="flex-1 bg-transparent py-3 text-sm text-white placeholder-slate-500 outline-none"
         />
         {query && (
-          <button onClick={handleClear} className="text-slate-500 hover:text-slate-300 p-1">
+          <button type="button" onClick={handleClear} className="text-slate-500 hover:text-slate-300 p-1">
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
             </svg>
@@ -129,6 +129,7 @@ export default function StockSearchBar({ onSelect }) {
           )}
           {dropdownItems.map((s) => (
             <button
+              type="button"
               key={s.code}
               onClick={() => handleSelect(s)}
               className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-slate-800 active:bg-slate-700 transition-colors text-left"
