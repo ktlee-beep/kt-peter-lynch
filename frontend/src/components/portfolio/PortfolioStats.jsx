@@ -6,6 +6,8 @@ function fmtKRW(n) {
   return n.toLocaleString();
 }
 
+const PIE_COLORS = ['#3b82f6', '#22c55e', '#f59e0b', '#a855f7', '#ef4444', '#14b8a6', '#ec4899', '#eab308', '#6366f1', '#84cc16'];
+
 export default function PortfolioStats({ holdings, priceMap, summary }) {
   if (!holdings || holdings.length === 0) {
     return (
@@ -36,6 +38,19 @@ export default function PortfolioStats({ holdings, priceMap, summary }) {
 
   const maxAbsPct = Math.max(...items.map(i => Math.abs(i.pnlPct)), 1);
 
+  // 비중(allocation) — 현재 평가액 기준, 시세 없으면 원금으로 폴백해 항상 표시
+  const allocItems = holdings
+    .map(h => ({ code: h.code, name: h.name, value: priceMap[h.code]?.currentValue ?? h.avgPrice * h.shares }))
+    .filter(i => i.value > 0)
+    .sort((a, b) => b.value - a.value);
+  const allocTotal = allocItems.reduce((s, i) => s + i.value, 0);
+  // 도넛 세그먼트: 비중(%)과 누적 오프셋을 미리 계산 (렌더 중 변수 재할당 회피)
+  const allocSegments = allocItems.map((it, i, arr) => {
+    const w = allocTotal > 0 ? (it.value / allocTotal) * 100 : 0;
+    const off = arr.slice(0, i).reduce((s, x) => s + (allocTotal > 0 ? (x.value / allocTotal) * 100 : 0), 0);
+    return { code: it.code, name: it.name, w, off, color: PIE_COLORS[i % PIE_COLORS.length] };
+  });
+
   return (
     <div className="px-4 pt-4 space-y-4">
       {/* Total return */}
@@ -51,6 +66,44 @@ export default function PortfolioStats({ holdings, priceMap, summary }) {
           원금 {fmtKRW(totalInvested)} → 평가 {fmtKRW(totalCurrent)}
         </p>
       </div>
+
+      {/* 종목 비중 (도넛) */}
+      {allocItems.length > 0 && allocTotal > 0 && (
+        <div className="bg-surface-900 rounded-xl px-4 py-4">
+          <p className="text-[10px] text-slate-500 mb-3">종목 비중</p>
+          <div className="flex items-center gap-4">
+            <div className="relative w-28 h-28 flex-shrink-0">
+              <svg viewBox="0 0 36 36" className="w-28 h-28 -rotate-90">
+                {allocSegments.map((s) => (
+                  <circle
+                    key={s.code}
+                    cx="18" cy="18" r="15.915"
+                    fill="none"
+                    stroke={s.color}
+                    strokeWidth="4"
+                    pathLength="100"
+                    strokeDasharray={`${s.w} ${100 - s.w}`}
+                    strokeDashoffset={-s.off}
+                  />
+                ))}
+              </svg>
+              <div className="absolute inset-0 flex flex-col items-center justify-center">
+                <span className="text-[9px] text-slate-500">종목</span>
+                <span className="text-base font-bold text-white">{allocItems.length}</span>
+              </div>
+            </div>
+            <div className="flex-1 min-w-0 space-y-1.5">
+              {allocSegments.map((s) => (
+                <div key={s.code} className="flex items-center gap-1.5 text-[11px]">
+                  <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ backgroundColor: s.color }} />
+                  <span className="text-slate-300 truncate flex-1">{s.name}</span>
+                  <span className="text-slate-400 font-medium flex-shrink-0">{s.w.toFixed(1)}%</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Best / Worst */}
       {items.length >= 2 && (

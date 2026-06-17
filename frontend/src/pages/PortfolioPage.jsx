@@ -20,6 +20,7 @@ export default function PortfolioPage() {
   const [portfolioRevision, setPortfolioRevision] = useState(0);
   const [priceMap, setPriceMap] = useState({});
   const [initialStock, setInitialStock] = useState(null);
+  const [alertMap, setAlertMap] = useState({});
   const loadingRef = useRef(false);
 
   // Handle ?action=trade&code=XXX&name=YYY from StockHeader "+" button
@@ -91,6 +92,14 @@ export default function PortfolioPage() {
       .then(r => r.json())
       .then(d => setWatchlist(d.items || []))
       .catch(() => {});
+    fetch('/api/alert-settings', { headers: authHeaders() })
+      .then(r => r.json())
+      .then(d => {
+        const m = {};
+        (d.settings || []).forEach(s => { m[s.code] = s; });
+        setAlertMap(m);
+      })
+      .catch(() => {});
   }, []);
 
   const handleTradeAdded = () => {
@@ -130,7 +139,7 @@ export default function PortfolioPage() {
           <>
             <PortfolioSummary summary={summary} />
             <div className="mt-2">
-              <HoldingsList holdings={holdings} priceMap={priceMap} />
+              <HoldingsList holdings={holdings} priceMap={priceMap} alertMap={alertMap} />
             </div>
           </>
         )}
