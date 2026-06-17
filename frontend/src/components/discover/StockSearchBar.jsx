@@ -70,6 +70,16 @@ export default function StockSearchBar({ onSelect }) {
     inputRef.current?.focus();
   };
 
+  // Enter 키가 부모 <form>을 submit하지 않도록 차단.
+  // (TradeForm처럼 form 안에 검색창이 있을 때 조기 제출 방지)
+  // 결과가 있으면 첫 항목을 선택해 검색 동작처럼 작동시킨다.
+  const handleKeyDown = (e) => {
+    if (e.key !== 'Enter') return;
+    if (e.nativeEvent?.isComposing || composing.current) return; // 한글 IME 조합 확정 Enter 무시
+    e.preventDefault();
+    if (results.length > 0) handleSelect(results[0]);
+  };
+
   useEffect(() => {
     const onPointerDown = (e) => {
       if (containerRef.current && !containerRef.current.contains(e.target)) {
@@ -101,6 +111,7 @@ export default function StockSearchBar({ onSelect }) {
           onChange={handleChange}
           onCompositionStart={handleCompositionStart}
           onCompositionEnd={handleCompositionEnd}
+          onKeyDown={handleKeyDown}
           onFocus={() => setOpen(true)}
           placeholder="종목명 또는 코드 검색"
           className="flex-1 bg-transparent py-3 text-sm text-white placeholder-slate-500 outline-none"
