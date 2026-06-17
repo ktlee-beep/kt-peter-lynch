@@ -1,5 +1,5 @@
 // KT Trading — Service Worker
-const CACHE_NAME = 'kt-trading-v1';
+const CACHE_NAME = 'kt-trading-v2';
 const STATIC_ASSETS = ['/', '/manifest.json', '/favicon.svg'];
 
 // Install: cache static assets
