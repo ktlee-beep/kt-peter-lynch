@@ -14,12 +14,68 @@ function pctLabel(n) {
   return `${n > 0 ? '+' : ''}${n.toFixed(1)}%`;
 }
 
+// 목표가/손절가 제안 칩 컴포넌트
+function SuggestionChips({ suggestions, onPickTarget, onPickStop, loading }) {
+  if (loading) {
+    return (
+      <div className="flex items-center gap-1.5 mt-2 mb-1">
+        <div className="w-3.5 h-3.5 border-2 border-brand-400 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+        <span className="text-[10px] text-slate-500">AI·차트 분석 중...</span>
+      </div>
+    );
+  }
+  if (!suggestions) return null;
+
+  return (
+    <div className="mt-2 mb-1 space-y-1.5">
+      {suggestions.targets.length > 0 && (
+        <div>
+          <p className="text-[9px] text-slate-600 mb-1">목표가 제안 (탭해서 입력)</p>
+          <div className="flex flex-wrap gap-1">
+            {suggestions.targets.map((s, i) => (
+              <button
+                key={i}
+                type="button"
+                onClick={() => onPickTarget(s.price)}
+                className="text-[10px] px-2 py-1 rounded-lg bg-profit/15 text-profit border border-profit/25 hover:bg-profit/25 transition-colors"
+              >
+                {s.price.toLocaleString('ko-KR')}원
+                <span className="ml-1 text-[9px] opacity-70">{s.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {suggestions.stops.length > 0 && (
+        <div>
+          <p className="text-[9px] text-slate-600 mb-1">손절가 제안</p>
+          <div className="flex flex-wrap gap-1">
+            {suggestions.stops.map((s, i) => (
+              <button
+                key={i}
+                type="button"
+                onClick={() => onPickStop(s.price)}
+                className="text-[10px] px-2 py-1 rounded-lg bg-loss/15 text-loss border border-loss/25 hover:bg-loss/25 transition-colors"
+              >
+                {s.price.toLocaleString('ko-KR')}원
+                <span className="ml-1 text-[9px] opacity-70">{s.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function HoldingItem({ holding, priceInfo, alert, onAlertSaved }) {
   const navigate = useNavigate();
   const [editing, setEditing] = useState(false);
   const [targetInput, setTargetInput] = useState('');
   const [stopInput, setStopInput] = useState('');
   const [saving, setSaving] = useState(false);
+  const [suggestions, setSuggestions] = useState(null);
+  const [loadingSuggestions, setLoadingSuggestions] = useState(false);
 
   const price = priceInfo?.currentPrice ?? null;
   const currentValue = priceInfo?.currentValue ?? null;
@@ -46,16 +102,66 @@ function HoldingItem({ holding, priceInfo, alert, onAlertSaved }) {
   if (price && target != null && price >= target) badge = { text: '목표 도달', cls: 'bg-profit/20 text-profit' };
   else if (price && stop != null && price <= stop) badge = { text: '손절 이탈', cls: 'bg-loss/20 text-loss' };
 
+  // 편집 모드 진입 + AI·차트 제안 동시 로드
   const openEdit = useCallback((e) => {
     e.stopPropagation();
     setTargetInput(target != null ? String(target) : '');
     setStopInput(stop != null ? String(stop) : '');
     setEditing(true);
-  }, [target, stop]);
+    setSuggestions(null);
+    setLoadingSuggestions(true);
+
+    // 차트 분석 + Gemini AI 병렬 호출
+    Promise.all([
+      fetch(`/api/analysis?code=${holding.code}`, { headers: authHeaders() }).then(r => r.json()).catch(() => null),
+      fetch(`/api/gemini/analyze?code=${holding.code}`, { headers: authHeaders() }).then(r => r.json()).catch(() => null),
+    ]).then(([chart, ai]) => {
+      const targets = [];
+      const stops = [];
+
+      // AI 목표주가 (Gemini)
+      if (ai?.targetPrice && ai.targetPrice > 0) {
+        targets.push({ price: Math.round(ai.targetPrice), label: 'AI 분석' });
+      }
+
+      // 피보나치 60일 고점 (목표가 후보)
+      if (chart?.fibonacci?.levels?.r0 && chart.fibonacci.levels.r0 > (price || holding.avgPrice)) {
+        targets.push({ price: Math.round(chart.fibonacci.levels.r0), label: '60일 고점' });
+      }
+
+      // 피보나치 23.6% 되돌림 (중간 목표)
+      const fib236 = chart?.fibonacci?.levels?.r236;
+      const curPrice = price || holding.avgPrice;
+      if (fib236 && fib236 > curPrice && !targets.find(t => Math.abs(t.price - Math.round(fib236)) < 500)) {
+        targets.push({ price: Math.round(fib236), label: '피보나치 23.6%' });
+      }
+
+      // ATR 기반 손절: 기본(2×ATR)
+      if (chart?.dynStop?.normal?.price) {
+        stops.push({ price: chart.dynStop.normal.price, label: '기본(2×ATR)' });
+      }
+      // ATR 기반 손절: 빠른(1.5×ATR)
+      if (chart?.dynStop?.tight?.price) {
+        stops.push({ price: chart.dynStop.tight.price, label: '빠른(1.5×ATR)' });
+      }
+      // ATR 기반 손절: 여유(3×ATR)
+      if (chart?.dynStop?.wide?.price) {
+        stops.push({ price: chart.dynStop.wide.price, label: '여유(3×ATR)' });
+      }
+
+      // 목표가 중복 제거 및 가격 기준 정렬
+      const dedupTargets = targets
+        .filter((t, i, arr) => arr.findIndex(x => Math.abs(x.price - t.price) < 300) === i)
+        .sort((a, b) => a.price - b.price);
+
+      setSuggestions({ targets: dedupTargets, stops });
+    }).finally(() => setLoadingSuggestions(false));
+  }, [target, stop, holding.code, price, holding.avgPrice]);
 
   const cancelEdit = useCallback((e) => {
     e.stopPropagation();
     setEditing(false);
+    setSuggestions(null);
   }, []);
 
   const saveEdit = useCallback(async (e) => {
@@ -73,12 +179,9 @@ function HoldingItem({ holding, priceInfo, alert, onAlertSaved }) {
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      onAlertSaved?.(holding.code, {
-        ...(alert || {}),
-        target_price: body.target_price,
-        stop_loss: body.stop_loss,
-      });
+      onAlertSaved?.(holding.code, { ...(alert || {}), target_price: body.target_price, stop_loss: body.stop_loss });
       setEditing(false);
+      setSuggestions(null);
     } catch {}
     setSaving(false);
   }, [holding.code, targetInput, stopInput, alert, onAlertSaved]);
@@ -121,19 +224,28 @@ function HoldingItem({ holding, priceInfo, alert, onAlertSaved }) {
         </div>
       </div>
 
-      {/* 인라인 편집 폼 */}
+      {/* 인라인 편집 폼 (AI·차트 제안 포함) */}
       {editing ? (
         <div
           className="mt-2.5 pt-2.5 border-t border-slate-800/80"
           onClick={e => e.stopPropagation()}
         >
-          <div className="flex gap-2">
+          {/* AI·차트 제안 칩 */}
+          <SuggestionChips
+            suggestions={suggestions}
+            loading={loadingSuggestions}
+            onPickTarget={v => setTargetInput(String(v))}
+            onPickStop={v => setStopInput(String(v))}
+          />
+
+          {/* 수동 입력 */}
+          <div className="flex gap-2 mt-1">
             <div className="flex-1">
               <label className="text-[9px] text-profit mb-0.5 block">목표가</label>
               <input
                 type="number"
                 inputMode="numeric"
-                placeholder={price ? String(Math.round(price * 1.1)) : '예: 80000'}
+                placeholder="직접 입력"
                 value={targetInput}
                 onChange={e => setTargetInput(e.target.value)}
                 className="w-full bg-slate-800 text-white text-xs rounded-lg px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-profit/50 placeholder:text-slate-600"
@@ -144,13 +256,14 @@ function HoldingItem({ holding, priceInfo, alert, onAlertSaved }) {
               <input
                 type="number"
                 inputMode="numeric"
-                placeholder={price ? String(Math.round(price * 0.9)) : '예: 65000'}
+                placeholder="직접 입력"
                 value={stopInput}
                 onChange={e => setStopInput(e.target.value)}
                 className="w-full bg-slate-800 text-white text-xs rounded-lg px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-loss/50 placeholder:text-slate-600"
               />
             </div>
           </div>
+
           <div className="flex gap-1.5 mt-2">
             <button
               type="button"
@@ -212,7 +325,7 @@ function HoldingItem({ holding, priceInfo, alert, onAlertSaved }) {
           onClick={openEdit}
           className="mt-2 text-[10px] text-slate-600 hover:text-brand-400 transition-colors"
         >
-          + 목표가·손절가 설정
+          + 목표가·손절가 설정 (AI 제안)
         </button>
       )}
     </div>
