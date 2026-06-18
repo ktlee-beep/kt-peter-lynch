@@ -73,7 +73,7 @@ export default function EarningsCalendar({ holdings, watchlist, preloadedItems, 
                   target="_blank"
                   rel="noopener noreferrer"
                   className={`flex items-start gap-3 rounded-xl px-3 py-2.5 hover:bg-slate-800 transition-colors ${
-                    isNew ? 'bg-brand-500/8 border border-brand-500/20' : 'bg-surface-900'
+                    isNew ? 'bg-brand-500/10 border border-brand-500/20' : 'bg-surface-900'
                   }`}
                 >
                   <div className={`${s.bg} rounded-lg px-1.5 py-0.5 flex-shrink-0 mt-0.5`}>
