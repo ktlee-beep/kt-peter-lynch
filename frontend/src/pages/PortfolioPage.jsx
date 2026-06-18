@@ -10,6 +10,11 @@ import TradeHistory from '../components/portfolio/TradeHistory';
 
 const TABS = ['보유', '통계', '공시', '매매 입력', '매매일지'];
 
+// 마지막 공시 탭 방문일을 localStorage에 저장 (배지 계산용)
+function getDiscLastViewed() {
+  return localStorage.getItem('disc_last_viewed') || '2000-01-01';
+}
+
 export default function PortfolioPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [tab, setTab] = useState('보유');
@@ -21,6 +26,9 @@ export default function PortfolioPage() {
   const [priceMap, setPriceMap] = useState({});
   const [initialStock, setInitialStock] = useState(null);
   const [alertMap, setAlertMap] = useState({});
+  const [disclosures, setDisclosures] = useState(null);
+  const [newDiscCount, setNewDiscCount] = useState(0);
+  const [discLastViewed, setDiscLastViewed] = useState(getDiscLastViewed);
   const loadingRef = useRef(false);
 
   // Handle ?action=trade&code=XXX&name=YYY from StockHeader "+" button
@@ -86,6 +94,25 @@ export default function PortfolioPage() {
     loadingRef.current = false;
   }, []);
 
+  // 공시 선조회 — 보유+관심종목 기준 백그라운드 fetch, 새 항목 배지 계산
+  const prefetchDisclosures = useCallback(async (holdingList, watchlistList) => {
+    const codes = [...new Set([
+      ...(holdingList || []).map(h => h.code),
+      ...(watchlistList || []).map(w => w.code),
+    ])].slice(0, 30);
+    if (!codes.length) return;
+    try {
+      const r = await fetch(`/api/calendar?codes=${codes.join(',')}`, { headers: authHeaders() });
+      if (!r.ok) return;
+      const d = await r.json();
+      const items = d.items || [];
+      setDisclosures(items);
+      const lastViewed = getDiscLastViewed();
+      const freshCount = items.filter(x => x.date > lastViewed).length;
+      setNewDiscCount(freshCount);
+    } catch {}
+  }, []);
+
   // 배치 시세 재조회 — /api/quotes 1회 호출로 전 종목 갱신 (60초 자동 갱신용)
   const refreshPrices = useCallback(async (list) => {
     if (!list || list.length === 0) return;
@@ -131,19 +158,28 @@ export default function PortfolioPage() {
   }, [holdings, refreshPrices]);
 
   useEffect(() => {
-    loadHoldings();
-    fetch('/api/watchlist', { headers: authHeaders() })
-      .then(r => r.json())
-      .then(d => setWatchlist(d.items || []))
-      .catch(() => {});
-    fetch('/api/alert-settings', { headers: authHeaders() })
-      .then(r => r.json())
-      .then(d => {
-        const m = {};
-        (d.settings || []).forEach(s => { m[s.code] = s; });
-        setAlertMap(m);
-      })
-      .catch(() => {});
+    let wl = [];
+    Promise.all([
+      loadHoldings(),
+      fetch('/api/watchlist', { headers: authHeaders() })
+        .then(r => r.json())
+        .then(d => { wl = d.items || []; setWatchlist(wl); })
+        .catch(() => {}),
+      fetch('/api/alert-settings', { headers: authHeaders() })
+        .then(r => r.json())
+        .then(d => {
+          const m = {};
+          (d.settings || []).forEach(s => { m[s.code] = s; });
+          setAlertMap(m);
+        })
+        .catch(() => {}),
+    ]).then(() => {
+      // holdings·watchlist 모두 준비된 뒤 공시 선조회
+      setHoldings(prev => {
+        prefetchDisclosures(prev, wl);
+        return prev;
+      });
+    });
   }, []);
 
   const handleAlertSaved = useCallback((code, newAlert) => {
@@ -170,14 +206,27 @@ export default function PortfolioPage() {
         {TABS.map(t => (
           <button
             key={t}
-            onClick={() => setTab(t)}
-            className={`flex-shrink-0 flex-1 py-2.5 text-xs font-medium transition-colors whitespace-nowrap px-1 ${
+            onClick={() => {
+              setTab(t);
+              if (t === '공시') {
+                const today = new Date().toISOString().slice(0, 10);
+                localStorage.setItem('disc_last_viewed', today);
+                setDiscLastViewed(today);
+                setNewDiscCount(0);
+              }
+            }}
+            className={`flex-shrink-0 flex-1 py-2.5 text-xs font-medium transition-colors whitespace-nowrap px-1 relative ${
               tab === t
                 ? 'text-brand-400 border-b-2 border-brand-400'
                 : 'text-slate-500 hover:text-slate-300'
             }`}
           >
             {t}
+            {t === '공시' && newDiscCount > 0 && (
+              <span className="absolute -top-0.5 right-0.5 bg-red-500 text-white text-[8px] font-bold rounded-full min-w-[14px] h-3.5 flex items-center justify-center px-0.5">
+                {newDiscCount > 9 ? '9+' : newDiscCount}
+              </span>
+            )}
           </button>
         ))}
       </div>
@@ -199,7 +248,12 @@ export default function PortfolioPage() {
         )}
 
         {tab === '공시' && (
-          <EarningsCalendar holdings={holdings} watchlist={watchlist} />
+          <EarningsCalendar
+            holdings={holdings}
+            watchlist={watchlist}
+            preloadedItems={disclosures}
+            lastViewedAt={discLastViewed}
+          />
         )}
 
         {tab === '매매 입력' && (

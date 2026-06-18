@@ -8,11 +8,14 @@ const TYPE_STYLES = {
   other:     { label: '공시',   color: 'text-slate-500', bg: 'bg-surface-900' },
 };
 
-export default function EarningsCalendar({ holdings, watchlist }) {
-  const [items, setItems] = useState(null);
+export default function EarningsCalendar({ holdings, watchlist, preloadedItems, lastViewedAt }) {
+  const [items, setItems] = useState(preloadedItems ?? null);
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async () => {
+    // 선조회 데이터가 이미 있으면 재조회 생략
+    if (preloadedItems) { setItems(preloadedItems); return; }
+
     const codes = [...new Set([
       ...(holdings || []).map(h => h.code),
       ...(watchlist || []).map(w => w.code),
@@ -28,7 +31,7 @@ export default function EarningsCalendar({ holdings, watchlist }) {
       setItems([]);
     }
     setLoading(false);
-  }, [holdings, watchlist]);
+  }, [holdings, watchlist, preloadedItems]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -62,19 +65,27 @@ export default function EarningsCalendar({ holdings, watchlist }) {
           <div className="space-y-1.5">
             {list.map((item, i) => {
               const s = TYPE_STYLES[item.type] || TYPE_STYLES.other;
+              const isNew = lastViewedAt && item.date > lastViewedAt;
               return (
                 <a
                   key={i}
                   href={item.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex items-start gap-3 bg-surface-900 rounded-xl px-3 py-2.5 hover:bg-slate-800 transition-colors"
+                  className={`flex items-start gap-3 rounded-xl px-3 py-2.5 hover:bg-slate-800 transition-colors ${
+                    isNew ? 'bg-brand-500/8 border border-brand-500/20' : 'bg-surface-900'
+                  }`}
                 >
                   <div className={`${s.bg} rounded-lg px-1.5 py-0.5 flex-shrink-0 mt-0.5`}>
                     <span className={`text-[9px] font-medium ${s.color}`}>{s.label}</span>
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs font-medium text-white truncate">{item.title}</p>
+                    <div className="flex items-center gap-1.5">
+                      {isNew && (
+                        <span className="text-[8px] font-bold text-brand-400 bg-brand-500/15 px-1 py-0.5 rounded flex-shrink-0">NEW</span>
+                      )}
+                      <p className="text-xs font-medium text-white truncate">{item.title}</p>
+                    </div>
                     <div className="flex items-center gap-1.5 mt-0.5">
                       {item.name && <span className="text-[9px] text-slate-500">{item.name}</span>}
                       <span className="text-[9px] text-slate-700">{item.date}</span>
