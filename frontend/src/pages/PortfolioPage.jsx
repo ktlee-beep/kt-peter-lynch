@@ -57,24 +57,20 @@ export default function PortfolioPage() {
       setPriceMap({});
 
       if (h.length > 0) {
-        const results = await Promise.all(
-          h.map(item =>
-            fetch(`/api/naver-stock/${item.code}`, { headers: authHeaders() })
-              .then(r => r.json())
-              .then(p => ({ code: item.code, data: p }))
-              .catch(() => ({ code: item.code, data: null }))
-          )
-        );
+        // 배치 시세 조회 — /api/quotes 1회 호출 (초기 로드 포함)
+        const codes = h.map(x => x.code).join(',');
+        const qr = await fetch(`/api/quotes?codes=${codes}`, { headers: authHeaders() }).catch(() => null);
+        const { quotes = [] } = qr?.ok ? await qr.json() : {};
         const map = {};
-        results.forEach(({ code, data }) => {
-          if (!data?.price) return;
-          const holding = h.find(x => x.code === code);
+        quotes.forEach(q => {
+          if (!q.price) return;
+          const holding = h.find(x => x.code === q.code);
           if (!holding) return;
-          map[code] = {
-            currentPrice: data.price,
-            currentValue: data.price * holding.shares,
-            pnl: (data.price - holding.avgPrice) * holding.shares,
-            pnlPct: ((data.price / holding.avgPrice) - 1) * 100,
+          map[q.code] = {
+            currentPrice: q.price,
+            currentValue: q.price * holding.shares,
+            pnl: (q.price - holding.avgPrice) * holding.shares,
+            pnlPct: ((q.price / holding.avgPrice) - 1) * 100,
           };
         });
         setPriceMap(map);
@@ -89,9 +85,12 @@ export default function PortfolioPage() {
           stockCount: h.length,
         });
       }
-    } catch {}
-    setLoadingHoldings(false);
-    loadingRef.current = false;
+      return h;
+    } catch { return []; }
+    finally {
+      setLoadingHoldings(false);
+      loadingRef.current = false;
+    }
   }, []);
 
   // 공시 선조회 — 보유+관심종목 기준 백그라운드 fetch, 새 항목 배지 계산
@@ -173,12 +172,9 @@ export default function PortfolioPage() {
           setAlertMap(m);
         })
         .catch(() => {}),
-    ]).then(() => {
-      // holdings·watchlist 모두 준비된 뒤 공시 선조회
-      setHoldings(prev => {
-        prefetchDisclosures(prev, wl);
-        return prev;
-      });
+    ]).then(([h]) => {
+      // loadHoldings 반환값(h)과 watchlist(wl) 확정 후 공시 선조회
+      prefetchDisclosures(h || [], wl);
     });
   }, []);
 
