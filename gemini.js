@@ -123,6 +123,46 @@ PER: ${f.per?.toFixed(1) ?? 'N/A'}배 | PBR: ${f.pbr?.toFixed(2) ?? 'N/A'}배 | 
   return result;
 }
 
+// 보유 종목 홀드/매도 판단 — 매수가·현재가·차트 지표 기반
+export async function analyzeHolding(holding, analysis) {
+  const cacheKey = `holding:${holding.code}:${Math.round(holding.currentPrice / 100)}`;
+  const hit = getCache(cacheKey);
+  if (hit) return { ...hit, fromCache: true };
+
+  const pnlPct = holding.buyPrice > 0
+    ? (((holding.currentPrice - holding.buyPrice) / holding.buyPrice) * 100).toFixed(1)
+    : '0.0';
+  const f = analysis?.fundamentals || {};
+  const dart = analysis?.dart || {};
+
+  const prompt = `당신은 한국 주식 가치투자 AI 코치입니다. 피터 린치 투자 철학 기반.
+보유 종목을 분석하고 "지금 홀드할지 / 매도할지" 판단을 JSON으로만 응답하세요.
+
+종목: ${holding.name} (${holding.code})
+매수가: ${holding.buyPrice?.toLocaleString()}원 | 현재가: ${holding.currentPrice?.toLocaleString()}원
+손익: ${pnlPct}% | 보유 수량: ${holding.shares}주
+${analysis ? `
+RSI: ${analysis.rsi?.toFixed(1) ?? 'N/A'} | MA20 괴리: ${analysis.deviation?.toFixed(1) ?? 'N/A'}%
+피터린치 점수: ${analysis.pScore ?? 'N/A'}/100 | ATR 손절: ${analysis.dynStop?.normal?.price?.toLocaleString() ?? 'N/A'}원
+PER: ${f.per?.toFixed(1) ?? 'N/A'}배 | ROE: ${f.roe?.toFixed(1) ?? 'N/A'}%
+매출성장률: ${dart.revenueGrowth?.toFixed(1) ?? 'N/A'}% | 영업이익률: ${dart.opMargin?.toFixed(1) ?? 'N/A'}%
+52주 고가 대비: ${analysis.high52w ? ((analysis.close / analysis.high52w - 1) * 100).toFixed(1) : 'N/A'}%
+` : ''}
+응답 형식 (JSON만, 다른 텍스트 없이):
+{
+  "verdict": "홀드" | "매도" | "추가매수",
+  "summary": "판단 핵심 1문장 (한국어)",
+  "reasoning": "판단 근거 2~3문장 (한국어)",
+  "holdReasons": ["홀드 근거 최대 3개 (한국어)"],
+  "sellTriggers": ["이 상황이 되면 팔아라 최대 3개 (구체적 조건, 한국어)"],
+  "riskFactors": ["현재 리스크 최대 2개 (한국어)"]
+}`;
+
+  const result = await callGemini(prompt);
+  if (result.verdict) setCache(cacheKey, result);
+  return result;
+}
+
 export async function analyzeMarket(macroData) {
   const cacheKey = 'market:sentiment';
   const hit = getCache(cacheKey);

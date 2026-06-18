@@ -1547,6 +1547,36 @@ app.get('/api/gemini/analyze', async (req, res) => {
   }
 });
 
+// ── /api/ai-guide — 보유 종목 홀드/매도 AI 판단 ──────────────────
+app.post('/api/ai-guide', authMiddleware, async (req, res) => {
+  const { code, name, buyPrice, currentPrice, shares } = req.body || {};
+  if (!code || !currentPrice) return res.status(400).json({ error: 'code·currentPrice 필요' });
+
+  try {
+    // 오늘자 차트 분석 캐시에서 조회 (없으면 null — Gemini가 기본 데이터만으로 판단)
+    const today = new Date().toISOString().slice(0, 10);
+    const { data: cached } = await getSupabase()
+      .from('kt_daily_analysis')
+      .select('analysis_json')
+      .eq('code', code)
+      .eq('analysis_date', today)
+      .maybeSingle()
+      .catch(() => ({ data: null }));
+
+    const analysis = cached?.analysis_json
+      ? (typeof cached.analysis_json === 'string' ? JSON.parse(cached.analysis_json) : cached.analysis_json)
+      : null;
+    const { analyzeHolding } = await import('./gemini.js');
+    const result = await analyzeHolding(
+      { code, name: name || code, buyPrice: Number(buyPrice) || 0, currentPrice: Number(currentPrice), shares: Number(shares) || 0 },
+      analysis,
+    );
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/gemini/validate-thesis', async (req, res) => {
   const { code } = req.query;
   if (!code) return res.status(400).json({ error: 'code required' });

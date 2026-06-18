@@ -68,6 +68,69 @@ function SuggestionChips({ suggestions, onPickTarget, onPickStop, loading }) {
   );
 }
 
+const VERDICT_STYLE = {
+  '홀드':    { bg: 'bg-blue-500/15',   text: 'text-blue-400',   border: 'border-blue-500/30'  },
+  '추가매수': { bg: 'bg-profit/15',    text: 'text-profit',     border: 'border-profit/30'    },
+  '매도':    { bg: 'bg-loss/15',       text: 'text-loss',       border: 'border-loss/30'      },
+};
+
+function AIGuidePanel({ guide, loading, onLoad }) {
+  if (loading) return (
+    <div className="flex items-center gap-1.5 mt-2">
+      <div className="w-3 h-3 border-2 border-brand-400 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+      <span className="text-[10px] text-slate-500">AI 판단 중...</span>
+    </div>
+  );
+
+  if (!guide) return (
+    <button
+      type="button"
+      onClick={onLoad}
+      className="mt-2 text-[10px] text-slate-600 hover:text-brand-400 transition-colors flex items-center gap-1"
+    >
+      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+      </svg>
+      AI 홀드/매도 판단
+    </button>
+  );
+
+  const vs = VERDICT_STYLE[guide.verdict] || VERDICT_STYLE['홀드'];
+
+  return (
+    <div className="mt-2.5 pt-2.5 border-t border-slate-800/80 space-y-1.5">
+      <div className="flex items-center gap-2">
+        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${vs.bg} ${vs.text} ${vs.border}`}>
+          {guide.verdict}
+        </span>
+        <span className="text-[11px] text-slate-300 leading-tight">{guide.summary}</span>
+      </div>
+      {guide.holdReasons?.length > 0 && (
+        <div className="space-y-0.5">
+          {guide.holdReasons.map((r, i) => (
+            <p key={i} className="text-[10px] text-slate-400 flex gap-1.5">
+              <span className="text-profit flex-shrink-0">·</span>{r}
+            </p>
+          ))}
+        </div>
+      )}
+      {guide.sellTriggers?.length > 0 && (
+        <div className="space-y-0.5">
+          <p className="text-[9px] text-slate-600 font-medium">매도 트리거</p>
+          {guide.sellTriggers.map((r, i) => (
+            <p key={i} className="text-[10px] text-amber-400/80 flex gap-1.5">
+              <span className="flex-shrink-0">▲</span>{r}
+            </p>
+          ))}
+        </div>
+      )}
+      {guide.fromCache && (
+        <p className="text-[9px] text-slate-700">캐시된 판단</p>
+      )}
+    </div>
+  );
+}
+
 function HoldingItem({ holding, priceInfo, alert, onAlertSaved }) {
   const navigate = useNavigate();
   const [editing, setEditing] = useState(false);
@@ -76,6 +139,8 @@ function HoldingItem({ holding, priceInfo, alert, onAlertSaved }) {
   const [saving, setSaving] = useState(false);
   const [suggestions, setSuggestions] = useState(null);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
+  const [aiGuide, setAiGuide] = useState(null);
+  const [aiLoading, setAiLoading] = useState(false);
 
   const price = priceInfo?.currentPrice ?? null;
   const currentValue = priceInfo?.currentValue ?? null;
@@ -163,6 +228,31 @@ function HoldingItem({ holding, priceInfo, alert, onAlertSaved }) {
     setEditing(false);
     setSuggestions(null);
   }, []);
+
+  const loadAiGuide = useCallback(async (e) => {
+    e?.stopPropagation();
+    if (aiLoading || aiGuide) return;
+    setAiLoading(true);
+    try {
+      const currentPrice = priceInfo?.currentPrice ?? holding.avgPrice;
+      const r = await fetch('/api/ai-guide', {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: holding.code,
+          name: holding.name,
+          buyPrice: holding.avgPrice,
+          currentPrice,
+          shares: holding.shares,
+        }),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        if (!d.error) setAiGuide(d);
+      }
+    } catch {}
+    setAiLoading(false);
+  }, [holding, priceInfo, aiLoading, aiGuide]);
 
   const saveEdit = useCallback(async (e) => {
     e.stopPropagation();
@@ -327,6 +417,17 @@ function HoldingItem({ holding, priceInfo, alert, onAlertSaved }) {
         >
           + 목표가·손절가 설정 (AI 제안)
         </button>
+      )}
+
+      {/* AI 홀드/매도 판단 — 편집 중이 아닐 때만 표시 */}
+      {!editing && (
+        <div onClick={e => e.stopPropagation()}>
+          <AIGuidePanel
+            guide={aiGuide}
+            loading={aiLoading}
+            onLoad={loadAiGuide}
+          />
+        </div>
       )}
     </div>
   );
