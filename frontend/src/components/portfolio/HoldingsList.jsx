@@ -1,4 +1,6 @@
+import { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { authHeaders } from '../../contexts/AuthContext';
 
 function fmtKRW(n) {
   if (n == null) return null;
@@ -12,8 +14,12 @@ function pctLabel(n) {
   return `${n > 0 ? '+' : ''}${n.toFixed(1)}%`;
 }
 
-function HoldingItem({ holding, priceInfo, alert }) {
+function HoldingItem({ holding, priceInfo, alert, onAlertSaved }) {
   const navigate = useNavigate();
+  const [editing, setEditing] = useState(false);
+  const [targetInput, setTargetInput] = useState('');
+  const [stopInput, setStopInput] = useState('');
+  const [saving, setSaving] = useState(false);
 
   const price = priceInfo?.currentPrice ?? null;
   const currentValue = priceInfo?.currentValue ?? null;
@@ -28,31 +34,66 @@ function HoldingItem({ holding, priceInfo, alert }) {
   const stop = alert?.stop_loss ?? null;
   const hasLevels = target != null || stop != null;
 
-  // 현재가 기준 목표/손절까지 거리(%)
   const targetGap = (target != null && price) ? ((target - price) / price) * 100 : null;
   const stopGap   = (stop   != null && price) ? ((stop   - price) / price) * 100 : null;
 
-  // 손절~목표 구간에서 현재가 위치 (둘 다 있고 목표>손절일 때만)
   let barPos = null;
   if (target != null && stop != null && target > stop && price) {
     barPos = Math.min(100, Math.max(0, ((price - stop) / (target - stop)) * 100));
   }
 
-  // 행동 배지
   let badge = null;
   if (price && target != null && price >= target) badge = { text: '목표 도달', cls: 'bg-profit/20 text-profit' };
   else if (price && stop != null && price <= stop) badge = { text: '손절 이탈', cls: 'bg-loss/20 text-loss' };
 
+  const openEdit = useCallback((e) => {
+    e.stopPropagation();
+    setTargetInput(target != null ? String(target) : '');
+    setStopInput(stop != null ? String(stop) : '');
+    setEditing(true);
+  }, [target, stop]);
+
+  const cancelEdit = useCallback((e) => {
+    e.stopPropagation();
+    setEditing(false);
+  }, []);
+
+  const saveEdit = useCallback(async (e) => {
+    e.stopPropagation();
+    setSaving(true);
+    try {
+      const body = {
+        code: holding.code,
+        target_price: targetInput !== '' ? Number(targetInput) : null,
+        stop_loss: stopInput !== '' ? Number(stopInput) : null,
+        is_active: true,
+      };
+      await fetch('/api/alert-settings', {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      onAlertSaved?.(holding.code, {
+        ...(alert || {}),
+        target_price: body.target_price,
+        stop_loss: body.stop_loss,
+      });
+      setEditing(false);
+    } catch {}
+    setSaving(false);
+  }, [holding.code, targetInput, stopInput, alert, onAlertSaved]);
+
   return (
     <div
       className="bg-surface-900 rounded-xl px-4 py-3 cursor-pointer hover:bg-slate-800 active:bg-slate-700 transition-colors"
-      onClick={() => navigate(`/stock?code=${holding.code}`)}
+      onClick={() => !editing && navigate(`/stock?code=${holding.code}`)}
     >
+      {/* 종목명 + 손익 */}
       <div className="flex items-center gap-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5">
             <p className="text-sm font-medium text-white truncate">{holding.name}</p>
-            {badge && (
+            {badge && !editing && (
               <span className={`text-[9px] px-1.5 py-0.5 rounded font-medium flex-shrink-0 ${badge.cls}`}>{badge.text}</span>
             )}
           </div>
@@ -80,7 +121,55 @@ function HoldingItem({ holding, priceInfo, alert }) {
         </div>
       </div>
 
-      {hasLevels ? (
+      {/* 인라인 편집 폼 */}
+      {editing ? (
+        <div
+          className="mt-2.5 pt-2.5 border-t border-slate-800/80"
+          onClick={e => e.stopPropagation()}
+        >
+          <div className="flex gap-2">
+            <div className="flex-1">
+              <label className="text-[9px] text-profit mb-0.5 block">목표가</label>
+              <input
+                type="number"
+                inputMode="numeric"
+                placeholder={price ? String(Math.round(price * 1.1)) : '예: 80000'}
+                value={targetInput}
+                onChange={e => setTargetInput(e.target.value)}
+                className="w-full bg-slate-800 text-white text-xs rounded-lg px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-profit/50 placeholder:text-slate-600"
+              />
+            </div>
+            <div className="flex-1">
+              <label className="text-[9px] text-loss mb-0.5 block">손절가</label>
+              <input
+                type="number"
+                inputMode="numeric"
+                placeholder={price ? String(Math.round(price * 0.9)) : '예: 65000'}
+                value={stopInput}
+                onChange={e => setStopInput(e.target.value)}
+                className="w-full bg-slate-800 text-white text-xs rounded-lg px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-loss/50 placeholder:text-slate-600"
+              />
+            </div>
+          </div>
+          <div className="flex gap-1.5 mt-2">
+            <button
+              type="button"
+              onClick={saveEdit}
+              disabled={saving}
+              className="flex-1 text-[11px] font-medium py-1.5 rounded-lg bg-brand-500 text-white disabled:opacity-50"
+            >
+              {saving ? '저장 중...' : '저장'}
+            </button>
+            <button
+              type="button"
+              onClick={cancelEdit}
+              className="px-3 text-[11px] py-1.5 rounded-lg bg-slate-800 text-slate-400"
+            >
+              취소
+            </button>
+          </div>
+        </div>
+      ) : hasLevels ? (
         <div className="mt-2.5 pt-2.5 border-t border-slate-800/80">
           {barPos != null && (
             <div className="relative h-1.5 rounded-full bg-gradient-to-r from-loss/40 via-slate-700 to-profit/40 mb-1.5">
@@ -97,18 +186,30 @@ function HoldingItem({ holding, priceInfo, alert }) {
                 : <span className="text-slate-600">미설정</span>}
               {stopGap != null && <span className="text-loss ml-1">{pctLabel(stopGap)}</span>}
             </span>
-            <span className="text-slate-500">
-              목표 {target != null
-                ? <span className="text-profit font-medium">{fmtKRW(target)}</span>
-                : <span className="text-slate-600">미설정</span>}
-              {targetGap != null && <span className="text-profit ml-1">{pctLabel(targetGap)}</span>}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-slate-500">
+                목표 {target != null
+                  ? <span className="text-profit font-medium">{fmtKRW(target)}</span>
+                  : <span className="text-slate-600">미설정</span>}
+                {targetGap != null && <span className="text-profit ml-1">{pctLabel(targetGap)}</span>}
+              </span>
+              <button
+                type="button"
+                onClick={openEdit}
+                className="text-slate-600 hover:text-brand-400 transition-colors"
+                title="수정"
+              >
+                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" />
+                </svg>
+              </button>
+            </div>
           </div>
         </div>
       ) : (
         <button
           type="button"
-          onClick={(e) => { e.stopPropagation(); navigate('/tools?tool=alerts'); }}
+          onClick={openEdit}
           className="mt-2 text-[10px] text-slate-600 hover:text-brand-400 transition-colors"
         >
           + 목표가·손절가 설정
@@ -118,7 +219,7 @@ function HoldingItem({ holding, priceInfo, alert }) {
   );
 }
 
-export default function HoldingsList({ holdings, priceMap, alertMap }) {
+export default function HoldingsList({ holdings, priceMap, alertMap, onAlertSaved }) {
   if (!holdings) {
     return (
       <div className="space-y-2 px-4">
@@ -146,7 +247,13 @@ export default function HoldingsList({ holdings, priceMap, alertMap }) {
   return (
     <div className="space-y-1.5 px-4">
       {holdings.map(h => (
-        <HoldingItem key={h.code} holding={h} priceInfo={priceMap?.[h.code]} alert={alertMap?.[h.code]} />
+        <HoldingItem
+          key={h.code}
+          holding={h}
+          priceInfo={priceMap?.[h.code]}
+          alert={alertMap?.[h.code]}
+          onAlertSaved={onAlertSaved}
+        />
       ))}
     </div>
   );

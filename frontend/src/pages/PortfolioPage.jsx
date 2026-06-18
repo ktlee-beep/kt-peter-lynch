@@ -150,6 +150,10 @@ export default function PortfolioPage() {
       .catch(() => {});
   }, []);
 
+  const handleAlertSaved = useCallback((code, newAlert) => {
+    setAlertMap(prev => ({ ...prev, [code]: newAlert }));
+  }, []);
+
   const handleTradeAdded = () => {
     setPortfolioRevision(n => n + 1);
     setHoldings(null);
@@ -187,7 +191,7 @@ export default function PortfolioPage() {
           <>
             <PortfolioSummary summary={summary} />
             <div className="mt-2">
-              <HoldingsList holdings={holdings} priceMap={priceMap} alertMap={alertMap} />
+              <HoldingsList holdings={holdings} priceMap={priceMap} alertMap={alertMap} onAlertSaved={handleAlertSaved} />
             </div>
           </>
         )}
