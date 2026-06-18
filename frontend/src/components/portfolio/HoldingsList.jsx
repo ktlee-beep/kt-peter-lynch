@@ -166,6 +166,7 @@ function HoldingItem({ holding, priceInfo, alert, onAlertSaved }) {
   let badge = null;
   if (price && target != null && price >= target) badge = { text: '목표 도달', cls: 'bg-profit/20 text-profit' };
   else if (price && stop != null && price <= stop) badge = { text: '손절 이탈', cls: 'bg-loss/20 text-loss' };
+  else if (price && stop != null && stopGap != null && stopGap > -5 && stopGap < 0) badge = { text: '손절 임박', cls: 'bg-amber-500/20 text-amber-400', warn: true };
 
   // 편집 모드 진입 + AI·차트 제안 동시 로드
   const openEdit = useCallback((e) => {
@@ -377,9 +378,13 @@ function HoldingItem({ holding, priceInfo, alert, onAlertSaved }) {
           {barPos != null && (
             <div className="relative h-1.5 rounded-full bg-gradient-to-r from-loss/40 via-slate-700 to-profit/40 mb-1.5">
               <div
-                className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-2 h-2 rounded-full bg-white shadow"
+                className={`absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-2 h-2 rounded-full shadow ${badge?.warn ? 'bg-amber-400' : 'bg-white'}`}
                 style={{ left: `${barPos}%` }}
-              />
+              >
+                {badge?.warn && (
+                  <span className="absolute inset-0 rounded-full animate-ping bg-amber-400/60" />
+                )}
+              </div>
             </div>
           )}
           <div className="flex items-center justify-between text-[10px]">
