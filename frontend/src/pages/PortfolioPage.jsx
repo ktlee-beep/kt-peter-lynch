@@ -86,28 +86,24 @@ export default function PortfolioPage() {
     loadingRef.current = false;
   }, []);
 
-  // 시세만 조용히 재조회 (스켈레톤 깜빡임 없이 priceMap·summary 갱신) — 60초 자동 갱신용
+  // 배치 시세 재조회 — /api/quotes 1회 호출로 전 종목 갱신 (60초 자동 갱신용)
   const refreshPrices = useCallback(async (list) => {
     if (!list || list.length === 0) return;
     try {
-      const results = await Promise.all(
-        list.map(item =>
-          fetch(`/api/naver-stock/${item.code}`, { headers: authHeaders() })
-            .then(r => r.json())
-            .then(p => ({ code: item.code, data: p }))
-            .catch(() => ({ code: item.code, data: null }))
-        )
-      );
+      const codes = list.map(x => x.code).join(',');
+      const r = await fetch(`/api/quotes?codes=${codes}`, { headers: authHeaders() });
+      if (!r.ok) return;
+      const { quotes } = await r.json();
       const map = {};
-      results.forEach(({ code, data }) => {
-        if (!data?.price) return;
-        const holding = list.find(x => x.code === code);
+      (quotes || []).forEach(q => {
+        if (!q.price) return;
+        const holding = list.find(x => x.code === q.code);
         if (!holding) return;
-        map[code] = {
-          currentPrice: data.price,
-          currentValue: data.price * holding.shares,
-          pnl: (data.price - holding.avgPrice) * holding.shares,
-          pnlPct: ((data.price / holding.avgPrice) - 1) * 100,
+        map[q.code] = {
+          currentPrice: q.price,
+          currentValue: q.price * holding.shares,
+          pnl: (q.price - holding.avgPrice) * holding.shares,
+          pnlPct: ((q.price / holding.avgPrice) - 1) * 100,
         };
       });
       setPriceMap(map);

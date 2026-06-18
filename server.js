@@ -598,6 +598,46 @@ app.get('/api/naver-stock/:code', async (req, res) => {
   }
 });
 
+// ── /api/quotes — 배치 시세 조회 (최대 50종목 병렬) ──────────────
+app.get('/api/quotes', authMiddleware, async (req, res) => {
+  const raw = (req.query.codes || '').split(',').map(c => c.replace(/\D/g, '').slice(0, 6)).filter(Boolean);
+  const codes = [...new Set(raw)].slice(0, 50);
+  if (!codes.length) return res.status(400).json({ error: 'codes 파라미터 필요' });
+
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
+
+  const fetchOne = async (code) => {
+    try {
+      const r = await fetch(`https://m.stock.naver.com/api/stock/${code}/basic`,
+        { headers: { 'User-Agent': UA, 'Referer': 'https://m.stock.naver.com/' } });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json();
+      return {
+        code,
+        price:      parseInt((d.closePrice || '0').toString().replace(/,/g, '')),
+        name:       d.stockName || '',
+        changeRate: parseFloat(d.fluctuationsRatio || 0),
+        change:     parseInt((d.compareToPreviousClosePrice || '0').toString().replace(/,/g, '')),
+      };
+    } catch {
+      try {
+        const r2 = await fetch(`https://polling.finance.naver.com/api/realtime/domestic/stock/${code}`,
+          { headers: { 'User-Agent': UA } });
+        if (!r2.ok) throw new Error(`polling HTTP ${r2.status}`);
+        const d2 = await r2.json();
+        const s = d2.datas?.[0];
+        if (!s) throw new Error('no data');
+        return { code, price: s.nv || 0, name: s.nm || '', changeRate: s.cr || 0, change: s.cv || 0 };
+      } catch (e) {
+        return { code, price: null, error: e.message };
+      }
+    }
+  };
+
+  const quotes = await Promise.all(codes.map(fetchOne));
+  return res.json({ quotes, ts: Date.now() });
+});
+
 // ── /api/stock/search — 종목명·코드 검색 (내장 KRX 1775종목) ────
 app.get('/api/stock/search', (req, res) => {
   const q = (req.query.q || '').trim().toLowerCase();
