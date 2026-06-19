@@ -1,0 +1,45 @@
+name: Daily Cron Triggers
+
+on:
+  schedule:
+    # 아침 브리핑 — 08:00 KST = UTC 23:00 (일~목)
+    - cron: '0 23 * * 0-4'
+    # 미국 스캔   — 07:00 KST = UTC 22:00 (일~목)
+    - cron: '0 22 * * 0-4'
+    # KR 일일 스캔 — 20:00 KST = UTC 11:00 (월~금)
+    - cron: '0 11 * * 1-5'
+  workflow_dispatch:  # 수동 실행 허용
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake up Render (cold start 대기)
+        run: |
+          echo "Pinging Render to wake up..."
+          curl -sf https://kt-peter-lynch.onrender.com/healthz || true
+          sleep 40
+
+      - name: Morning Brief (08:00 KST)
+        if: github.event.schedule == '0 23 * * 0-4'
+        run: |
+          echo "Triggering morning brief..."
+          curl -sf -X POST https://kt-peter-lynch.onrender.com/api/brief/generate \
+            -H "x-scan-secret: ${{ secrets.SCAN_SECRET }}" \
+            && echo "OK" || echo "FAILED (non-fatal)"
+
+      - name: US Scan (07:00 KST)
+        if: github.event.schedule == '0 22 * * 0-4'
+        run: |
+          echo "Triggering US scan..."
+          curl -sf -X POST https://kt-peter-lynch.onrender.com/api/scan/us/trigger \
+            -H "x-scan-secret: ${{ secrets.SCAN_SECRET }}" \
+            && echo "OK" || echo "FAILED (non-fatal)"
+
+      - name: KR Daily Scan (20:00 KST)
+        if: github.event.schedule == '0 11 * * 1-5'
+        run: |
+          echo "Triggering KR daily scan..."
+          curl -sf -X POST https://kt-peter-lynch.onrender.com/api/scan/trigger \
+            -H "x-scan-secret: ${{ secrets.SCAN_SECRET }}" \
+            && echo "OK" || echo "FAILED (non-fatal)"
