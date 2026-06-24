@@ -64,7 +64,10 @@ export async function getScanResults({ date, signal = 'BUY', limit = 100 }) {
     .eq('signal', signal)
     .order('confidence', { ascending: false })
     .limit(Math.min(limit, 500));
-  if (error) throw error;
+  if (error) {
+    if (error.message?.includes('schema cache') || error.code === 'PGRST200') return [];
+    throw error;
+  }
   return data?.map(r => ({
     ...r,
     name:   r.kt_stocks?.name,
@@ -96,7 +99,10 @@ export async function getStockHistory(code, from, to) {
     .lte('analysis_date', to   || new Date().toISOString().slice(0, 10))
     .order('analysis_date', { ascending: false })
     .limit(365);
-  if (error) throw error;
+  if (error) {
+    if (error.message?.includes('schema cache') || error.code === 'PGRST200') return [];
+    throw error;
+  }
   return data ?? [];
 }
 
