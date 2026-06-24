@@ -102,15 +102,17 @@ app.use(express.static(legacyDir)); // login.html, manifest.json 등
 
 // ── 인메모리 캐시 (무버스, 매크로) ─────────────────────────────
 const cache = {
-  movers:     { data: null, ts: 0 },
-  macro:      { data: null, ts: 0 },
-  market:     { data: null, ts: 0 },
-  indexChart: {},   // keyed by id, each { data, ts }
+  movers:       { data: null, ts: 0 },
+  macro:        { data: null, ts: 0 },
+  market:       { data: null, ts: 0 },
+  geminiMarket: { data: null, ts: 0 },
+  indexChart:   {},   // keyed by id, each { data, ts }
 };
-const CACHE_TTL_MOVERS     = 60 * 60 * 1000; // 1시간
-const CACHE_TTL_MACRO      = 30 * 60 * 1000; // 30분
-const CACHE_TTL_MARKET     =  5 * 60 * 1000; // 5분
-const CACHE_TTL_INDEX_CHART = 60 * 60 * 1000; // 1시간
+const CACHE_TTL_MOVERS       = 60 * 60 * 1000; // 1시간
+const CACHE_TTL_MACRO        = 30 * 60 * 1000; // 30분
+const CACHE_TTL_MARKET       =  5 * 60 * 1000; // 5분
+const CACHE_TTL_INDEX_CHART  = 60 * 60 * 1000; // 1시간
+const CACHE_TTL_GEMINI_MARKET = 4 * 60 * 60 * 1000; // 4시간 (Gemini 429 방지)
 
 // ── 인증 미들웨어 ────────────────────────────────────────────────
 function authMiddleware(req, res, next) {
@@ -1607,6 +1609,10 @@ app.get('/api/calendar', async (req, res) => {
 });
 
 app.get('/api/gemini/market', async (req, res) => {
+  // 캐시 히트 (4시간) — Gemini 429 방지
+  if (cache.geminiMarket.data && Date.now() - cache.geminiMarket.ts < CACHE_TTL_GEMINI_MARKET) {
+    return res.json({ ...cache.geminiMarket.data, fromCache: true });
+  }
   try {
     const macroRes = await fetch(`http://localhost:${PORT}/api/macro`, {
       headers: { authorization: req.headers.authorization },
@@ -1614,9 +1620,14 @@ app.get('/api/gemini/market', async (req, res) => {
     const macroData = await macroRes.json();
     const { analyzeMarket } = await import('./gemini.js');
     const result = await analyzeMarket(macroData);
+    cache.geminiMarket = { data: result, ts: Date.now() };
     res.json(result);
   } catch (e) {
-    res.status(429).json({ error: e.message });
+    // 캐시가 만료됐더라도 이전 데이터가 있으면 반환 (429 루프 방지)
+    if (cache.geminiMarket.data) {
+      return res.json({ ...cache.geminiMarket.data, fromCache: true, stale: true });
+    }
+    res.status(500).json({ error: e.message });
   }
 });
 
