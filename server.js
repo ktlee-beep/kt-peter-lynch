@@ -1888,8 +1888,33 @@ app.get('*', (_req, res) => {
   res.sendFile(path.join(distDir, 'index.html'));
 });
 
+// ── 자동 마이그레이션 (서버 시작 시 schema.sql 자동 적용) ──────────
+async function autoMigrate() {
+  if (!process.env.DATABASE_URL) {
+    console.log('[AutoMigrate] DATABASE_URL 미설정 — 건너뜀');
+    return;
+  }
+  try {
+    const { default: pg } = await import('pg');
+    const client = new pg.Client({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+    await client.connect();
+    const { default: fsModule } = await import('fs');
+    const rawSql = fsModule.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+    const statements = rawSql.split(';').map(s => s.trim()).filter(Boolean);
+    let ok = 0, skip = 0;
+    for (const stmt of statements) {
+      try { await client.query(stmt); ok++; } catch { skip++; }
+    }
+    await client.end();
+    console.log(`[AutoMigrate] 완료 — ${ok}개 실행, ${skip}개 건너뜀`);
+  } catch (e) {
+    console.error('[AutoMigrate] 오류 (서비스 계속 실행):', e.message);
+  }
+}
+
 // ── 서버 시작 ─────────────────────────────────────────────────────
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`KT Trading API → http://localhost:${PORT}`);
+  await autoMigrate();
   startCron();
 });
