@@ -18,6 +18,8 @@ import DCFCalculator from '../components/stock/DCFCalculator';
 import DividendCard from '../components/stock/DividendCard';
 import PeerComparison from '../components/stock/PeerComparison';
 import SupplyChart from '../components/stock/SupplyChart';
+import NewsPulse from '../components/stock/NewsPulse';
+import QualityScreen from '../components/stock/QualityScreen';
 
 const TABS = ['종합', '재무', 'AI', 'Thesis'];
 
@@ -202,7 +204,17 @@ export default function StockPage() {
         )}
 
         {!error && tab === 'AI' && code && (
-          <AIAnalysis code={code} />
+          <div className="space-y-3 pb-4">
+            {data?.changeRate != null && Math.abs(data.changeRate) >= 3 && (
+              <div className="px-4">
+                <NewsPulse code={code} changeRate={data.changeRate} />
+              </div>
+            )}
+            <div className="px-4">
+              <QualityScreen code={code} />
+            </div>
+            <AIAnalysis code={code} />
+          </div>
         )}
 
         {!error && tab === '재무' && code && (

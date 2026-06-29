@@ -97,11 +97,12 @@ export async function analyzeStock(data) {
   if (hit) return { ...hit, fromCache: true };
 
   const f = data.fundamentals || {};
+  const cur = data.close || 0;
   const prompt = `당신은 한국 주식 가치투자 분석 AI입니다. 피터 린치 투자 철학(성장주 + 합리적 가격) 기반으로 분석하세요.
 다음 데이터를 보고 JSON으로만 응답하세요.
 
 종목: ${data.name} (${data.code}) / ${data.market}
-현재가: ${data.close?.toLocaleString()}원
+현재가: ${cur.toLocaleString()}원
 52주 고가: ${data.high52w?.toLocaleString()}원 | 52주 저가: ${data.low52w?.toLocaleString()}원
 기술 지표: RSI ${data.rsi?.toFixed(1)} | MA20 괴리 ${data.deviation?.toFixed(1)}%
 피터린치 점수: ${data.pScore}/100 (${data.pGrade}) | 리버모어 점수: ${data.lScore}/100 (${data.lGrade})
@@ -109,13 +110,26 @@ PER: ${f.per?.toFixed(1) ?? 'N/A'}배 | PBR: ${f.pbr?.toFixed(2) ?? 'N/A'}배 | 
 매출성장률: ${data.dart?.revenueGrowth?.toFixed(1) ?? 'N/A'}% | 영업이익률: ${data.dart?.opMargin?.toFixed(1) ?? 'N/A'}%
 피오트로스키 F-Score: ${data.fScore?.score ?? 'N/A'}/${data.fScore?.total ?? 9}
 
+[중요] 결론을 반드시 명확하게 제시하라. "한편으로는... 다른 한편으로는..."식 양비론 금지.
+BUY/NO_BUY/WATCH 중 하나로 강제 결정하고, 전략 유형별 구체적 매수 가격대를 제시하라.
+현재가(${cur.toLocaleString()}원) 기준으로 zone 가격대를 계산하라.
+
 응답 형식 (JSON만, 다른 텍스트 없이):
 {
   "bullCase": "강세 근거 2~3문장 (한국어)",
   "bearCase": "리스크 및 약세 근거 2~3문장 (한국어)",
   "opinion": "매수" | "관망" | "매도",
   "targetPrice": 숫자 (1년 목표주가, 원 단위),
-  "summary": "1문장 핵심 투자 요약 (한국어)"
+  "summary": "1문장 핵심 투자 요약 (한국어)",
+  "decision": {
+    "verdict": "BUY" | "NO_BUY" | "WATCH",
+    "reason": "결정 핵심 근거 1문장 (왜 이 verdict인지)",
+    "zones": {
+      "aggressive": { "action": "적극형 전략 행동 (예: 현재가 즉시 매수)", "range": "구체적 가격대 (원 단위, 예: 85,000~90,000원)" },
+      "safe": { "action": "안전형 전략 행동 (예: 눌림목 XX원대 대기)", "range": "구체적 가격대 (원 단위)" },
+      "conservative": { "action": "보수형 전략 행동 (예: 관망 또는 XX원 이하 소량)", "range": "가격대 또는 -" }
+    }
+  }
 }`;
 
   const result = await callGemini(prompt);
@@ -223,6 +237,150 @@ ${pickLines}
 }`;
 
   return await callGemini(prompt);
+}
+
+// Feature 3: 주가 급등락 원인 귀인 분석 (±5% 이상 변동 시)
+export async function analyzeNewsPulse(data) {
+  const { code, name, changeRate, close, rsi, volRatio, market } = data;
+  const cacheKey = `pulse:${code}:${new Date().toISOString().slice(0, 10)}`;
+  const hit = getCache(cacheKey);
+  if (hit) return { ...hit, fromCache: true };
+
+  const dir = changeRate > 0 ? '급등' : '급락';
+  const prompt = `당신은 한국 주식 급등락 원인 분석 AI입니다.
+다음 종목이 오늘 ${dir}했습니다. 가능한 원인과 향후 대응을 분석하세요.
+
+종목: ${name} (${code}) / ${market ?? 'KRX'}
+현재가: ${close?.toLocaleString()}원 | 등락률: ${changeRate?.toFixed(2)}%
+RSI: ${rsi?.toFixed(1) ?? 'N/A'} | 거래량 비율: ${volRatio?.toFixed(2) ?? 'N/A'}배
+
+응답 형식 (JSON만):
+{
+  "cause": "가능성 높은 원인 2~3가지 (한국어, 섹터 이슈/실적/수급/매크로 등)",
+  "causeType": "실적" | "수급" | "섹터테마" | "매크로" | "기술적" | "미확인",
+  "isSustainable": true | false,
+  "sustainReason": "지속성 판단 근거 1문장",
+  "recommendation": "보유자 / 매수 고려자 대응 1문장",
+  "confidence": "높음" | "중간" | "낮음"
+}`;
+
+  const result = await callGemini(prompt);
+  if (result.cause) setCache(cacheKey, result);
+  return result;
+}
+
+// Feature 2: Thesis 현재 유효성 추적 (매수 후 thesis가 여전히 유효한지)
+export async function trackThesisValidity(thesis, stockData, stockName) {
+  const f = stockData?.fundamentals || {};
+  const dart = stockData?.dart || {};
+  const thesisText = [
+    thesis.story   ? `사업이해: ${thesis.story}` : '',
+    thesis.growth  ? `성장근거: ${thesis.growth}` : '',
+    thesis.valuation ? `밸류에이션: ${thesis.valuation}` : '',
+    thesis.exit_plan ? `매도기준: ${thesis.exit_plan}` : '',
+  ].filter(Boolean).join('\n');
+
+  if (!thesisText.trim()) throw new Error('Thesis 내용이 없습니다');
+
+  const prompt = `당신은 투자 Thesis 유효성 추적 AI입니다. 매수 당시 작성한 Thesis가 현재 데이터 기준으로 여전히 유효한지 판단하세요.
+
+종목: ${stockName}
+현재가 지표: RSI ${stockData?.rsi?.toFixed(1) ?? 'N/A'} | 피터린치 ${stockData?.pScore ?? 'N/A'}/100
+PER: ${f.per?.toFixed(1) ?? 'N/A'}배 | ROE: ${f.roe?.toFixed(1) ?? 'N/A'}%
+매출성장률: ${dart.revenueGrowth?.toFixed(1) ?? 'N/A'}% | 영업이익률: ${dart.opMargin?.toFixed(1) ?? 'N/A'}%
+F-Score: ${stockData?.fScore?.score ?? 'N/A'}/${stockData?.fScore?.total ?? 9}
+
+[원래 Thesis]
+${thesisText}
+
+응답 형식 (JSON만):
+{
+  "status": "INTACT" | "WARNING" | "BROKEN",
+  "statusLabel": "thesis 유효" | "일부 훼손" | "thesis 무효화",
+  "intactPoints": ["여전히 유효한 thesis 근거 (최대 3개)"],
+  "brokenPoints": ["훼손된 thesis 근거 (최대 3개)"],
+  "verdict": "홀드 유지" | "재검토 필요" | "매도 고려",
+  "note": "현시점 핵심 판단 1문장"
+}`;
+
+  return await callGemini(prompt);
+}
+
+// Feature 5: 멀티 에이전트 병렬 분석 (린치 관점 + 가치투자 관점)
+export async function analyzeStockMultiPerspective(data) {
+  const cacheKey = `multi:${data.code}`;
+  const hit = getCache(cacheKey);
+  if (hit) return { ...hit, fromCache: true };
+
+  const f = data.fundamentals || {};
+  const base = `종목: ${data.name} (${data.code})
+현재가: ${data.close?.toLocaleString()}원 | RSI: ${data.rsi?.toFixed(1)} | MA20 괴리: ${data.deviation?.toFixed(1)}%
+PER: ${f.per?.toFixed(1) ?? 'N/A'}배 | PBR: ${f.pbr?.toFixed(2) ?? 'N/A'}배 | ROE: ${f.roe?.toFixed(1) ?? 'N/A'}%
+매출성장률: ${data.dart?.revenueGrowth?.toFixed(1) ?? 'N/A'}% | 영업이익률: ${data.dart?.opMargin?.toFixed(1) ?? 'N/A'}%
+PEG: ${f.peg?.toFixed(2) ?? 'N/A'} | 피오트로스키: ${data.fScore?.score ?? 'N/A'}/${data.fScore?.total ?? 9}`;
+
+  const lynchPrompt = `당신은 피터 린치 투자 철학 전문 AI입니다. "합리적 가격의 성장주(GARP)"를 찾는 관점으로만 분석하세요.
+PEG < 1이면 매력적, 사업 이해가 쉬울수록 좋음, 매출성장률 15%+ 선호.
+
+${base}
+
+응답 형식 (JSON만):
+{
+  "verdict": "BUY" | "WATCH" | "PASS",
+  "keyReason": "린치 기준 핵심 판단 1문장",
+  "targetPrice": 숫자,
+  "pegAssessment": "PEG 평가 (예: PEG 0.8 — 성장 대비 저평가)",
+  "storyClarity": "사업 명확성 평가 (한국어 1문장)",
+  "conviction": 1 | 2 | 3 | 4 | 5
+}`;
+
+  const valuePrompt = `당신은 워런 버핏·벤저민 그레이엄 가치투자 철학 전문 AI입니다. "내재가치 대비 안전마진"을 찾는 관점으로만 분석하세요.
+PBR < 1.5 또는 ROE 20%+를 선호, 부채비율 낮을수록 좋음, 10년 후 확실성 기준.
+
+${base}
+
+응답 형식 (JSON만):
+{
+  "verdict": "BUY" | "WATCH" | "PASS",
+  "keyReason": "가치투자 기준 핵심 판단 1문장",
+  "targetPrice": 숫자,
+  "marginOfSafety": "안전마진 평가 (예: 내재가치 대비 15% 할인 — 적정 마진)",
+  "moatAssessment": "경제적 해자 평가 (한국어 1문장)",
+  "conviction": 1 | 2 | 3 | 4 | 5
+}`;
+
+  const [lynchRes, valueRes] = await Promise.allSettled([
+    callGemini(lynchPrompt),
+    callGemini(valuePrompt),
+  ]);
+
+  const lynch = lynchRes.status === 'fulfilled' ? lynchRes.value : null;
+  const value = valueRes.status === 'fulfilled' ? valueRes.value : null;
+
+  if (!lynch && !value) throw new Error('멀티 분석 실패 — 두 관점 모두 응답 없음');
+
+  // 두 verdict를 합산하여 종합 판단
+  const verdicts = [lynch?.verdict, value?.verdict].filter(Boolean);
+  const buyCount = verdicts.filter(v => v === 'BUY').length;
+  const passCount = verdicts.filter(v => v === 'PASS').length;
+  const synthesisVerdict = buyCount >= 2 ? 'STRONG_BUY' : buyCount === 1 && passCount === 0 ? 'BUY' : passCount >= 2 ? 'PASS' : 'WATCH';
+  const avgConviction = Math.round(((lynch?.conviction ?? 0) + (value?.conviction ?? 0)) / (verdicts.length || 1));
+  const avgTarget = Math.round(((lynch?.targetPrice ?? 0) + (value?.targetPrice ?? 0)) / (verdicts.length || 1));
+
+  const result = {
+    lynch,
+    value,
+    synthesis: {
+      verdict: synthesisVerdict,
+      verdictLabel: synthesisVerdict === 'STRONG_BUY' ? '강력 매수' : synthesisVerdict === 'BUY' ? '조건부 매수' : synthesisVerdict === 'WATCH' ? '관망' : '통과',
+      avgConviction,
+      consensusTarget: avgTarget,
+      agreement: buyCount === 2 || passCount === 2 ? '두 관점 일치' : '관점 분기',
+    },
+  };
+
+  if (result.synthesis) setCache(cacheKey, result);
+  return result;
 }
 
 export async function validateThesis(thesis, stockName) {

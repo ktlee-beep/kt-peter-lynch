@@ -877,3 +877,70 @@ export function analyzeNewsSentiment(newsItems) {
     items: scored,
   };
 }
+
+// Feature 4: 품질 스크린 7개 필터 (투자 가치 있는 기업인지 사전 필터링)
+export function calcQualityScreen(dart, fundamentals, pScore, fScore) {
+  const f = fundamentals || {};
+  const d = dart || {};
+  const checks = [];
+
+  const mk = (key, label, pass, value) => checks.push({ key, label, pass, value });
+
+  // 1. 영업이익률 >= 5%
+  const opMgn = d.opMargin ?? f.opMargin ?? null;
+  mk('profitability', '영업이익률 ≥ 5%',
+    opMgn !== null ? opMgn >= 5 : null,
+    opMgn !== null ? `${opMgn.toFixed(1)}%` : 'N/A');
+
+  // 2. 매출 성장 (역성장 없음)
+  const revG = d.revenueGrowth ?? f.revenueGrowth ?? null;
+  mk('revenue_growth', '매출 성장 (역성장 없음)',
+    revG !== null ? revG >= 0 : null,
+    revG !== null ? `${revG >= 0 ? '+' : ''}${revG.toFixed(1)}%` : 'N/A');
+
+  // 3. PER < 25배
+  const per = f.per ?? null;
+  mk('valuation', 'PER < 25배 (합리적 가격)',
+    per !== null ? (per > 0 && per < 25) : null,
+    per !== null ? `${per.toFixed(1)}배` : 'N/A');
+
+  // 4. 부채비율 < 200%
+  const debt = f.debtToEquity ?? null;
+  mk('debt', '부채비율 < 200%',
+    debt !== null ? debt < 200 : null,
+    debt !== null ? `${debt.toFixed(0)}%` : 'N/A');
+
+  // 5. ROE >= 10%
+  const roe = f.roe ?? null;
+  mk('roe', 'ROE ≥ 10%',
+    roe !== null ? roe >= 10 : null,
+    roe !== null ? `${roe.toFixed(1)}%` : 'N/A');
+
+  // 6. Piotroski F-Score >= 5
+  const fs = fScore?.score ?? null;
+  mk('piotroski', 'F-Score ≥ 5 (재무 건전성)',
+    fs !== null ? fs >= 5 : null,
+    fs !== null ? `${fs}/9` : 'N/A');
+
+  // 7. 린치 점수 >= 40
+  const ps = pScore ?? null;
+  mk('lynch', '린치 점수 ≥ 40점',
+    ps !== null ? ps >= 40 : null,
+    ps !== null ? `${Math.round(ps)}점` : 'N/A');
+
+  const defined = checks.filter(c => c.pass !== null);
+  const passed  = defined.filter(c => c.pass === true);
+  const failed  = defined.filter(c => c.pass === false);
+
+  let grade, verdict;
+  if (!defined.length) { grade = 'N/A'; verdict = 'UNKNOWN'; }
+  else {
+    const rate = passed.length / defined.length;
+    if (rate >= 0.86) { grade = 'A'; verdict = 'PASS'; }
+    else if (rate >= 0.71) { grade = 'B'; verdict = 'PASS'; }
+    else if (rate >= 0.57) { grade = 'C'; verdict = 'WATCH'; }
+    else { grade = 'F'; verdict = 'FAIL'; }
+  }
+
+  return { verdict, grade, passCount: passed.length, failCount: failed.length, total: checks.length, checks };
+}

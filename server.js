@@ -1556,6 +1556,88 @@ app.get('/api/gemini/validate-thesis', async (req, res) => {
   }
 });
 
+// ── /api/gemini/analyze-deep — 멀티 에이전트 병렬 심층 분석 (Feature 5) ──
+app.get('/api/gemini/analyze-deep', async (req, res) => {
+  const code = req.query.code;
+  if (!code) return res.status(400).json({ error: 'code 파라미터 필요' });
+  try {
+    const analysisRes = await fetch(`http://localhost:${PORT}/api/analysis?code=${code}`, {
+      headers: { authorization: req.headers.authorization },
+    });
+    if (!analysisRes.ok) return res.status(502).json({ error: '종목 데이터 조회 실패' });
+    const analysisData = await analysisRes.json();
+    if (analysisData.error) return res.status(400).json({ error: analysisData.error });
+    const { analyzeStockMultiPerspective } = await import('./gemini.js');
+    const result = await analyzeStockMultiPerspective(analysisData);
+    res.json(result);
+  } catch (e) {
+    res.status(e.message?.includes('한도') ? 429 : 500).json({ error: e.message });
+  }
+});
+
+// ── /api/gemini/news-pulse — 주가 급등락 원인 귀인 (Feature 3) ──────
+app.get('/api/gemini/news-pulse', async (req, res) => {
+  const code = req.query.code;
+  if (!code) return res.status(400).json({ error: 'code 파라미터 필요' });
+  try {
+    const analysisRes = await fetch(`http://localhost:${PORT}/api/analysis?code=${code}`, {
+      headers: { authorization: req.headers.authorization },
+    });
+    if (!analysisRes.ok) return res.status(502).json({ error: '종목 데이터 조회 실패' });
+    const d = await analysisRes.json();
+    if (d.error) return res.status(400).json({ error: d.error });
+    const { analyzeNewsPulse } = await import('./gemini.js');
+    const result = await analyzeNewsPulse({
+      code, name: d.name, changeRate: d.changeRate, close: d.close,
+      rsi: d.rsi, volRatio: d.volRatio, market: d.market,
+    });
+    res.json(result);
+  } catch (e) {
+    res.status(e.message?.includes('한도') ? 429 : 500).json({ error: e.message });
+  }
+});
+
+// ── /api/quality-screen — 품질 스크린 7개 필터 (Feature 4) ──────────
+app.get('/api/quality-screen', async (req, res) => {
+  const code = req.query.code;
+  if (!code) return res.status(400).json({ error: 'code 파라미터 필요' });
+  try {
+    const analysisRes = await fetch(`http://localhost:${PORT}/api/analysis?code=${code}`, {
+      headers: { authorization: req.headers.authorization },
+    });
+    if (!analysisRes.ok) return res.status(502).json({ error: '종목 데이터 조회 실패' });
+    const d = await analysisRes.json();
+    if (d.error) return res.status(400).json({ error: d.error });
+    const { calcQualityScreen } = await import('./analysis.js');
+    const result = calcQualityScreen(d.dart, d.fundamentals, d.pScore, d.fScore);
+    res.json({ ...result, code, name: d.name });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── /api/thesis/track — Thesis 현재 유효성 추적 (Feature 2) ─────────
+app.get('/api/thesis/track', authMiddleware, async (req, res) => {
+  const { code } = req.query;
+  if (!code) return res.status(400).json({ error: 'code required' });
+  try {
+    const [thesisResult, analysisResult] = await Promise.all([
+      getSupabase().from('theses').select('story,growth,valuation,exit_plan,name')
+        .eq('user_email', req.user.email).eq('code', code).maybeSingle(),
+      fetch(`http://localhost:${PORT}/api/analysis?code=${code}`, {
+        headers: { authorization: req.headers.authorization },
+      }).then(r => r.json()).catch(() => null),
+    ]);
+    const thesis = thesisResult.data;
+    if (!thesis) return res.status(404).json({ error: 'Thesis가 없습니다.' });
+    const { trackThesisValidity } = await import('./gemini.js');
+    const result = await trackThesisValidity(thesis, analysisResult, thesis.name || code);
+    res.json(result);
+  } catch (e) {
+    res.status(e.message?.includes('한도') ? 429 : 500).json({ error: e.message });
+  }
+});
+
 // ── /api/calendar ──────────────────────────────────────────────────
 const calendarCache = new Map(); // key=codes_hash, { data, ts }
 const CALENDAR_TTL = 60 * 60 * 1000; // 1h

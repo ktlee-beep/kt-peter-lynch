@@ -262,6 +262,34 @@ export async function runDailyScan() {
 
   try { await completeScanBatch(batchId); } catch {}
   console.log(`[Cron] 스캔 완료 — 처리: ${totalProcessed}, 실패: ${totalFailed}, BUY: ${totalBuy}`);
+
+  // Feature 3: 급등락(±5%) 종목 뉴스 펄스 분석 캐시 워밍 (최대 5개, 비동기)
+  (async () => {
+    try {
+      const { data: bigMovers } = await getSupabase()
+        .from('kt_daily_analysis')
+        .select('code, change_rate, close_price, rsi, vol_ratio, analysis_json')
+        .eq('analysis_date', today)
+        .or('change_rate.gte.5,change_rate.lte.-5')
+        .limit(5);
+      if (!bigMovers?.length) return;
+      const { analyzeNewsPulse } = await import('./gemini.js');
+      for (const m of bigMovers) {
+        const parsed = m.analysis_json
+          ? (typeof m.analysis_json === 'string' ? JSON.parse(m.analysis_json) : m.analysis_json)
+          : {};
+        await analyzeNewsPulse({
+          code: m.code, name: parsed.name || m.code,
+          changeRate: m.change_rate, close: m.close_price,
+          rsi: m.rsi, volRatio: m.vol_ratio, market: parsed.market,
+        }).catch(() => {});
+        await new Promise(r => setTimeout(r, 2000)); // 2초 간격 (API 부하 방지)
+      }
+      console.log(`[Cron] 뉴스 펄스 캐시 워밍 완료 (${bigMovers.length}개)`);
+    } catch (e) {
+      console.error('[Cron] 뉴스 펄스 워밍 오류:', e.message);
+    }
+  })();
 }
 
 // ── 매크로 갱신 ──────────────────────────────────────────────────
