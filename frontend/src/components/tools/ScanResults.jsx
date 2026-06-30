@@ -28,12 +28,13 @@ function ScoreCell({ label, value, max = 100 }) {
 
 export default function ScanResults() {
   const navigate = useNavigate();
-  const [signal, setSignal]   = useState('BUY');
-  const [results, setResults] = useState([]);
-  const [date, setDate]       = useState('');
-  const [status, setStatus]   = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError]     = useState('');
+  const [signal, setSignal]     = useState('BUY');
+  const [results, setResults]   = useState([]);
+  const [date, setDate]         = useState('');
+  const [status, setStatus]     = useState(null);
+  const [loading, setLoading]   = useState(true);
+  const [error, setError]       = useState('');
+  const [scanning, setScanning] = useState(false);
 
   const load = useCallback(async (sig) => {
     setLoading(true); setError('');
@@ -43,7 +44,6 @@ export default function ScanResults() {
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
       let items = d.results || [];
       let resultDate = d.date;
-      // 오늘 결과가 없으면 최근 7일 내 마지막 스캔일 탐색
       if (!items.length) {
         for (let back = 1; back <= 7 && !items.length; back++) {
           const day = new Date(Date.now() - back * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -62,6 +62,32 @@ export default function ScanResults() {
     }
   }, []);
 
+  const triggerScan = useCallback(async () => {
+    if (scanning) return;
+    setScanning(true);
+    try {
+      const r = await fetch('/api/scan/trigger', { method: 'POST', headers: authHeaders() });
+      if (!r.ok) throw new Error('트리거 실패');
+      // 15초마다 상태 폴링 → 완료되면 결과 갱신
+      const poll = setInterval(async () => {
+        try {
+          const s = await fetch('/api/scan/status', { headers: authHeaders() }).then(r => r.json());
+          setStatus(s);
+          if (s.status === 'completed' || s.status === 'idle') {
+            clearInterval(poll);
+            setScanning(false);
+            load(signal);
+          }
+        } catch { /* ignore */ }
+      }, 15000);
+      // 최대 15분 후 강제 종료
+      setTimeout(() => { clearInterval(poll); setScanning(false); load(signal); }, 15 * 60 * 1000);
+    } catch (e) {
+      setError(e.message);
+      setScanning(false);
+    }
+  }, [scanning, signal, load]);
+
   useEffect(() => { load(signal); }, [signal, load]);
 
   useEffect(() => {
@@ -72,10 +98,24 @@ export default function ScanResults() {
   return (
     <div className="px-4 py-2 space-y-3">
       <div className="bg-surface-900 rounded-xl p-3">
-        <p className="text-[11px] text-slate-500 leading-relaxed">
-          매 영업일 20:00 전 종목 자동 스캔 — 피터 린치(펀더멘털+가격) · 제시 리버모어(추세+모멘텀) ·
-          피오트로스키 F-Score 3중 채점 후 종합 시그널 산출
-        </p>
+        <div className="flex items-start justify-between gap-2">
+          <p className="text-[11px] text-slate-500 leading-relaxed flex-1">
+            매 영업일 20:00 전 종목 자동 스캔 — 피터 린치(펀더멘털+가격) · 제시 리버모어(추세+모멘텀) ·
+            피오트로스키 F-Score 3중 채점 후 종합 시그널 산출
+          </p>
+          <button
+            onClick={triggerScan}
+            disabled={scanning}
+            className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-brand-500/20 text-brand-400 disabled:opacity-50 disabled:cursor-not-allowed active:bg-brand-500/30 transition-colors"
+          >
+            {scanning ? (
+              <>
+                <span className="w-3 h-3 border border-brand-400 border-t-transparent rounded-full animate-spin" />
+                스캔 중...
+              </>
+            ) : '지금 스캔'}
+          </button>
+        </div>
         {status?.lastBatch?.started_at && (
           <p className="text-[10px] text-slate-600 mt-1">
             마지막 스캔: {String(status.lastBatch.started_at).slice(0, 16).replace('T', ' ')} ({status.status})
@@ -111,9 +151,21 @@ export default function ScanResults() {
       )}
 
       {!loading && !error && results.length === 0 && (
-        <div className="bg-surface-900 rounded-xl p-6 text-center">
+        <div className="bg-surface-900 rounded-xl p-6 text-center space-y-3">
           <p className="text-slate-400 text-sm">최근 7일 내 스캔 결과가 없습니다</p>
-          <p className="text-slate-600 text-xs mt-1.5">매 영업일 20:00(KST)에 자동 스캔이 실행됩니다</p>
+          <p className="text-slate-600 text-xs">매 영업일 20:00(KST)에 자동 스캔이 실행됩니다</p>
+          <button
+            onClick={triggerScan}
+            disabled={scanning}
+            className="mx-auto flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold bg-brand-500/20 text-brand-400 disabled:opacity-50 disabled:cursor-not-allowed active:bg-brand-500/30 transition-colors"
+          >
+            {scanning ? (
+              <>
+                <span className="w-3.5 h-3.5 border border-brand-400 border-t-transparent rounded-full animate-spin" />
+                스캔 중 (5~10분 소요)
+              </>
+            ) : '지금 스캔 실행'}
+          </button>
         </div>
       )}
 
