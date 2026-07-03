@@ -33,20 +33,29 @@ CREATE TABLE IF NOT EXISTS kt_daily_analysis (
   data_source     TEXT DEFAULT 'on-demand',
   scan_batch_id   TEXT,
   created_at      TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE (code, analysis_date)
+  UNIQUE (code, analysis_date),
+  -- PostgREST 임베드(kt_stocks(...)) 해석에 필요한 FK. 신규 생성 시 인라인 적용.
+  CONSTRAINT fk_kt_daily_code FOREIGN KEY (code) REFERENCES kt_stocks (code)
 );
 
 CREATE INDEX IF NOT EXISTS idx_kt_daily_date_signal ON kt_daily_analysis (analysis_date, signal);
 CREATE INDEX IF NOT EXISTS idx_kt_daily_code ON kt_daily_analysis (code);
 
--- PostgREST 임베디드 조인(kt_stocks (name, market, sector))에 FK 필수
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'kt_daily_analysis_code_fkey') THEN
+-- 이미 테이블이 존재(FK 없이 생성)하는 배포 대상: 멱등 FK 추가
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.table_constraints
+    WHERE constraint_name = 'fk_kt_daily_code'
+      AND table_name = 'kt_daily_analysis'
+  ) THEN
     ALTER TABLE kt_daily_analysis
-      ADD CONSTRAINT kt_daily_analysis_code_fkey
-      FOREIGN KEY (code) REFERENCES kt_stocks(code) ON DELETE CASCADE;
+      ADD CONSTRAINT fk_kt_daily_code FOREIGN KEY (code) REFERENCES kt_stocks (code);
   END IF;
 END $$;
+
+-- PostgREST 스키마 캐시 갱신 (테이블/관계 변경 후 즉시 반영)
+NOTIFY pgrst, 'reload schema';
 
 -- ── 스캔 배치 로그 ────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS kt_scan_batches (
@@ -73,77 +82,12 @@ CREATE TABLE IF NOT EXISTS kt_macro_snapshots (
   raw_json     TEXT
 );
 
--- ── DART 기업코드 매핑 (전체 상장사 code → corp_code) ─────────────
-CREATE TABLE IF NOT EXISTS kt_corp_codes (
-  code        TEXT PRIMARY KEY,
-  corp_code   TEXT NOT NULL,
-  corp_name   TEXT,
-  updated_at  TIMESTAMPTZ DEFAULT NOW()
-);
-
--- ── DART 재무 캐시 (분기 데이터, 90일 TTL) ────────────────────────
-CREATE TABLE IF NOT EXISTS kt_dart_cache (
-  code        TEXT PRIMARY KEY,
-  dart_json   TEXT NOT NULL,
-  updated_at  TIMESTAMPTZ DEFAULT NOW()
-);
-
--- ── 아침 브리핑 (매 영업일 08:00 KST 생성, 1일 1행) ───────────────
-CREATE TABLE IF NOT EXISTS kt_morning_brief (
-  brief_date  DATE PRIMARY KEY,
-  brief_json  TEXT NOT NULL,
-  created_at  TIMESTAMPTZ DEFAULT NOW()
-);
-
 -- ── 재무 캐시 ─────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS kt_fundamentals_cache (
   code        TEXT PRIMARY KEY,
   raw_json    TEXT NOT NULL,
   updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
-
--- ── 관심종목 ──────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS kt_watchlist (
-  id         BIGSERIAL PRIMARY KEY,
-  user_email TEXT NOT NULL,
-  code       TEXT NOT NULL,
-  name       TEXT NOT NULL,
-  market     TEXT NOT NULL DEFAULT '',
-  added_at   TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE (user_email, code)
-);
-
--- ── 매매 거래 이력 (포트폴리오 원장) ────────────────────────────
-CREATE TABLE IF NOT EXISTS kt_trades (
-  id          BIGSERIAL PRIMARY KEY,
-  user_email  TEXT NOT NULL,
-  code        TEXT NOT NULL,
-  name        TEXT NOT NULL,
-  market      TEXT NOT NULL DEFAULT '',
-  trade_type  TEXT NOT NULL CHECK (trade_type IN ('buy', 'sell')),
-  shares      INTEGER NOT NULL CHECK (shares > 0),
-  price       INTEGER NOT NULL CHECK (price > 0),
-  trade_date  DATE NOT NULL,
-  memo        TEXT DEFAULT '',
-  created_at  TIMESTAMPTZ DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS kt_trades_user_code ON kt_trades (user_email, code);
-
--- ── 투자 Thesis ──────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS kt_thesis (
-  id           BIGSERIAL PRIMARY KEY,
-  user_email   TEXT NOT NULL,
-  code         TEXT NOT NULL,
-  name         TEXT NOT NULL DEFAULT '',
-  story        TEXT DEFAULT '',
-  growth       TEXT DEFAULT '',
-  valuation    TEXT DEFAULT '',
-  exit_plan    TEXT DEFAULT '',
-  created_at   TIMESTAMPTZ DEFAULT NOW(),
-  updated_at   TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE (user_email, code)
-);
-CREATE INDEX IF NOT EXISTS kt_thesis_user ON kt_thesis (user_email);
 
 -- ── 앱 사용자 (마스터가 직접 발급) ───────────────────────────────
 CREATE TABLE IF NOT EXISTS app_users (
@@ -153,6 +97,18 @@ CREATE TABLE IF NOT EXISTS app_users (
   memo          TEXT,
   created_at    TIMESTAMPTZ DEFAULT NOW(),
   last_login    TIMESTAMPTZ
+);
+
+-- ── 이메일 인증 (회원가입 시 인증코드 임시 저장) ──────────────────
+-- 인증 성공 시 app_users로 이관 후 삭제. code_hash/password_hash 모두 bcrypt.
+CREATE TABLE IF NOT EXISTS email_verifications (
+  email         TEXT PRIMARY KEY,
+  code_hash     TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  role          TEXT NOT NULL DEFAULT 'user',
+  attempts      INT  NOT NULL DEFAULT 0,
+  expires_at    TIMESTAMPTZ NOT NULL,
+  created_at    TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- ── 종목 마스터 시드 (KOSPI + KOSDAQ 주요 종목) ───────────────────
@@ -242,31 +198,3 @@ INSERT INTO kt_stocks (code, name, market, sector, yahoo_suffix) VALUES
   ('035900','JYP엔터테인먼트','KOSDAQ','엔터','KQ'),
   ('122870','와이지엔터테인먼트','KOSDAQ','엔터','KQ')
 ON CONFLICT (code) DO NOTHING;
-
--- ── 알림 설정 (F056) ─────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS alert_settings (
-  id            uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-  user_email    text NOT NULL,
-  code          text NOT NULL,
-  target_price  numeric,
-  stop_loss     numeric,
-  rsi_high      integer,
-  rsi_low       integer,
-  is_active     boolean NOT NULL DEFAULT true,
-  created_at    timestamptz NOT NULL DEFAULT now(),
-  updated_at    timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT alert_settings_user_code_key UNIQUE (user_email, code)
-);
-
-CREATE OR REPLACE FUNCTION update_alert_settings_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-  NEW.updated_at = now();
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS alert_settings_updated_at_trigger ON alert_settings;
-CREATE TRIGGER alert_settings_updated_at_trigger
-  BEFORE UPDATE ON alert_settings
-  FOR EACH ROW EXECUTE FUNCTION update_alert_settings_updated_at();

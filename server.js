@@ -32,7 +32,8 @@ import {
   KRX_INDICES, YAHOO_SYMBOLS, fetchIndex, fetchYahooSymbol, fetchIndexOHLCV, fetchKospiFutures,
   KS_UNIVERSE, KQ_UNIVERSE,
 } from './data.js';
-import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMacroHistory, saveMacroSnapshot, validateAppUser, getAppUsers, createAppUser, deleteAppUser, updateAppUserPassword, getSupabase, getWatchlist, addToWatchlist, removeFromWatchlist, getTrades, getHoldings, addTrade, deleteTrade, getThesis, upsertThesis, listTheses, getLatestMorningBrief, getUsScan, clearDartCache, setAppConfig, getAppConfig } from './db.js';
+import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMacroHistory, saveMacroSnapshot, validateAppUser, getAppUsers, createAppUser, deleteAppUser, updateAppUserPassword, getSupabase, getWatchlist, addToWatchlist, removeFromWatchlist, getTrades, getHoldings, addTrade, deleteTrade, getThesis, upsertThesis, listTheses, getLatestMorningBrief, getUsScan, clearDartCache, setAppConfig, getAppConfig, appUserExists, createAppUserWithHash, upsertEmailVerification, getEmailVerification, verifyEmailCode, incrementVerificationAttempts, deleteEmailVerification } from './db.js';
+import { sendVerificationCode, isMailConfigured } from './mailer.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -62,6 +63,15 @@ const loginLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+// 회원가입 인증(코드 발송/검증) Rate Limit (15분에 5회)
+const signupLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { error: '요청 횟수를 초과했습니다. 15분 후 재시도하세요.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // JWT_SECRET: Render 환경변수에서 반드시 설정. 미설정 시 시작 거부
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
@@ -171,6 +181,85 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
   }
 
   return res.status(401).json({ error: '이메일 또는 비밀번호가 틀렸습니다' });
+});
+
+// ── 회원가입 1단계: 이메일 인증코드 발송 ─────────────────────────
+app.post('/api/auth/register/request-code', signupLimiter, async (req, res) => {
+  const { email, password } = req.body || {};
+  const emailLower = (email || '').toLowerCase().trim();
+  const masked = emailLower.replace(/^(.{3}).*@/, '$1***@');
+
+  if (!EMAIL_RE.test(emailLower))
+    return res.status(400).json({ error: '올바른 이메일 형식이 아닙니다' });
+  if (!password || password.length < 8)
+    return res.status(400).json({ error: '비밀번호는 8자 이상이어야 합니다' });
+  if (emailLower === MASTER_EMAIL.toLowerCase())
+    return res.status(400).json({ error: '사용할 수 없는 이메일입니다' });
+  // 화이트리스트 설정 시 미허가 이메일 가입 차단 (로그인 정책과 일치)
+  if (ALLOWED_EMAILS && !ALLOWED_EMAILS.has(emailLower))
+    return res.status(403).json({ error: '가입이 허용되지 않은 이메일입니다. 관리자에게 문의하세요.' });
+
+  try {
+    if (await appUserExists(emailLower))
+      return res.status(409).json({ error: '이미 가입된 이메일입니다. 로그인해주세요.' });
+
+    const code = String(Math.floor(100000 + Math.random() * 900000)); // 6자리
+    await upsertEmailVerification({ email: emailLower, code, password, role: 'user', ttlMinutes: 10 });
+    await sendVerificationCode(emailLower, code);
+    console.log(`[signup] 인증코드 발송: ${masked}`);
+    res.json({
+      ok: true,
+      message: '인증코드를 이메일로 발송했습니다. 10분 이내에 입력해주세요.',
+      mailConfigured: isMailConfigured(),
+    });
+  } catch (e) {
+    console.error(`[signup] request-code 오류: ${e.message}`);
+    res.status(500).json({ error: '인증코드 발송 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.' });
+  }
+});
+
+// ── 회원가입 2단계: 인증코드 확인 → 계정 생성 + 자동 로그인 ──────
+app.post('/api/auth/register/verify', signupLimiter, async (req, res) => {
+  const { email, code } = req.body || {};
+  const emailLower = (email || '').toLowerCase().trim();
+  if (!emailLower || !code)
+    return res.status(400).json({ error: '이메일과 인증코드를 입력하세요' });
+
+  try {
+    const rec = await getEmailVerification(emailLower);
+    if (!rec)
+      return res.status(400).json({ error: '인증 요청을 찾을 수 없습니다. 인증코드를 다시 요청해주세요.' });
+    if (new Date(rec.expires_at).getTime() < Date.now()) {
+      await deleteEmailVerification(emailLower);
+      return res.status(400).json({ error: '인증코드가 만료되었습니다. 다시 요청해주세요.' });
+    }
+    if (rec.attempts >= 5) {
+      await deleteEmailVerification(emailLower);
+      return res.status(429).json({ error: '인증 시도 횟수를 초과했습니다. 인증코드를 다시 요청해주세요.' });
+    }
+
+    const match = await verifyEmailCode(rec.code_hash, code);
+    if (!match) {
+      const n = await incrementVerificationAttempts(emailLower);
+      return res.status(400).json({ error: `인증코드가 일치하지 않습니다. (${Math.max(0, 5 - n)}회 남음)` });
+    }
+
+    // 인증 성공 — 계정 생성 (동시 가입 방어)
+    if (await appUserExists(emailLower)) {
+      await deleteEmailVerification(emailLower);
+      return res.status(409).json({ error: '이미 가입된 이메일입니다. 로그인해주세요.' });
+    }
+    const role = rec.role || 'user';
+    await createAppUserWithHash(emailLower, rec.password_hash, role);
+    await deleteEmailVerification(emailLower);
+
+    const token = jwt.sign({ email: emailLower, role }, JWT_SECRET, { expiresIn: '7d' });
+    console.log(`[signup] 가입 완료: ${emailLower.replace(/^(.{3}).*@/, '$1***@')} (role: ${role})`);
+    res.json({ ok: true, token, role });
+  } catch (e) {
+    console.error(`[signup] verify 오류: ${e.message}`);
+    res.status(500).json({ error: '가입 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.' });
+  }
 });
 
 app.post('/api/auth/logout', (req, res) => {

@@ -34,3 +34,11 @@ services:
         value: https://kt-peter-lynch.onrender.com
       - key: SCAN_SECRET
         sync: false
+      # ── 회원가입 인증코드 발송 (Gmail SMTP) ──
+      # 값은 Render 대시보드 Environment 탭에서 입력 (secret이므로 git 미포함)
+      - key: GMAIL_USER
+        sync: false
+      - key: GMAIL_APP_PASSWORD
+        sync: false
+      - key: MAIL_FROM
+        sync: false

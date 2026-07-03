@@ -85,6 +85,27 @@
     display: none;
   }
   .error.show { display: block; }
+  .notice {
+    background: #052e16;
+    border: 1px solid #166534;
+    color: #86efac;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 13px;
+    margin-bottom: 16px;
+    display: none;
+  }
+  .notice.show { display: block; }
+  .hint { font-size: 12px; color: #71717a; margin: -8px 0 16px; }
+  .switch { text-align: center; margin-top: 20px; font-size: 13px; color: #a1a1aa; }
+  .switch a { color: #ef4444; font-weight: 600; cursor: pointer; text-decoration: none; }
+  .switch a:hover { text-decoration: underline; }
+  .link-btn {
+    background: none; border: none; color: #a1a1aa; font-size: 13px;
+    width: auto; padding: 0; margin: 10px 0 0; cursor: pointer; font-weight: 500;
+  }
+  .link-btn:hover { background: none; color: #fafafa; text-decoration: underline; }
+  .hidden { display: none; }
 </style>
 </head>
 <body>
@@ -94,12 +115,37 @@
     <p>피터 린치 투자 시스템</p>
   </div>
   <div class="error" id="err"></div>
-  <form id="form">
+  <div class="notice" id="notice"></div>
+
+  <!-- 로그인 뷰 -->
+  <form id="loginForm">
     <label>이메일</label>
-    <input type="email" id="email" placeholder="이메일 입력" autocomplete="email" autofocus>
+    <input type="email" id="loginEmail" placeholder="이메일 입력" autocomplete="email" autofocus>
     <label>비밀번호</label>
-    <input type="password" id="password" placeholder="비밀번호 입력" autocomplete="current-password">
-    <button type="submit" id="btn">로그인</button>
+    <input type="password" id="loginPassword" placeholder="비밀번호 입력" autocomplete="current-password">
+    <button type="submit" id="loginBtn">로그인</button>
+    <div class="switch">계정이 없으신가요? <a id="toSignup">회원가입</a></div>
+  </form>
+
+  <!-- 회원가입 1단계: 이메일 + 비밀번호 → 인증코드 발송 -->
+  <form id="signupForm" class="hidden">
+    <label>이메일</label>
+    <input type="email" id="signupEmail" placeholder="이메일 입력" autocomplete="email">
+    <label>비밀번호</label>
+    <input type="password" id="signupPassword" placeholder="8자 이상 입력" autocomplete="new-password">
+    <p class="hint">가입을 위해 이메일로 인증코드가 발송됩니다.</p>
+    <button type="submit" id="signupBtn">인증코드 받기</button>
+    <div class="switch">이미 계정이 있으신가요? <a id="toLogin">로그인</a></div>
+  </form>
+
+  <!-- 회원가입 2단계: 인증코드 확인 -->
+  <form id="verifyForm" class="hidden">
+    <label>인증코드</label>
+    <input type="text" id="verifyCode" placeholder="이메일로 받은 6자리 코드" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
+    <p class="hint" id="verifyHint">입력한 이메일로 인증코드를 발송했습니다. (10분 이내 입력)</p>
+    <button type="submit" id="verifyBtn">가입 완료</button>
+    <button type="button" class="link-btn" id="resendBtn">인증코드 재발송</button>
+    <div class="switch"><a id="toLoginFromVerify">처음으로</a></div>
   </form>
 </div>
 <script>
@@ -113,42 +159,122 @@ if (localStorage.getItem('kt_backend_url') === 'https://kt-trading-api.onrender.
 }
 const BACKEND_URL = localStorage.getItem('kt_backend_url') || 'https://kt-peter-lynch.onrender.com';
 
-async function doLogin(email, password) {
-  const btn = document.getElementById('btn');
-  const err = document.getElementById('err');
-  err.classList.remove('show');
-  btn.disabled = true;
-  btn.textContent = '로그인 중...';
-  try {
-    const res = await fetch(`${BACKEND_URL}/api/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
-    });
-    const data = await res.json();
-    if (res.ok && data.token) {
-      localStorage.setItem('kt_jwt', data.token);
-      window.location.href = '/';
-    } else {
-      err.textContent = data.error || '로그인 실패';
-      err.classList.add('show');
-      btn.disabled = false;
-      btn.textContent = '로그인';
-    }
-  } catch {
-    err.textContent = '네트워크 오류가 발생했습니다';
-    err.classList.add('show');
-    btn.disabled = false;
-    btn.textContent = '로그인';
-  }
+const err    = document.getElementById('err');
+const notice = document.getElementById('notice');
+const $ = id => document.getElementById(id);
+
+function showErr(msg)    { notice.classList.remove('show'); err.textContent = msg; err.classList.add('show'); }
+function showNotice(msg) { err.classList.remove('show'); notice.textContent = msg; notice.classList.add('show'); }
+function clearMsg()      { err.classList.remove('show'); notice.classList.remove('show'); }
+
+// 뷰 전환
+const views = { login: $('loginForm'), signup: $('signupForm'), verify: $('verifyForm') };
+let signupEmail = '';
+function showView(name) {
+  clearMsg();
+  Object.entries(views).forEach(([k, el]) => el.classList.toggle('hidden', k !== name));
 }
 
-document.getElementById('form').addEventListener('submit', async e => {
+$('toSignup').addEventListener('click', () => showView('signup'));
+$('toLogin').addEventListener('click', () => showView('login'));
+$('toLoginFromVerify').addEventListener('click', () => showView('login'));
+
+async function postJSON(path, body) {
+  const res = await fetch(`${BACKEND_URL}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  return { res, data };
+}
+
+function loginWithToken(token) {
+  localStorage.setItem('kt_jwt', token);
+  window.location.href = '/';
+}
+
+// ── 로그인 ──
+async function doLogin(email, password) {
+  const btn = $('loginBtn');
+  clearMsg();
+  btn.disabled = true; btn.textContent = '로그인 중...';
+  try {
+    const { res, data } = await postJSON('/api/auth/login', { email, password });
+    if (res.ok && data.token) { loginWithToken(data.token); return; }
+    showErr(data.error || '로그인 실패');
+  } catch {
+    showErr('네트워크 오류가 발생했습니다');
+  }
+  btn.disabled = false; btn.textContent = '로그인';
+}
+
+$('loginForm').addEventListener('submit', e => {
   e.preventDefault();
-  await doLogin(
-    document.getElementById('email').value.trim().toLowerCase(),
-    document.getElementById('password').value,
-  );
+  doLogin($('loginEmail').value.trim().toLowerCase(), $('loginPassword').value);
+});
+
+// ── 회원가입 1단계: 인증코드 발송 ──
+async function requestCode(email, password) {
+  const btn = $('signupBtn');
+  clearMsg();
+  btn.disabled = true; btn.textContent = '발송 중...';
+  try {
+    const { res, data } = await postJSON('/api/auth/register/request-code', { email, password });
+    if (res.ok) {
+      signupEmail = email;
+      showView('verify');
+      $('verifyHint').textContent = `${email} 로 인증코드를 발송했습니다. (10분 이내 입력)`;
+      if (data.mailConfigured === false) {
+        showNotice('메일 발송이 설정되지 않아 서버 콘솔에 코드가 출력되었습니다. (개발 모드)');
+      } else {
+        showNotice('인증코드를 이메일로 발송했습니다.');
+      }
+      $('verifyCode').focus();
+    } else {
+      showErr(data.error || '인증코드 발송 실패');
+    }
+  } catch {
+    showErr('네트워크 오류가 발생했습니다');
+  }
+  btn.disabled = false; btn.textContent = '인증코드 받기';
+}
+
+$('signupForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const email = $('signupEmail').value.trim().toLowerCase();
+  const password = $('signupPassword').value;
+  if (password.length < 8) { showErr('비밀번호는 8자 이상이어야 합니다'); return; }
+  requestCode(email, password);
+});
+
+// ── 회원가입 2단계: 인증코드 확인 → 가입 완료 + 자동 로그인 ──
+async function verifyCode(code) {
+  const btn = $('verifyBtn');
+  clearMsg();
+  btn.disabled = true; btn.textContent = '확인 중...';
+  try {
+    const { res, data } = await postJSON('/api/auth/register/verify', { email: signupEmail, code });
+    if (res.ok && data.token) { loginWithToken(data.token); return; }
+    showErr(data.error || '인증 실패');
+  } catch {
+    showErr('네트워크 오류가 발생했습니다');
+  }
+  btn.disabled = false; btn.textContent = '가입 완료';
+}
+
+$('verifyForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const code = $('verifyCode').value.trim();
+  if (!code) { showErr('인증코드를 입력하세요'); return; }
+  verifyCode(code);
+});
+
+// 인증코드 재발송 (1단계 값 재사용)
+$('resendBtn').addEventListener('click', () => {
+  const password = $('signupPassword').value;
+  if (!signupEmail || password.length < 8) { showView('signup'); return; }
+  requestCode(signupEmail, password);
 });
 </script>
 </body>

@@ -207,6 +207,77 @@ export async function updateAppUserPassword(email, newPassword) {
   if (error) throw error;
 }
 
+// 이메일이 이미 가입되어 있는지 확인
+export async function appUserExists(email) {
+  const sb = getSupabase();
+  const { data } = await sb.from('app_users')
+    .select('email')
+    .eq('email', email.toLowerCase())
+    .single();
+  return !!data;
+}
+
+// 이미 해시된 비밀번호로 계정 생성 (이메일 인증 완료 후 사용 — 재해시 방지)
+export async function createAppUserWithHash(email, passwordHash, role = 'user', memo = '') {
+  const sb = getSupabase();
+  const { data, error } = await sb.from('app_users')
+    .insert({ email: email.toLowerCase(), password_hash: passwordHash, role, memo })
+    .select('email, role, created_at')
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+// ── 이메일 인증 코드 관리 ─────────────────────────────────────────
+// 인증코드 발급/재발급 (이메일당 1건, 재요청 시 갱신). code·password는 평문 입력 → 내부에서 bcrypt.
+export async function upsertEmailVerification({ email, code, password, role = 'user', ttlMinutes = 10 }) {
+  const sb = getSupabase();
+  const codeHash     = await bcrypt.hash(String(code), BCRYPT_ROUNDS);
+  const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+  const expires_at   = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
+  const { error } = await sb.from('email_verifications')
+    .upsert({
+      email: email.toLowerCase(),
+      code_hash: codeHash,
+      password_hash: passwordHash,
+      role,
+      attempts: 0,
+      expires_at,
+      created_at: new Date().toISOString(),
+    }, { onConflict: 'email' });
+  if (error) throw error;
+}
+
+export async function getEmailVerification(email) {
+  const sb = getSupabase();
+  const { data } = await sb.from('email_verifications')
+    .select('email, code_hash, password_hash, role, attempts, expires_at')
+    .eq('email', email.toLowerCase())
+    .single();
+  return data || null;
+}
+
+// 입력 코드가 저장된 해시와 일치하는지 검증
+export async function verifyEmailCode(codeHash, inputCode) {
+  return bcrypt.compare(String(inputCode).trim(), codeHash);
+}
+
+// 인증 실패 시도 횟수 +1, 갱신된 횟수 반환
+export async function incrementVerificationAttempts(email) {
+  const sb = getSupabase();
+  const rec = await getEmailVerification(email);
+  const next = (rec?.attempts ?? 0) + 1;
+  await sb.from('email_verifications')
+    .update({ attempts: next })
+    .eq('email', email.toLowerCase());
+  return next;
+}
+
+export async function deleteEmailVerification(email) {
+  const sb = getSupabase();
+  await sb.from('email_verifications').delete().eq('email', email.toLowerCase());
+}
+
 // 활성 종목 목록 (스캔용)
 export async function getActiveStocks() {
   const sb = getSupabase();
