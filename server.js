@@ -362,6 +362,32 @@ CREATE TABLE IF NOT EXISTS alert_settings (
   }
 });
 
+// ── /api/scan/trigger (수동 스캔 트리거, 내부용) ─────────────────
+app.post('/api/scan/trigger', async (req, res) => {
+  if (!isScanSecretOrMaster(req)) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  const { runDailyScan } = await import('./cron.js');
+  runDailyScan().catch(console.error);
+  res.json({ ok: true, message: '스캔 시작됨 (비동기)' });
+});
+
+// 수동 생성 트리거 (마스터/SCAN_SECRET) — 08:00 기다리지 않고 즉시 생성
+app.post('/api/brief/generate', async (req, res) => {
+  if (!isScanSecretOrMaster(req)) return res.status(403).json({ error: 'Forbidden' });
+  const { runMorningBrief } = await import('./cron.js');
+  runMorningBrief().catch(console.error);
+  res.json({ ok: true, message: '아침 브리핑 생성 시작됨 (비동기)' });
+});
+
+// 미국 스캔 수동 트리거 (마스터/SCAN_SECRET)
+app.post('/api/scan/us/trigger', async (req, res) => {
+  if (!isScanSecretOrMaster(req)) return res.status(403).json({ error: 'Forbidden' });
+  const { runUsScan } = await import('./cron.js');
+  runUsScan().catch(console.error);
+  res.json({ ok: true, message: '미국 스캔 시작됨 (비동기)' });
+});
+
 // 이하 모든 /api/* 는 인증 필요
 app.use('/api', authMiddleware);
 
@@ -1056,16 +1082,6 @@ app.delete('/api/admin/users/:email', authMiddleware, adminMiddleware, async (re
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
-});
-
-// ── /api/scan/trigger (수동 스캔 트리거, 내부용) ─────────────────
-app.post('/api/scan/trigger', async (req, res) => {
-  if (!isScanSecretOrMaster(req)) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
-  const { runDailyScan } = await import('./cron.js');
-  runDailyScan().catch(console.error);
-  res.json({ ok: true, message: '스캔 시작됨 (비동기)' });
 });
 
 // ── /api/screener ──────────────────────────────────────────────────
@@ -1812,14 +1828,6 @@ app.get('/api/brief/morning', async (req, res) => {
   }
 });
 
-// 수동 생성 트리거 (마스터/SCAN_SECRET) — 08:00 기다리지 않고 즉시 생성
-app.post('/api/brief/generate', async (req, res) => {
-  if (!isScanSecretOrMaster(req)) return res.status(403).json({ error: 'Forbidden' });
-  const { runMorningBrief } = await import('./cron.js');
-  runMorningBrief().catch(console.error);
-  res.json({ ok: true, message: '아침 브리핑 생성 시작됨 (비동기)' });
-});
-
 // ── /api/scan/us — 미국 스캔 결과 (다우30+나스닥100 핵심) ─────────
 app.get('/api/scan/us', async (req, res) => {
   try {
@@ -1828,14 +1836,6 @@ app.get('/api/scan/us', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message, stocks: [] });
   }
-});
-
-// 미국 스캔 수동 트리거 (마스터/SCAN_SECRET)
-app.post('/api/scan/us/trigger', async (req, res) => {
-  if (!isScanSecretOrMaster(req)) return res.status(403).json({ error: 'Forbidden' });
-  const { runUsScan } = await import('./cron.js');
-  runUsScan().catch(console.error);
-  res.json({ ok: true, message: '미국 스캔 시작됨 (비동기)' });
 });
 
 // ── AI 키 설정 (마스터) — Render 환경변수 없이 DB에 보관 ─────────

@@ -73,7 +73,8 @@ export default function ScanResults() {
         try {
           const s = await fetch('/api/scan/status', { headers: authHeaders() }).then(r => r.json());
           setStatus(s);
-          if (s.status === 'completed' || s.status === 'idle') {
+          // 서버는 완료 시 'done' 기록 (db.js completeScanBatch) — 'completed'는 하위 호환 유지
+          if (s.status === 'done' || s.status === 'completed' || s.status === 'idle') {
             clearInterval(poll);
             setScanning(false);
             load(signal);

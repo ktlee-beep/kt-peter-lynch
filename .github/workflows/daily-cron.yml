@@ -21,7 +21,7 @@ jobs:
           sleep 40
 
       - name: Morning Brief (08:00 KST)
-        if: github.event.schedule == '0 23 * * 0-4'
+        if: github.event.schedule == '0 23 * * 0-4' || github.event_name == 'workflow_dispatch'
         run: |
           echo "Triggering morning brief..."
           curl -sf -X POST https://kt-peter-lynch.onrender.com/api/brief/generate \
@@ -29,7 +29,7 @@ jobs:
             && echo "OK" || echo "FAILED (non-fatal)"
 
       - name: US Scan (07:00 KST)
-        if: github.event.schedule == '0 22 * * 0-4'
+        if: github.event.schedule == '0 22 * * 0-4' || github.event_name == 'workflow_dispatch'
         run: |
           echo "Triggering US scan..."
           curl -sf -X POST https://kt-peter-lynch.onrender.com/api/scan/us/trigger \
@@ -37,7 +37,7 @@ jobs:
             && echo "OK" || echo "FAILED (non-fatal)"
 
       - name: KR Daily Scan (20:00 KST)
-        if: github.event.schedule == '0 11 * * 1-5'
+        if: github.event.schedule == '0 11 * * 1-5' || github.event_name == 'workflow_dispatch'
         run: |
           echo "Triggering KR daily scan..."
           curl -sf -X POST https://kt-peter-lynch.onrender.com/api/scan/trigger \
