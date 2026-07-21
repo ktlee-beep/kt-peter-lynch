@@ -343,21 +343,23 @@ export async function batchSaveAnalysis(rows) {
 // 관심종목 조회
 export async function getWatchlist(email) {
   const sb = getSupabase();
-  const { data } = await sb
+  const { data, error } = await sb
     .from('kt_watchlist')
     .select('code, name, market, added_at')
     .eq('user_email', email)
     .order('added_at', { ascending: false });
+  if (error) throw error;
   return data || [];
 }
 
 // 관심종목 추가 (최대 30개)
 export async function addToWatchlist(email, code, name, market) {
   const sb = getSupabase();
-  const { count } = await sb
+  const { count, error: countError } = await sb
     .from('kt_watchlist')
     .select('id', { count: 'exact', head: true })
     .eq('user_email', email);
+  if (countError) throw countError;
   if (count >= 30) throw new Error('최대 30개까지 추가할 수 있습니다');
   const { data, error } = await sb
     .from('kt_watchlist')
@@ -371,7 +373,8 @@ export async function addToWatchlist(email, code, name, market) {
 // 관심종목 삭제
 export async function removeFromWatchlist(email, code) {
   const sb = getSupabase();
-  await sb.from('kt_watchlist').delete().eq('user_email', email).eq('code', code);
+  const { error } = await sb.from('kt_watchlist').delete().eq('user_email', email).eq('code', code);
+  if (error) throw error;
 }
 
 // 거래 이력 조회 (전체 또는 특정 종목)
@@ -380,7 +383,8 @@ export async function getTrades(email, code = null) {
   let q = sb.from('kt_trades').select('id, code, name, market, trade_type, shares, price, trade_date, memo, created_at')
     .eq('user_email', email).order('trade_date', { ascending: false }).order('created_at', { ascending: false });
   if (code) q = q.eq('code', code);
-  const { data } = await q;
+  const { data, error } = await q;
+  if (error) throw error;
   return data || [];
 }
 
@@ -430,8 +434,9 @@ export async function deleteTrade(email, id) {
 // ── Thesis ────────────────────────────────────────────────────────
 export async function getThesis(email, code) {
   const sb = getSupabase();
-  const { data } = await sb.from('kt_thesis')
-    .select('*').eq('user_email', email).eq('code', code).single();
+  const { data, error } = await sb.from('kt_thesis')
+    .select('*').eq('user_email', email).eq('code', code).maybeSingle();
+  if (error) throw error;
   return data || null;
 }
 

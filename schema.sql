@@ -89,6 +89,50 @@ CREATE TABLE IF NOT EXISTS kt_fundamentals_cache (
   updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- ── 관심종목 ──────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS kt_watchlist (
+  id          BIGSERIAL PRIMARY KEY,
+  user_email  TEXT NOT NULL,
+  code        TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  market      TEXT,
+  added_at    TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (user_email, code)
+);
+
+-- ── 거래 이력 ─────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS kt_trades (
+  id          BIGSERIAL PRIMARY KEY,
+  user_email  TEXT NOT NULL,
+  code        TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  market      TEXT,
+  trade_type  TEXT NOT NULL,
+  shares      INTEGER NOT NULL,
+  price       INTEGER NOT NULL,
+  trade_date  DATE NOT NULL,
+  memo        TEXT,
+  created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_kt_trades_user ON kt_trades (user_email, code);
+
+-- ── 투자 논지 (Thesis) ───────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS kt_thesis (
+  user_email  TEXT NOT NULL,
+  code        TEXT NOT NULL,
+  name        TEXT,
+  story       TEXT,
+  growth      TEXT,
+  valuation   TEXT,
+  exit_plan   TEXT,
+  updated_at  TIMESTAMPTZ DEFAULT NOW(),
+  PRIMARY KEY (user_email, code)
+);
+
+-- PostgREST 스키마 캐시 갱신 (신규 테이블 3종 반영)
+NOTIFY pgrst, 'reload schema';
+
 -- ── 앱 사용자 (마스터가 직접 발급) ───────────────────────────────
 CREATE TABLE IF NOT EXISTS app_users (
   email         TEXT PRIMARY KEY,

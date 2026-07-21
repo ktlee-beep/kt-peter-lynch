@@ -53,11 +53,16 @@ export default function StockPage() {
   useEffect(() => {
     if (!code) return;
     fetch('/api/watchlist', { headers: authHeaders() })
-      .then(r => r.json())
+      .then(r => {
+        if (!r.ok) throw new Error('관심종목 상태를 불러오지 못했습니다');
+        return r.json();
+      })
       .then(d => {
         setInWatchlist((d.items || []).some(i => i.code === code));
       })
-      .catch(() => {});
+      .catch(() => {
+        setInWatchlist(null);
+      });
   }, [code]);
 
   const handleWatchlistToggle = useCallback(async () => {
@@ -65,8 +70,9 @@ export default function StockPage() {
     setToggling(true);
     try {
       if (inWatchlist) {
-        await fetch(`/api/watchlist/${code}`, { method: 'DELETE', headers: authHeaders() });
-        setInWatchlist(false);
+        const r = await fetch(`/api/watchlist/${code}`, { method: 'DELETE', headers: authHeaders() });
+        if (r.ok) setInWatchlist(false);
+        else alert('관심종목 삭제에 실패했습니다. 잠시 후 다시 시도해주세요.');
       } else {
         const r = await fetch('/api/watchlist', {
           method: 'POST',
@@ -76,8 +82,11 @@ export default function StockPage() {
         const d = await r.json();
         if (r.ok) setInWatchlist(true);
         else if (d.error?.includes('최대')) alert('관심종목은 최대 30개까지 추가할 수 있습니다');
+        else alert('관심종목 추가에 실패했습니다. 잠시 후 다시 시도해주세요.');
       }
-    } catch {}
+    } catch {
+      alert('네트워크 오류로 요청을 처리하지 못했습니다.');
+    }
     setToggling(false);
   }, [data, code, inWatchlist, toggling]);
 

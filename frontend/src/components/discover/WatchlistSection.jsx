@@ -6,15 +6,18 @@ export default function WatchlistSection({ refreshTrigger, onWatchlistChange }) 
   const [items,   setItems]   = useState([]);
   const [prices,  setPrices]  = useState({}); // code → { price, changeRate }
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const navigate = useNavigate();
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const r = await fetch('/api/watchlist', { headers: authHeaders() });
+      if (!r.ok) throw new Error('관심종목을 불러오지 못했습니다');
       const d = await r.json();
       const list = d.items || [];
       setItems(list);
+      setLoadError(false);
       setLoading(false);
 
       // 가격 배치 로드 (병렬, 결과는 code별로 저장)
@@ -31,7 +34,7 @@ export default function WatchlistSection({ refreshTrigger, onWatchlistChange }) 
         setPrices(map);
       }
     } catch {
-      setItems([]); setLoading(false);
+      setItems([]); setLoadError(true); setLoading(false);
     }
   }, []);
 
@@ -40,11 +43,14 @@ export default function WatchlistSection({ refreshTrigger, onWatchlistChange }) 
   const remove = async (e, code) => {
     e.stopPropagation();
     try {
-      await fetch(`/api/watchlist/${code}`, { method: 'DELETE', headers: authHeaders() });
+      const r = await fetch(`/api/watchlist/${code}`, { method: 'DELETE', headers: authHeaders() });
+      if (!r.ok) { alert('관심종목 삭제에 실패했습니다. 잠시 후 다시 시도해주세요.'); return; }
       setItems(prev => prev.filter(i => i.code !== code));
       setPrices(prev => { const n = { ...prev }; delete n[code]; return n; });
       onWatchlistChange?.();
-    } catch {}
+    } catch {
+      alert('네트워크 오류로 삭제하지 못했습니다.');
+    }
   };
 
   if (loading) {
@@ -75,8 +81,17 @@ export default function WatchlistSection({ refreshTrigger, onWatchlistChange }) 
 
       {items.length === 0 ? (
         <div className="bg-surface-900 rounded-xl p-6 text-center">
-          <p className="text-sm text-slate-400">관심 종목이 없습니다</p>
-          <p className="text-xs text-slate-600 mt-1">위 검색창에서 종목을 추가하세요</p>
+          {loadError ? (
+            <>
+              <p className="text-sm text-red-400">관심종목을 불러오지 못했습니다</p>
+              <button onClick={load} className="text-xs text-slate-500 hover:text-slate-300 mt-1 underline">다시 시도</button>
+            </>
+          ) : (
+            <>
+              <p className="text-sm text-slate-400">관심 종목이 없습니다</p>
+              <p className="text-xs text-slate-600 mt-1">위 검색창에서 종목을 추가하세요</p>
+            </>
+          )}
         </div>
       ) : (
         <div className="space-y-1.5">
