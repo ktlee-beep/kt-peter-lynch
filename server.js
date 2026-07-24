@@ -363,6 +363,8 @@ CREATE TABLE IF NOT EXISTS alert_settings (
 });
 
 // ── /api/scan/trigger (수동 스캔 트리거, 내부용) ─────────────────
+// 전역 authMiddleware 앞에 등록 — GitHub Actions 등 외부 CI가 JWT 없이
+// x-scan-secret 헤더만으로 호출한다.
 app.post('/api/scan/trigger', async (req, res) => {
   if (!isScanSecretOrMaster(req)) {
     return res.status(403).json({ error: 'Forbidden' });
@@ -1082,6 +1084,13 @@ app.delete('/api/admin/users/:email', authMiddleware, adminMiddleware, async (re
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ── /api/scan/trigger-admin (어드민 UI 전용) ─────────────────────
+app.post('/api/scan/trigger-admin', authMiddleware, adminMiddleware, async (req, res) => {
+  const { runDailyScan } = await import('./cron.js');
+  runDailyScan().catch(console.error);
+  res.json({ ok: true, message: '스캔 시작됨 (비동기)' });
 });
 
 // ── /api/screener ──────────────────────────────────────────────────

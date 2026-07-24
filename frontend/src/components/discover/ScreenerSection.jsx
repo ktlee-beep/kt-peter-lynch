@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { authHeaders } from '../../contexts/AuthContext';
+import { authHeaders, useAuth } from '../../contexts/AuthContext';
 
 const PRESETS = [
   { key: 'lynch',  label: '피터 린치', desc: 'PER≤20 · ROE≥10 · 부채≤150%' },
@@ -97,13 +97,16 @@ function ResultItem({ item }) {
 }
 
 export default function ScreenerSection() {
-  const [open, setOpen] = useState(true);
-  const [preset, setPreset] = useState('lynch');
-  const [perMax,  setPerMax]  = useState(20);
-  const [pbrMax,  setPbrMax]  = useState(3);
-  const [roeMin,  setRoeMin]  = useState(10);
-  const [debtMax, setDebtMax] = useState(150);
-  const [lynchMin, setLynchMin] = useState(50);
+  const { user } = useAuth();
+  const isMaster = user?.role === 'master';
+
+  const [open, setOpen] = useState(false);
+  const [preset, setPreset] = useState(null);
+  const [perMax,  setPerMax]  = useState(null);
+  const [pbrMax,  setPbrMax]  = useState(null);
+  const [roeMin,  setRoeMin]  = useState(null);
+  const [debtMax, setDebtMax] = useState(null);
+  const [lynchMin, setLynchMin] = useState(null);
   const [sortBy,  setSortBy]  = useState('lynch_score');
   const [page,    setPage]    = useState(1);
   const [results, setResults] = useState(null);
@@ -111,6 +114,36 @@ export default function ScreenerSection() {
   const [loading, setLoading] = useState(false);
   const [error,   setError]   = useState(null);
   const [noData,  setNoData]  = useState(false);
+  const [scanStatus, setScanStatus] = useState(null);
+  const [scanTriggerLoading, setScanTriggerLoading] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/scan/status', { headers: authHeaders() })
+      .then(r => r.json())
+      .then(d => setScanStatus(d.lastBatch || null))
+      .catch(() => {});
+  }, []);
+
+  const triggerScan = async () => {
+    setScanTriggerLoading(true);
+    try {
+      const r = await fetch('/api/scan/trigger-admin', {
+        method: 'POST',
+        headers: { ...authHeaders() },
+      });
+      const d = await r.json();
+      if (r.ok) {
+        setScanStatus(prev => ({ ...prev, status: 'running', started_at: new Date().toISOString() }));
+        alert('스캔이 시작됐습니다. 완료까지 약 3~5분 소요됩니다. 스크리닝 버튼을 다시 눌러주세요.');
+      } else {
+        alert(d.error || '스캔 시작 실패');
+      }
+    } catch {
+      alert('스캔 시작 요청 실패');
+    } finally {
+      setScanTriggerLoading(false);
+    }
+  };
 
   // 페이지 진입 시 린치 프리셋으로 자동 실행
   useEffect(() => { runScreener(1); }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -153,7 +186,12 @@ export default function ScreenerSection() {
       >
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold text-white">가치투자 스크리너</span>
-          {results !== null && <span className="text-[11px] text-brand-400">{total}개 종목</span>}
+          {results !== null && !noData && <span className="text-[11px] text-brand-400">{total}개 종목</span>}
+          {scanStatus?.analysis_date && !open && (
+            <span className="text-[10px] text-slate-600">
+              {new Date(scanStatus.started_at).toLocaleDateString('ko-KR')} 스캔
+            </span>
+          )}
         </div>
         <svg className={`w-4 h-4 text-slate-500 transition-transform ${open ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
@@ -216,7 +254,20 @@ export default function ScreenerSection() {
           {noData && (
             <div className="px-4 py-6 text-center">
               <p className="text-sm text-slate-500">스캔 데이터가 없습니다</p>
-              <p className="text-xs text-slate-700 mt-1">일일 스캔(20:00 KST) 후 사용 가능합니다</p>
+              <p className="text-xs text-slate-600 mt-1">
+                {scanStatus
+                  ? `마지막 스캔: ${new Date(scanStatus.started_at).toLocaleDateString('ko-KR')} (${scanStatus.status})`
+                  : '스캔 이력 없음'}
+              </p>
+              {isMaster && (
+                <button
+                  onClick={triggerScan}
+                  disabled={scanTriggerLoading}
+                  className="mt-3 px-4 py-2 bg-brand-500/20 text-brand-400 text-xs font-medium rounded-xl border border-brand-500/30 disabled:opacity-50"
+                >
+                  {scanTriggerLoading ? '요청 중...' : '지금 스캔 실행'}
+                </button>
+              )}
             </div>
           )}
           {results !== null && !noData && (
@@ -224,6 +275,18 @@ export default function ScreenerSection() {
               {results.length === 0 ? (
                 <div className="px-4 py-6 text-center">
                   <p className="text-sm text-slate-500">조건에 맞는 종목이 없습니다</p>
+                  <p className="text-xs text-slate-600 mt-1">
+                    재무 데이터가 갱신되지 않았을 수 있습니다. 스캔을 다시 실행해보세요.
+                  </p>
+                  {isMaster && (
+                    <button
+                      onClick={triggerScan}
+                      disabled={scanTriggerLoading}
+                      className="mt-3 px-4 py-2 bg-brand-500/20 text-brand-400 text-xs font-medium rounded-xl border border-brand-500/30 disabled:opacity-50"
+                    >
+                      {scanTriggerLoading ? '요청 중...' : '지금 스캔 실행'}
+                    </button>
+                  )}
                 </div>
               ) : (
                 <div className="divide-y divide-slate-800/50">

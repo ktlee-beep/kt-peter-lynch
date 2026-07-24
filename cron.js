@@ -6,6 +6,8 @@ import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermore
 import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief, loadCorpCodeMap, upsertCorpCodes, getDartCache, setDartCache, saveUsScan } from './db.js';
 import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures, CORP_MAP, fetchCorpCodeMap, fetchDartFinancials, US_UNIVERSE, fetchUsStockDaily } from './data.js';
 
+const FUNDAMENTALS_TTL_MS = 24 * 60 * 60 * 1000; // PER/PBR/ROE는 주가 연동 — 1거래일 이상 지나면 재수집
+
 // ── 스캔 유니버스 (DB에 종목이 없으면 하드코딩된 유니버스 사용) ─
 function getScanUniverse() {
   return [
@@ -76,11 +78,18 @@ async function analyzeStockLean(code, corpResolver = null, dartKey = '') {
     if (buyPts >= 3)  { signal = 'BUY';  confidence = Math.min(35 + buyPts * 10, 95); }
     if (sellPts >= 3) { signal = 'SELL'; confidence = Math.min(35 + sellPts * 10, 95); }
 
-    // 펀더멘털: 캐시 우선, 없으면 Naver에서 수집 후 캐시 (스크리너 PER/PBR/ROE 필터 데이터원)
-    let fundamentals = await getFundamentalsCache(code).catch(() => null);
+    // 펀더멘털: 캐시 우선 (24h TTL) — 스테일이면 재수집, 실패 시 과거값 폴백
+    // (스크리너 PER/PBR/ROE 필터 데이터원)
+    const cachedFund = await getFundamentalsCache(code).catch(() => null);
+    const isFresh = cachedFund && (Date.now() - new Date(cachedFund.updatedAt).getTime()) < FUNDAMENTALS_TTL_MS;
+    let fundamentals = isFresh ? cachedFund.fundamentals : null;
     if (!fundamentals) {
       fundamentals = await fetchNaverFundamentals(code).catch(() => null);
-      if (fundamentals) await setFundamentalsCache(code, fundamentals).catch(() => {});
+      if (fundamentals) {
+        await setFundamentalsCache(code, fundamentals).catch(() => {});
+      } else if (cachedFund) {
+        fundamentals = cachedFund.fundamentals; // 갱신 실패 시 과거값이라도 사용
+      }
     }
 
     // DART 재무: 90일 캐시 우선 → 진짜 Piotroski F-Score 입력 (분기 데이터)

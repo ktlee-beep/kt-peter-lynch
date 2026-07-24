@@ -552,15 +552,25 @@ export async function getLatestMorningBrief() {
   } catch { return null; }
 }
 
-// 재무 캐시 조회
+// 재무 캐시 조회 (fundamentals + 갱신시각)
 export async function getFundamentalsCache(code) {
   const sb = getSupabase();
   const { data } = await sb
     .from('kt_fundamentals_cache')
-    .select('raw_json')
+    .select('raw_json, updated_at')
     .eq('code', code)
     .single();
-  return data ? JSON.parse(data.raw_json) : null;
+  if (!data) return null;
+  return { fundamentals: JSON.parse(data.raw_json), updatedAt: data.updated_at };
+}
+
+// 재무 캐시 저장/갱신
+export async function upsertFundamentalsCache(code, raw) {
+  const sb = getSupabase();
+  await sb.from('kt_fundamentals_cache').upsert(
+    { code, raw_json: JSON.stringify(raw), updated_at: new Date().toISOString() },
+    { onConflict: 'code' }
+  );
 }
 
 export async function setFundamentalsCache(code, fundamentals) {
