@@ -83,6 +83,30 @@ export async function fetchNaverFundamentals(code) {
   } catch { return null; }
 }
 
+// fnlttSinglAcnt는 fs_div 요청 파라미터를 무시하고 연결(CFS)·별도(OFS)를 항상 함께 반환한다
+// (2026-08-28 삼성전자·카카오·한미반도체 등 7종목에서 CFS 요청과 OFS 요청의 응답이 동일함을 확인).
+// 그래서 fs_div를 바꿔 재요청하는 폴백은 순수 낭비이고, 골라내는 일은 행 단위로 해야 한다.
+// 필터하지 않으면 같은 account_nm이 두 벌 존재해 find()가 배열 순서에 의존하게 되며,
+// 순서가 뒤집히는 종목에서 무증상으로 별도재무제표를 집는다(삼성전자 26년 반기 매출 171.5조 vs 149.3조).
+// 엘브이엠씨처럼 한쪽만 오는 종목이 있어 CFS가 없으면 OFS로 넘어간다.
+function pickFsRows(list) {
+  if (!Array.isArray(list) || list.length === 0) return null;
+  const cfs = list.filter(i => i.fs_div === 'CFS');
+  if (cfs.length) return cfs;
+  const ofs = list.filter(i => i.fs_div === 'OFS');
+  if (ofs.length) return ofs;
+  // fs_div로 못 가르는 예외 응답. 중복 계정이 없으면 그대로 써도 안전하지만,
+  // 중복이 있는데 못 갈랐다면 그건 정확히 이 함수가 막으려던 상황이므로 포기한다.
+  const seen = new Set();
+  const hasDupe = list.some(i => {
+    const k = `${i.sj_div}|${i.account_nm}`;
+    if (seen.has(k)) return true;
+    seen.add(k);
+    return false;
+  });
+  return hasDupe ? null : list;
+}
+
 export async function fetchDartMultiYear(corpCode, dartKey) {
   const curYear = new Date().getFullYear();
   const years = [curYear - 1, curYear - 2, curYear - 3, curYear - 4, curYear - 5];
@@ -93,17 +117,14 @@ export async function fetchDartMultiYear(corpCode, dartKey) {
 
   async function fetchYear(year) {
     try {
-      const base = `https://opendart.fss.or.kr/api`;
-      const pull = async (fsDiv) => {
-        const url = `${base}/fnlttSinglAcnt.json?crtfc_key=${dartKey}&corp_code=${corpCode}`
-                  + `&bsns_year=${year}&reprt_code=11011&fs_div=${fsDiv}`;
-        const r = await fetch(url).catch(() => null);
-        if (!r?.ok) return null;
-        const j = await r.json().catch(() => null);
-        return (j?.status === '000' && j.list?.length) ? j.list : null;
-      };
-      // CFS(연결) 우선. 연결재무제표를 제출하지 않는 중소형사는 OFS(개별)로 폴백한다.
-      const rows = (await pull('CFS')) || (await pull('OFS'));
+      const url = `https://opendart.fss.or.kr/api/fnlttSinglAcnt.json?crtfc_key=${dartKey}`
+                + `&corp_code=${corpCode}&bsns_year=${year}&reprt_code=11011&fs_div=CFS`;
+      const r = await fetch(url).catch(() => null);
+      if (!r?.ok) return null;
+      const j = await r.json().catch(() => null);
+      if (j?.status !== '000') return null;
+      // CFS(연결) 우선, 없으면 OFS(개별) — 재요청이 아니라 행 필터다(pickFsRows 주석 참조)
+      const rows = pickFsRows(j.list);
       if (!rows) return null;
 
       const BSrows = rows.filter(i => i.sj_div === 'BS');
@@ -160,6 +181,146 @@ export async function fetchDartMultiYear(corpCode, dartKey) {
   return years.map((yr, i) => results[i] || { year: yr, revenue: null, operatingProfit: null, netIncome: null, equity: null, debt: null, roe: null, debtRatio: null, currentRatio: null, opMargin: null }).reverse();
 }
 
+// DART 기업개황 — 표준산업분류·시장구분·결산월
+// induty_code(한국표준산업분류)는 동종업계 상대 밸류에이션의 기준이다. 절대 PER로는
+// 저평가를 판정할 수 없다 — 반도체 PER 15와 유틸리티 PER 15는 의미가 정반대다.
+// acc_mt(결산월)가 12월이 아니면 연간 실적의 기준 시점이 달라 타사와 직접 비교할 수 없다.
+export async function fetchDartCompanyInfo(corpCode, dartKey) {
+  try {
+    const r = await fetch(`https://opendart.fss.or.kr/api/company.json?crtfc_key=${dartKey}&corp_code=${corpCode}`);
+    if (!r.ok) return null;
+    const j = await r.json().catch(() => null);
+    if (j?.status !== '000') return null;
+    const s = (v) => (typeof v === 'string' && v.trim()) ? v.trim() : null;
+    return {
+      corpName:   s(j.corp_name),
+      stockCode:  s(j.stock_code),
+      indutyCode: s(j.induty_code),
+      // corp_cls: Y=유가증권 K=코스닥 N=코넥스 E=기타.
+      // corpCls 원본도 함께 돌려준다 — market만 있으면 "기타법인(E)"과 "필드 자체가 없음"이
+      // 둘 다 null로 붕괴해 호출부가 상장 구분 실패와 기타법인을 구별할 수 없다.
+      corpCls: s(j.corp_cls),
+      market: { Y: 'KOSPI', K: 'KOSDAQ', N: 'KONEX' }[j.corp_cls] ?? null,
+      // 숫자로 정규화. '12' 문자열이면 accMonth !== 12가 항상 참이 되어 전 종목이
+      // 비12월 결산으로 오판된다 — fetchDartQuarterly가 이 값으로 제출월을 판정한다.
+      accMonth: Number.isFinite(Number(j.acc_mt)) ? Number(j.acc_mt) : null,
+      estDt:    s(j.est_dt),
+    };
+  } catch { return null; }
+}
+
+// 분기·반기보고서 코드. 사업보고서(11011)는 fetchDartMultiYear가 담당한다.
+const DART_QUARTER_REPORTS = [
+  { code: '11014', quarter: 3 },
+  { code: '11012', quarter: 2 },
+  { code: '11013', quarter: 1 },
+];
+
+// DART 분기 실적 — 연간만 보면 최신 실적이 최대 15개월 묵는다. 실적이 돌아선 지
+// 세 분기가 지나 주가가 이미 오른 뒤에야 알아차리게 되므로 "선점"이 성립하지 않는다.
+//
+// 응답 구조(2026-08-28 삼성전자 실응답으로 확인):
+//   thstrm_amount     = 해당 분기 3개월 금액
+//   thstrm_add_amount = 당기 누적
+//   frmtrm_amount     = 전년 동분기 3개월   → YoY를 호출 1회로 얻는다
+//   frmtrm_add_amount = 전년 동기 누적
+// 검증: 25Q1 79.14조 + 25Q2 74.57조 + 25Q3 86.06조 = 3분기 누적 239.77조 일치.
+//
+// accMonth는 fetchDartCompanyInfo의 acc_mt(결산월). 12월 결산이 아니면 아래 제출월 추정이
+// 성립하지 않으므로 최적화를 끄고 전 분기를 조회한다 — 자세한 이유는 dueMonth 주석 참조.
+export async function fetchDartQuarterly(corpCode, dartKey, accMonth = 12) {
+  const toNum = (v) => {
+    if (v == null || v === '' || v === '-') return null;
+    const n = parseInt(String(v).replace(/,/g, ''), 10);
+    return isNaN(n) ? null : n;
+  };
+  const find = (rows, kws) => {
+    for (const kw of kws) {
+      const it = rows.find(i => i.account_nm?.includes(kw));
+      if (it) return it;
+    }
+    return null;
+  };
+  const pull = async (year, code) => {
+    const url = `https://opendart.fss.or.kr/api/fnlttSinglAcnt.json?crtfc_key=${dartKey}`
+              + `&corp_code=${corpCode}&bsns_year=${year}&reprt_code=${code}&fs_div=CFS`;
+    const r = await fetch(url).catch(() => null);
+    if (!r?.ok) return null;
+    const j = await r.json().catch(() => null);
+    return j?.status === '000' ? pickFsRows(j.list) : null;
+  };
+
+  const now = new Date();
+  const curYear = now.getFullYear(), m = now.getMonth() + 1;
+  // 「자본시장과 금융투자업에 관한 법률」 제160조 — 분기·반기보고서는 "사업연도 개시일부터
+  // 3개월간·6개월간·9개월간의 기간이 경과한 날부터 45일 이내" 제출. 기준은 달력이 아니라
+  // 사업연도다. 12월 결산사에서만 1분기 5/15, 반기 8/14, 3분기 11/14로 떨어진다.
+  // 기한 전 분기는 조회해도 없으므로 전종목 스캔의 헛호출을 줄이려고 건너뛴다.
+  //
+  // 3월 결산사(사업연도 4월 개시)는 제출월이 8/11/익년2월이라 아래 표와 세 분기 모두 어긋난다.
+  // 루프가 첫 성공에서 return하므로 한번 잘못 걸러내면 더 최신 보고서가 서버에 있어도
+  // 영원히 도달하지 못한다. 비12월 결산사는 소수이므로 최적화를 포기하고 전 분기를 조회한다
+  // (연도 경계를 넘는 환산을 잘못 짜서 무증상 오답을 내는 것보다 호출 몇 번이 낫다).
+  const isDecFY = Number(accMonth) === 12;
+  const dueMonth = { 1: 5, 2: 8, 3: 11 };
+  const thisYearReports = isDecFY
+    ? DART_QUARTER_REPORTS.filter(q => m >= dueMonth[q.quarter])
+    : DART_QUARTER_REPORTS;
+
+  for (const [year, reports] of [[curYear, thisYearReports], [curYear - 1, DART_QUARTER_REPORTS]]) {
+    for (const { code, quarter } of reports) {
+      const rows = await pull(year, code);
+      if (!rows) continue;
+      const IS = rows.filter(i => i.sj_div === 'IS');
+      const rev = find(IS, ['매출액', '수익(매출액)', '영업수익', '매출']);
+      const op  = find(IS, ['영업이익', '영업손익']);
+      // 보험사 등은 '보험료수익'처럼 표기해 매출 키워드에 걸리지 않는다. 매출만 보고 버리면
+      // 연간 경로(fetchDartFinancials)에서는 잡히던 종목이 분기 경로에서만 사라진다.
+      if (!rev && !op) continue;
+      const net = find(IS, ['당기순이익', '분기순이익', '반기순이익']);
+
+      const toEok = (v) => v !== null ? Math.round(v / 1e8) : null;
+      const pick = (row, key) => row ? toNum(row[key]) : null;
+      // 전년이 적자면 부호가 뒤집혀 증감률이 무의미해진다. 분모에 절대값을 써서
+      // "적자 -100 → 흑자 50"이 +150%로 나오게 한다(방향은 보존).
+      // 다만 분모가 미미하면 비율이 폭발한다 — 전년 영업이익 -1억에서 올해 1000억이면
+      // +100,100%가 나와 정렬 상단을 점거하고 진짜 성장주를 밀어낸다. 1억원 미만 분모는 포기.
+      const MIN_DENOM = 1e8;
+      const growth = (cur, prev) => (cur !== null && prev !== null && Math.abs(prev) >= MIN_DENOM)
+        ? parseFloat((((cur - prev) / Math.abs(prev)) * 100).toFixed(2)) : null;
+
+      const qRev = pick(rev, 'thstrm_amount'), qRevPrev = pick(rev, 'frmtrm_amount');
+      const qOp  = pick(op,  'thstrm_amount'), qOpPrev  = pick(op,  'frmtrm_amount');
+      const qNet = pick(net, 'thstrm_amount'), qNetPrev = pick(net, 'frmtrm_amount');
+
+      // 누적 금액. 1분기는 누적 ≡ 3개월이라 폴백이 정확하지만, 2·3분기에서 같은 폴백을
+      // 하면 3개월치가 cumRevenue라는 이름을 달고 나간다. 그 값이 TTM 분모로 들어가면
+      // 밸류에이션이 3배 가까이 왜곡되고, 하필 "초저평가" 방향이라 스크리너 상단에 올라온다.
+      // 2·3분기에는 폴백 없이 null로 둬서 calcTTM이 정직하게 null을 반환하게 한다.
+      const cumOf = (row, key, q3m) => {
+        const c = pick(row, key);
+        return c !== null ? c : (quarter === 1 ? q3m : null);
+      };
+
+      return {
+        year, quarter, reportCode: code, label: `${year}년 ${quarter}분기`,
+        revenue: toEok(qRev), operatingProfit: toEok(qOp), netIncome: toEok(qNet),
+        revenueYoY: growth(qRev, qRevPrev),
+        opYoY:      growth(qOp,  qOpPrev),
+        netYoY:     growth(qNet, qNetPrev),
+        // 누적치 — TTM = 당기누적 + 전년연간 − 전년동기누적 (연간 데이터는 호출부가 보유).
+        // calcTTM에 넘길 때 prevFullYearOf는 반드시 year - 1이어야 한다.
+        prevFullYearRef: year - 1,
+        cumRevenue:         toEok(cumOf(rev, 'thstrm_add_amount', qRev)),
+        cumOperatingProfit: toEok(cumOf(op,  'thstrm_add_amount', qOp)),
+        prevCumRevenue:         toEok(cumOf(rev, 'frmtrm_add_amount', qRevPrev)),
+        prevCumOperatingProfit: toEok(cumOf(op,  'frmtrm_add_amount', qOpPrev)),
+      };
+    }
+  }
+  return null;
+}
+
 // DART 전체 상장사 corp_code 매핑 다운로드 (corpCode.xml ZIP → 상장사만 추출)
 // 반환: [{ code(6자리), corp_code(8자리), corp_name }] — 약 3,900개
 export async function fetchCorpCodeMap(dartKey) {
@@ -189,7 +350,9 @@ export async function fetchDartFinancials(corpCode, dartKey) {
       if (!r.ok) continue;
       const data = await r.json();
       if (data.status !== '000' || !Array.isArray(data.list)) continue;
-      const IS = data.list.filter(i => i.sj_div === 'IS');
+      const fsRows = pickFsRows(data.list);
+      if (!fsRows) continue;
+      const IS = fsRows.filter(i => i.sj_div === 'IS');
       const toNum = (s) => parseInt((s || '0').replace(/,/g, ''), 10);
       const find = (keywords) => {
         for (const kw of keywords) {

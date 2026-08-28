@@ -617,6 +617,69 @@ export function calcDynamicStopLoss(closes, atr) {
   };
 }
 
+// ── 박세익 기준 프리미티브 ─────────────────────────────────────────
+// "3년 연속 매출·영업이익 성장, 3년간 적자 없음, 그런데 주가는 빠졌다"를 판정하기 위한 원자 함수들.
+// 공통 원칙: 값이 없으면(null) 통과로 간주하지 않는다. 데이터 미확보와 기준 미달은 다른 상태다.
+
+// 말미의 미발표 연도를 잘라낸다.
+// fetchDartMultiYear는 [curYear-5 .. curYear-1]을 채우고 미확보 연도를 null로 패딩하는데,
+// 사업보고서 제출기한은 사업연도 경과 후 90일(「자본시장과 금융투자업에 관한 법률」제159조)이라
+// 매년 1~3월에는 직전 사업연도가 통째로 null이 된다. 이걸 "데이터 누락"으로 취급해 중단하면
+// 스크리너가 매년 3개월간 전 종목 판정 불가가 되어 무증상으로 죽는다.
+// 말미 null(아직 안 나온 미래)과 중간 null(진짜 누락)은 다른 상태다.
+function trimTrailingNulls(series) {
+  let end = series.length - 1;
+  while (end >= 0 && series[end] == null) end--;
+  return series.slice(0, end + 1);
+}
+
+// 연속 증가 연수. series는 과거→현재 순서(fetchDartMultiYear 반환 순서와 동일).
+// comparable은 실제로 비교 가능했던 구간 수 — streak가 0일 때 "성장 안 함"인지
+// "데이터가 없어서 못 셈"인지 구분하는 데 쓴다. 따라서 판정 불가로 이탈하는 경로에서는
+// comparable을 올리면 안 된다(전년 0 등).
+export function calcGrowthStreak(series) {
+  if (!Array.isArray(series)) return { streak: 0, comparable: 0 };
+  const s = trimTrailingNulls(series);
+  if (s.length < 2) return { streak: 0, comparable: 0 };
+  let streak = 0, comparable = 0;
+  for (let i = s.length - 1; i > 0; i--) {
+    const cur = s[i], prev = s[i - 1];
+    if (cur == null || prev == null) break;   // 중간 미확보 구간에서 중단
+    if (prev === 0) break;                    // 전년이 0이면 증감 판정 불가 — comparable 증가 없이 이탈.
+                                              // toEok 반올림으로 5천만원 미만 영업이익은 0이 되므로
+                                              // 소형주 흑자전환에서 실제로 밟는 경로다.
+    comparable++;
+    if (cur > prev) streak++;
+    else break;
+  }
+  return { streak, comparable };
+}
+
+// 최근 n년 적자 없음. 데이터가 부족하면 false가 아니라 null(판정 불가)을 돌려준다.
+// 주의: null은 falsy라 `if (hasNoLoss(x))`로 쓰면 "판정 불가"와 "적자 있음"이 같아진다.
+// 호출부는 반드시 `=== true` / `=== false`로 명시 비교할 것.
+export function hasNoLoss(series, years = 3) {
+  if (!Array.isArray(series)) return null;
+  if (!Number.isInteger(years) || years < 1) return null; // slice(-0)=전체 배열이라 조용히 오판정된다
+  const tail = trimTrailingNulls(series).slice(-years);
+  if (tail.length < years || tail.some(v => v == null)) return null;
+  return tail.every(v => v > 0);
+}
+
+// TTM(최근 12개월) = 당기 누적 + 전년 연간 − 전년 동기 누적.
+// 연간 실적만 쓰면 최대 15개월 묵은 숫자로 밸류에이션을 하게 된다.
+//
+// 연도를 함께 받아 기간 정합성을 강제한다. 1~4월에는 "가장 최신 분기"와 "가장 최신 연간"이
+// 같은 연도가 될 수 있어서, 호출부가 소박하게 둘을 짝지으면 같은 해를 이중 계상한다.
+// 단위는 호출부 책임 — fetchDartMultiYear/fetchDartQuarterly 출력(억원)끼리만 섞을 것.
+// fetchDartFinancials.opProfit은 원 단위라 여기에 넣으면 1e8배 어긋난다.
+export function calcTTM({ cum, cumYear, prevFullYear, prevFullYearOf, prevCum }) {
+  if (cum == null || prevFullYear == null || prevCum == null) return null;
+  if (!Number.isInteger(cumYear) || !Number.isInteger(prevFullYearOf)) return null;
+  if (prevFullYearOf !== cumYear - 1) return null; // 기간 불일치 — 조용히 계산하면 안 된다
+  return cum + prevFullYear - prevCum;
+}
+
 export function calcPiotroski(dart, fund) {
   let score = 0;
   const details = [];
