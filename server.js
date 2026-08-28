@@ -441,12 +441,14 @@ app.get('/api/analysis', async (req, res) => {
     const avgVol = last20Vol.reduce((s, v) => s + v, 0) / (last20Vol.length || 1);
     const todayVol = volumes[volumes.length - 1] || 0;
     const volR = avgVol > 0 ? todayVol / avgVol : 1;
-    const high52w = Math.max(...closes.slice(-125));
-    const low52w  = Math.min(...closes.slice(-125));
+    const high52w = Math.max(...closes.slice(-252));
+    const low52w  = Math.min(...closes.slice(-252));
     const macd    = calcMACD(closes);
     const bb      = calcBollinger(closes);
     const atr     = calcATR(highs, lows, closes);
-    const mdd     = calcMDD(closes);
+    // 252봉 명시 — 소스별 배열 길이(KRX 약 287 / Naver 280 / Yahoo 약 246)가 달라
+    // 슬라이스 없이 넘기면 같은 종목도 폴백 경로에 따라 MDD가 달라진다. UI 표기는 "최근 1년".
+    const mdd     = calcMDD(closes.slice(-252));
     const levels  = findKeyLevels(closes, volumes);
     const opensArr = items.map(i => parseInt(i.mkp, 10));
     const scoring = calcScore(price, ma5.at(-1), ma20.at(-1), ma60.at(-1), rsiArr.at(-1), volR, changeRate);
@@ -484,7 +486,10 @@ app.get('/api/analysis', async (req, res) => {
       close: price, previousClose: price - change, change, changeRate,
       volume: todayVol, volRatio: volR,
       ma5: ma5.at(-1), ma20: ma20.at(-1), ma60: ma60.at(-1), rsi: rsiArr.at(-1),
-      high52w, low52w, deviation: ma20.at(-1) ? (price / ma20.at(-1) - 1) * 100 : 0,
+      high52w, low52w,
+      pctFrom52wHigh: high52w > 0 ? (price / high52w - 1) * 100 : null,
+      pctFrom52wLow:  low52w  > 0 ? (price / low52w  - 1) * 100 : null,
+      deviation: ma20.at(-1) ? (price / ma20.at(-1) - 1) * 100 : 0,
       macd, bb, atr, mdd, ...levels, combinedSignal: csig, ...fresh,
       ...scoring, ...livermore, ...lynch, dart, fundamentals: yahooFund,
       candlePatterns, ichimoku, stochastic, obv: obvResult, fibonacci, rsiDivergence: rsiDiv, williamsR: wR,
@@ -540,12 +545,12 @@ app.get('/api/analysis', async (req, res) => {
   const last20Vol = vv.slice(-21, -1);
   const avgVol = last20Vol.reduce((s, v) => s + v, 0) / (last20Vol.length || 1);
   const volR2 = avgVol > 0 ? todayVol / avgVol : 1;
-  const high52w2 = Math.max(...vc.slice(-125));
-  const low52w2  = Math.min(...vc.slice(-125));
+  const high52w2 = Math.max(...vc.slice(-252));
+  const low52w2  = Math.min(...vc.slice(-252));
   const macd2    = calcMACD(vc);
   const bb2      = calcBollinger(vc);
   const atr2     = calcATR(vh, vl, vc);
-  const mdd2     = calcMDD(vc);
+  const mdd2     = calcMDD(vc.slice(-252)); // 소스 무관 "최근 1년" 고정 (server.js 위 주석 참조)
   const levels2  = findKeyLevels(vc, vv);
   const scoring  = calcScore(last, ma5.at(-1), ma20.at(-1), ma60.at(-1), rsiArr.at(-1), volR2, changeRate);
   const livermore = calcLivermoreScore(last, ma5.at(-1), ma20.at(-1), ma60.at(-1), rsiArr.at(-1), volR2, changeRate, high52w2, macd2.lastCross, bb2);
@@ -560,7 +565,10 @@ app.get('/api/analysis', async (req, res) => {
     close: last, previousClose: prev, change: last - prev, changeRate,
     volume: todayVol, volRatio: volR2,
     ma5: ma5.at(-1), ma20: ma20.at(-1), ma60: ma60.at(-1), rsi: rsiArr.at(-1),
-    high52w: high52w2, low52w: low52w2, deviation: ma20.at(-1) ? (last / ma20.at(-1) - 1) * 100 : 0,
+    high52w: high52w2, low52w: low52w2,
+    pctFrom52wHigh: high52w2 > 0 ? (last / high52w2 - 1) * 100 : null,
+    pctFrom52wLow:  low52w2  > 0 ? (last / low52w2  - 1) * 100 : null,
+    deviation: ma20.at(-1) ? (last / ma20.at(-1) - 1) * 100 : 0,
     macd: macd2, bb: bb2, atr: atr2, mdd: mdd2, ...levels2, combinedSignal: csig2, ...fresh2,
     ...scoring, ...livermore, ...lynch, dart, fundamentals: yahooFund,
     candlePatterns: calcCandlePatterns(vo, vh, vl, vc),
@@ -1292,7 +1300,10 @@ app.get('/api/alerts', async (req, res) => {
 
 // ── /api/52w ───────────────────────────────────────────────────────
 app.get('/api/52w', async (req, res) => {
-  const direction = req.query.direction === 'low' ? 'low' : 'high';
+  // sort=drawdown은 "고점에서 크게 빠진" 종목을 찾는 용도라 near52wHigh/Low 어느 쪽에도
+  // 걸리지 않는 중간 구간이 타깃이다. 이때만 방향 필터를 해제한다.
+  const byDrawdown = req.query.sort === 'drawdown';
+  const direction = byDrawdown ? 'all' : (req.query.direction === 'low' ? 'low' : 'high');
   try {
     const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     const { data: rows, error } = await getSupabase()
@@ -1318,16 +1329,26 @@ app.get('/api/52w', async (req, res) => {
 
       if (direction === 'high' && !isHigh) continue;
       if (direction === 'low'  && !isLow)  continue;
+      // 낙폭 정렬은 pctFrom52wHigh가 필수. 구 스캔 행(해당 필드 없음)은 여기서 제외한다.
+      if (byDrawdown && typeof aj.pctFrom52wHigh !== 'number') continue;
 
       results.push({
         code: r.code, name: r.kt_stocks?.name || krxName(r.code) || aj.name || r.code,
         price: r.close_price, changeRate: r.change_rate,
         lynchScore: r.lynch_score, analysisDate: r.analysis_date,
-        high52w: aj.high52w || null, low52w: aj.low52w || null,
+        high52w: aj.high52w ?? null, low52w: aj.low52w ?? null,
+        pctFrom52wHigh: aj.pctFrom52wHigh ?? null,
+        pctFrom52wLow:  aj.pctFrom52wLow  ?? null,
+        w52Partial:     aj.w52Partial     ?? null,
       });
     }
 
-    results.sort((a, b) => (b.lynchScore || 0) - (a.lynchScore || 0));
+    // sort=drawdown — 고점 대비 낙폭이 큰 순. "실적은 좋은데 주가만 빠진" 종목 탐색용
+    if (byDrawdown) {
+      results.sort((a, b) => a.pctFrom52wHigh - b.pctFrom52wHigh);
+    } else {
+      results.sort((a, b) => (b.lynchScore || 0) - (a.lynchScore || 0));
+    }
     res.json({ items: results.slice(0, 50), total: results.length, direction });
   } catch (e) {
     res.status(500).json({ error: e.message, items: [] });

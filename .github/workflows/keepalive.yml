@@ -1,0 +1,19 @@
+name: Render Keepalive
+
+# Render free 플랜은 15분 무활동 시 슬립한다. 14분 간격 핑으로 슬립을 막아
+# 사용자 첫 방문 콜드스타트(약 40초)와 야간 스캔 배치 중단을 방지한다.
+# GitHub Actions 스케줄은 정시 실행이 보장되지 않고 지연될 수 있으나 keepalive 용도로는 무해하다.
+
+on:
+  schedule:
+    - cron: '*/14 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /healthz
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 https://kt-peter-lynch.onrender.com/healthz)
+          echo "Status: $STATUS"

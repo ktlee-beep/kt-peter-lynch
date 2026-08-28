@@ -450,11 +450,16 @@ export function calcStochastic(highs, lows, closes, kPer = 14, dPer = 3) {
 }
 
 export function calcOBV(closes, volumes) {
+  // OBV는 배열 시작점부터의 누적합이라 입력 길이가 바뀌면 기준선이 통째로 이동한다.
+  // trend 판정이 누적값의 비율 비교라서, 창을 고정하지 않으면 데이터 소스나 조회 기간을
+  // 바꾸는 것만으로 accumulating/distributing이 뒤집힌다. 120봉으로 고정한다.
+  const W = 120;
+  const c = closes.slice(-W), vol = volumes.slice(-W);
   const obv = [0];
-  for (let i = 1; i < closes.length; i++) {
-    const v = volumes[i] || 0;
-    if (closes[i] > closes[i - 1]) obv.push(obv[i - 1] + v);
-    else if (closes[i] < closes[i - 1]) obv.push(obv[i - 1] - v);
+  for (let i = 1; i < c.length; i++) {
+    const v = vol[i] || 0;
+    if (c[i] > c[i - 1]) obv.push(obv[i - 1] + v);
+    else if (c[i] < c[i - 1]) obv.push(obv[i - 1] - v);
     else obv.push(obv[i - 1]);
   }
   const m = obv.length;
@@ -796,8 +801,8 @@ export function koreanMarketFlags(closes, volumes, changeRate) {
     if (ratio >= 5) flags.push({ type: 'VOLUME_SURGE', label: `거래량 ${ratio.toFixed(0)}배`, severity: 'info', desc: '거래량 폭발 — 세력 개입 가능성' });
     else if (ratio >= 3) flags.push({ type: 'VOLUME_HIGH', label: `거래량 ${ratio.toFixed(1)}배`, severity: 'info', desc: '거래량 급증' });
   }
-  const high52w = Math.max(...closes.slice(-125));
-  const low52w  = Math.min(...closes.slice(-125));
+  const high52w = Math.max(...closes.slice(-252));
+  const low52w  = Math.min(...closes.slice(-252));
   if (cur >= high52w * 0.98) flags.push({ type: 'NEAR_52W_HIGH', label: '52주 신고가', severity: 'info', desc: '52주 최고가 근처 — 저항 가능' });
   if (cur <= low52w  * 1.02) flags.push({ type: 'NEAR_52W_LOW',  label: '52주 신저가', severity: 'danger', desc: '52주 최저가 근처 — 바닥 불확실' });
   return flags;

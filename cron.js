@@ -20,7 +20,8 @@ function getScanUniverse() {
 // corpResolver(code)→corp_code, dartKey: DART 재무로 진짜 Piotroski 산출
 async function analyzeStockLean(code, corpResolver = null, dartKey = '') {
   try {
-    const naverUrl = `https://fchart.stock.naver.com/sise.nhn?symbol=${code}&timeframe=day&count=120&requestType=0`;
+    // count=280: 52주(거래일 약 252일) + 휴장 버퍼. Phase 4 RS 12개월 산출도 동일 데이터를 재사용한다.
+    const naverUrl = `https://fchart.stock.naver.com/sise.nhn?symbol=${code}&timeframe=day&count=280&requestType=0`;
     const nr = await fetch(naverUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     if (!nr.ok) throw new Error('naver fail');
     const xml = await nr.text();
@@ -48,8 +49,17 @@ async function analyzeStockLean(code, corpResolver = null, dartKey = '') {
     const volRatio = volumes.length >= 21
       ? (volumes[volumes.length - 1]) / (volumes.slice(-21, -1).reduce((a, b) => a + b, 0) / 20)
       : null;
-    const high52w = Math.max(...closes.slice(-125));
-    const near52wHigh = cur > 0 && high52w > 0 ? (cur / high52w) >= 0.95 : false;
+    // 52주 고저 — 상장 1년 미만이면 w52Partial로 표시해 하위 점수 로직이 신뢰 여부를 판단하게 한다
+    const w52 = closes.slice(-252);
+    const w52Partial = w52.length < 240; // 240봉 ≈ 11.4개월. 그 미만은 52주 고저로 볼 수 없다
+    const high52w = Math.max(...w52);
+    const low52w  = Math.min(...w52);
+    const pctFrom52wHigh = high52w > 0 ? (cur / high52w - 1) * 100 : null; // 음수 = 고점 대비 하락률
+    const pctFrom52wLow  = low52w  > 0 ? (cur / low52w  - 1) * 100 : null;
+    // 신규 상장주는 짧은 기간의 고가가 곧 52주 고가가 되어 전 종목이 "신고가 근접"으로 잡힌다.
+    // 점수에 들어가는 판정이므로 데이터가 부족하면 아예 false로 둔다.
+    const near52wHigh = !w52Partial && cur > 0 && high52w > 0 ? (cur / high52w) >= 0.95 : false;
+    const near52wLow  = !w52Partial && cur > 0 && low52w  > 0 ? (cur / low52w)  <= 1.05 : false;
 
     let buyPts = 0, sellPts = 0;
     // RSI
@@ -112,7 +122,8 @@ async function analyzeStockLean(code, corpResolver = null, dartKey = '') {
     return {
       code, close: cur, changeRate, volRatio, rsi: rsiVal, source: 'naver',
       macd: macdVal, bb,
-      ma5, ma20, ma60, near52wHigh,
+      ma5, ma20, ma60,
+      near52wHigh, near52wLow, high52w, low52w, pctFrom52wHigh, pctFrom52wLow, w52Partial,
       combinedSignal: { signal, confidence, buyPts, sellPts },
       pScore,
       lScore,
@@ -138,7 +149,7 @@ async function analyzeUsStock(ticker, name, sector) {
   const bb   = calcBollinger(closes);
   const ma5  = calcMA(closes, 5).at(-1), ma20 = calcMA(closes, 20).at(-1), ma60 = calcMA(closes, 60).at(-1);
   const volRatio = volumes.length >= 21 ? volumes.at(-1) / (volumes.slice(-21, -1).reduce((a, b) => a + b, 0) / 20) : 1;
-  const high52 = Math.max(...closes.slice(-125));
+  const high52 = Math.max(...closes.slice(-252));
   const near52 = cur > 0 && high52 > 0 ? cur / high52 >= 0.95 : false;
   const { lScore } = calcLivermoreScore(cur, ma5, ma20, ma60, rsi ?? 50, volRatio ?? 1, changeRate, high52, macd?.lastCross ?? null, bb);
 

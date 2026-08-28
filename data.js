@@ -94,23 +94,20 @@ export async function fetchDartMultiYear(corpCode, dartKey) {
   async function fetchYear(year) {
     try {
       const base = `https://opendart.fss.or.kr/api`;
-      const params = `crtfc_key=${dartKey}&corp_code=${corpCode}&bsns_year=${year}&reprt_code=11011&fs_div=CFS`;
-      const [isRes, bsRes] = await Promise.all([
-        fetch(`${base}/fnlttSinglAcnt.json?${params}`),
-        fetch(`${base}/fnlttSinglAcnt.json?${params.replace('fs_div=CFS', 'fs_div=OFS')}`).catch(() => null),
-      ]);
-      const isData = isRes.ok ? await isRes.json() : null;
-      const IS = isData?.status === '000' ? (isData.list || []).filter(i => i.sj_div === 'IS') : [];
-      const BS = (() => {
-        return []; // BS from IS-only call may not have BS items; handle below
-      })();
+      const pull = async (fsDiv) => {
+        const url = `${base}/fnlttSinglAcnt.json?crtfc_key=${dartKey}&corp_code=${corpCode}`
+                  + `&bsns_year=${year}&reprt_code=11011&fs_div=${fsDiv}`;
+        const r = await fetch(url).catch(() => null);
+        if (!r?.ok) return null;
+        const j = await r.json().catch(() => null);
+        return (j?.status === '000' && j.list?.length) ? j.list : null;
+      };
+      // CFS(연결) 우선. 연결재무제표를 제출하지 않는 중소형사는 OFS(개별)로 폴백한다.
+      const rows = (await pull('CFS')) || (await pull('OFS'));
+      if (!rows) return null;
 
-      // Re-fetch BS (재무상태표) from CFS
-      const bsFull = await fetch(`${base}/fnlttSinglAcnt.json?crtfc_key=${dartKey}&corp_code=${corpCode}&bsns_year=${year}&reprt_code=11011&fs_div=CFS`);
-      const bsJson = bsFull.ok ? await bsFull.json() : null;
-      const bsList = bsJson?.status === '000' ? (bsJson.list || []) : [];
-      const BSrows = bsList.filter(i => i.sj_div === 'BS');
-      const ISrows = bsList.filter(i => i.sj_div === 'IS');
+      const BSrows = rows.filter(i => i.sj_div === 'BS');
+      const ISrows = rows.filter(i => i.sj_div === 'IS');
 
       const find = (rows, kws) => {
         for (const kw of kws) {
@@ -291,7 +288,8 @@ export async function fetchNaverInvestor(code) {
 
 export async function naverHistory(code) {
   try {
-    const url = `https://fchart.stock.naver.com/sise.nhn?symbol=${code}&timeframe=day&count=130&requestType=0`;
+    // count=280: 52주 고저·MDD·120일선 산출에 필요한 거래일 252일 + 휴장 버퍼
+    const url = `https://fchart.stock.naver.com/sise.nhn?symbol=${code}&timeframe=day&count=280&requestType=0`;
     const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.naver.com/' } });
     if (!r.ok) return null;
     const text = await r.text();
@@ -356,19 +354,29 @@ export async function krxHistory(code) {
   if (!serviceKey) return null;
   const now = new Date();
   const endDt = now.toISOString().slice(0, 10).replace(/-/g, '');
-  const sixAgo = new Date(now); sixAgo.setMonth(sixAgo.getMonth() - 6);
-  const beginDt = sixAgo.toISOString().slice(0, 10).replace(/-/g, '');
+  const from = new Date(now); from.setMonth(from.getMonth() - 14); // 52주 + 휴장 버퍼
+  const beginDt = from.toISOString().slice(0, 10).replace(/-/g, '');
   try {
     const url = `https://apis.data.go.kr/1160100/service/GetStockSecuritiesInfoService/getStockPriceInfo`
-      + `?serviceKey=${serviceKey}&likeSrtnCd=${code}&beginBasDt=${beginDt}&endBasDt=${endDt}&numOfRows=200&resultType=json`;
+      + `?serviceKey=${serviceKey}&likeSrtnCd=${code}&beginBasDt=${beginDt}&endBasDt=${endDt}&numOfRows=300&resultType=json`;
     const r = await fetch(url);
     if (!r.ok) return null;
     const data = await r.json();
-    const raw = data.response?.body?.items?.item;
+    const body = data.response?.body;
+    const raw = body?.items?.item;
     if (!raw) return null;
+    // likeSrtnCd는 부분일치라 복수 종목이 잡히면 numOfRows에서 잘린다. API 기본 정렬이
+    // 과거순이면 최신 봉이 통째로 유실돼 1년 전 종가가 현재가로 응답되는 무증상 오류가 된다.
+    // 잘림이 의심되면 폴백(Naver/Yahoo)으로 넘긴다.
+    if (Number(body?.totalCount) > 300) return null;
     const list = Array.isArray(raw) ? raw : [raw];
     const filtered = list.filter(i => i.srtnCd === code);
     const items = (filtered.length > 0 ? filtered : list).sort((a, b) => a.basDt.localeCompare(b.basDt));
+    // 최신 봉 유실 2차 방어 — 장기 연휴(최대 5영업일)를 넘는 공백이면 신뢰하지 않는다
+    const lastDt = items.at(-1)?.basDt;
+    if (!lastDt) return null;
+    const lastMs = Date.parse(`${lastDt.slice(0, 4)}-${lastDt.slice(4, 6)}-${lastDt.slice(6, 8)}`);
+    if (!Number.isFinite(lastMs) || Date.now() - lastMs > 14 * 24 * 60 * 60 * 1000) return null;
     return items;
   } catch { return null; }
 }
@@ -376,7 +384,8 @@ export async function krxHistory(code) {
 export async function yahooHistory(code) {
   for (const suffix of ['KS', 'KQ']) {
     try {
-      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${code}.${suffix}?interval=1d&range=6mo`;
+      // range=1y: 52주 고저·MDD 산출에 필요. 6mo이면 "최근 1년 최대낙폭" 표기가 실제와 어긋난다.
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${code}.${suffix}?interval=1d&range=1y`;
       const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
       if (!r.ok) continue;
       const data = await r.json();
@@ -568,7 +577,9 @@ export const US_UNIVERSE = [
 ];
 
 // 미국 개별종목 일봉 (Yahoo) — 미국 스캔용
-export async function fetchUsStockDaily(ticker, range = '8mo') {
+// range=1y: 52주 고가 산출에 필요. 8mo이면 "52주 신고가" 판정이 실제로는 8개월 고가가 되어
+// 한국 종목(252봉)과 livermoreScore를 교차 비교할 수 없다.
+export async function fetchUsStockDaily(ticker, range = '1y') {
   try {
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=${range}`;
     const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
