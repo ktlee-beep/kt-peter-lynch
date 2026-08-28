@@ -314,7 +314,26 @@ async function backfillOne({ code, need }, corpResolver, dartKey) {
 
 export async function runFundamentalsBackfill({ limit = 0, maxDartCalls = 15000, full = false } = {}) {
   const dartKey = process.env.DART_API_KEY;
-  if (!dartKey) { console.log('[Backfill] DART_API_KEY 없음 — 중단'); return { ok: false, error: 'DART_API_KEY 미설정' }; }
+  // 조기반환에도 dartCallsBudgeted를 반드시 싣는다. server.js는 이 값이 없으면 "얼마나 썼는지
+  // 모른다"고 보고 maxDartCalls 전액(기본 15,000)을 일일 예산에서 차감한다 — 실제로는 한 번도
+  // 호출하지 않았는데 두 번 실패하면 하루치 19,000이 소진돼 종일 429로 잠긴다.
+  if (!dartKey) { console.log('[Backfill] DART_API_KEY 없음 — 중단'); return { ok: false, error: 'DART_API_KEY 미설정', dartCallsBudgeted: 0 }; }
+
+  // 신선도 사전조회를 가장 먼저 한다. 실패 시 빈 집합으로 폴백하면 "전부 미수집"으로 보여
+  // 이미 채운 종목까지 다시 긁어 예산을 통째로 태운다 — 조회가 실패하면 수집 자체를 하지 않는다.
+  // 순서도 중요하다. 아래 corp_code 부트스트랩은 DART에서 zip을 받고 그 결과를 DB에 쓰는데,
+  // DB가 죽어 있으면 어차피 이 함수는 아무것도 못 한다. 먼저 확인해서 헛일을 하지 않는다.
+  let freshCo, freshMy, freshQ;
+  try {
+    [freshCo, freshMy, freshQ] = await Promise.all([
+      listFreshKvCodes('__company__',   180),
+      listFreshKvCodes('__multiyear__', 100),
+      listFreshKvCodes('__quarterly__',  45),
+    ]);
+  } catch (e) {
+    console.error('[Backfill] 캐시 신선도 조회 실패 — 중단:', e.message);
+    return { ok: false, error: `캐시 신선도 조회 실패: ${e.message}`, dartCallsBudgeted: 0 };
+  }
 
   let corpMap = await loadCorpCodeMap().catch(() => ({}));
   if (Object.keys(corpMap).length === 0) {
@@ -333,20 +352,6 @@ export async function runFundamentalsBackfill({ limit = 0, maxDartCalls = 15000,
   } else {
     const active = await getActiveStocks().catch(() => []);
     codes = (active.length ? active : getScanUniverse()).map(s => s.code);
-  }
-
-  // 신선도 사전조회. 실패 시 빈 집합으로 폴백하면 "전부 미수집"으로 보여 이미 채운 종목까지
-  // 다시 긁어 예산을 통째로 태운다 — 조회가 실패하면 수집 자체를 하지 않는 편이 낫다.
-  let freshCo, freshMy, freshQ;
-  try {
-    [freshCo, freshMy, freshQ] = await Promise.all([
-      listFreshKvCodes('__company__',   180),
-      listFreshKvCodes('__multiyear__', 100),
-      listFreshKvCodes('__quarterly__',  45),
-    ]);
-  } catch (e) {
-    console.error('[Backfill] 캐시 신선도 조회 실패 — 중단:', e.message);
-    return { ok: false, error: `캐시 신선도 조회 실패: ${e.message}` };
   }
 
   let skipped = 0, noCorp = 0;

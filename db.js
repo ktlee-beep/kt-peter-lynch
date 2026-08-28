@@ -588,10 +588,19 @@ export async function listFreshKvCodes(prefix, maxDays) {
   const sb = getSupabase();
   const cutoff = new Date(Date.now() - maxDays * 86400000).toISOString();
   const out = new Set();
-  // PostgREST db-max-rows 기본값이 1000이다. PAGE를 정확히 1000으로 두면 그 설정이
-  // 낮아질 때 첫 페이지에서 data.length < PAGE가 참이 되어 무증상으로 잘린다 — 여유를 둔다.
-  const PAGE = 500;
-  for (let from = 0; ; from += PAGE) {
+  // 서버가 요청한 PAGE보다 적게 줄 수 있다 — PostgREST의 db-max-rows가 상한이고,
+  // Supabase 기본값 1000은 프로젝트 설정으로 더 낮출 수 있다. 그래서 "덜 왔으면 마지막
+  // 페이지"라는 판정(data.length < PAGE → break)을 쓰면 안 된다. 상한이 PAGE보다 낮은
+  // 순간 첫 페이지에서 참이 되어 그 지점부터 통째로 잘리고, 잘린 종목은 "미수집"으로
+  // 오판돼 매 실행 헛호출을 반복한다. 실측: 상한 300 / PAGE 500이면 2,500건 중 300건만
+  // 수집되고 경고 하나 없이 끝난다.
+  // 받은 만큼만 전진하고 빈 페이지에서만 멈추면 서버 상한이 얼마든 결과가 같다.
+  // 반복 상한. 정상 상황(상한 1000, 접두사당 4천 행 미만)에서는 10회 미만으로 끝난다.
+  // 상한이 비정상적으로 낮으면 요청이 직렬로 수백 회 나가고, 그동안 백필 running 플래그가
+  // 모든 트리거를 막는다. 조용히 느려지는 대신 소리 내며 실패하게 둔다.
+  const PAGE = 500, MAX_PAGES = 500;
+  for (let from = 0, page = 0; ; page++) {
+    if (page >= MAX_PAGES) throw new Error(`listFreshKvCodes(${prefix}) 페이지 상한 ${MAX_PAGES} 초과 — 서버 반환 상한 확인 필요`);
     const { data, error } = await sb.from('kt_fundamentals_cache')
       .select('code').like('code', `${prefix}%`).gte('updated_at', cutoff)
       // ORDER BY 없는 OFFSET은 행 순서를 보장하지 않는다. 이 테이블은 upsert(UPDATE)가
@@ -607,7 +616,7 @@ export async function listFreshKvCodes(prefix, maxDays) {
       if (!r.code.startsWith(prefix)) continue;
       out.add(r.code.slice(prefix.length));
     }
-    if (data.length < PAGE) break;
+    from += data.length;
   }
   return out;
 }
