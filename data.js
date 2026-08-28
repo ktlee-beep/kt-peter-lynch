@@ -177,8 +177,17 @@ export async function fetchDartMultiYear(corpCode, dartKey) {
   }
 
   const results = await Promise.all(years.map(fetchYear));
-  // Return in chronological order, nulls where no data
+  // 연도 오름차순. 미확보 연도는 null 원소가 아니라 "전 필드 null인 자리표시 객체"로 채운다
+  // — 호출부가 인덱스↔연도 대응을 유지할 수 있게 하기 위함이다.
+  // 그래서 "자료가 있는가"를 `some(v => v != null)`로 판정하면 안 된다. 객체는 언제나 non-null이라
+  // 항상 true가 되고, DART 장애로 5개년이 전부 비어도 "수집 성공"으로 보인다. hasYearData를 쓸 것.
   return years.map((yr, i) => results[i] || { year: yr, revenue: null, operatingProfit: null, netIncome: null, equity: null, debt: null, roe: null, debtRatio: null, currentRatio: null, opMargin: null }).reverse();
+}
+
+// fetchDartMultiYear 한 원소에 실제 재무 수치가 담겼는지. 자리표시 객체와 실데이터를 가르는 유일한 기준.
+// 캐시 적재 여부와 "판정 불가" 판정이 모두 이 함수에 걸려 있으므로 사본을 만들지 말 것.
+export function hasYearData(y) {
+  return !!y && (y.revenue != null || y.operatingProfit != null || y.netIncome != null || y.equity != null);
 }
 
 // DART 기업개황 — 표준산업분류·시장구분·결산월

@@ -515,16 +515,101 @@ export async function loadCorpCodeMap() {
   try { return JSON.parse(row.raw_json) || {}; } catch { return {}; }
 }
 
-// ── DART 재무 캐시 (분기 데이터 → 기본 90일 TTL) ──────────────────
-export async function getDartCache(code, maxDays = 90) {
-  const row = await kvGet(`__dart__${code}`);
+// TTL 인지 KV 조회. 미스는 undefined, "조회했지만 데이터 없음"은 null로 구분한다 —
+// 둘을 합치면 DART에 자료가 없는 종목을 매 실행마다 다시 때리게 된다.
+async function kvGetFresh(key, maxDays) {
+  const row = await kvGet(key);
   if (!row) return undefined;
   if (Date.now() - new Date(row.updated_at).getTime() > maxDays * 86400000) return undefined;
   try { return JSON.parse(row.raw_json); } catch { return undefined; }
 }
 
+// ── DART 재무 캐시 (분기 데이터 → 기본 90일 TTL) ──────────────────
+export async function getDartCache(code, maxDays = 90) {
+  return kvGetFresh(`__dart__${code}`, maxDays);
+}
+
 export async function setDartCache(code, dart) {
   await kvSet(`__dart__${code}`, dart ?? null);
+}
+
+// ── 저평가 선점용 DART 확장 캐시 ──────────────────────────────────
+// DART 일일 쿼터는 20,000회다. 상장사 3,930개에 종목당 최대 12회(개황 1 + 연간 5 +
+// 분기 6)면 47,000회라 캐시 없이는 전종목 스캔이 한 번도 완주하지 못한다.
+//
+// TTL은 갱신 주기에 맞춘다. 업종코드·결산월은 사실상 안 바뀌므로 길게, 분기 실적은
+// 새 보고서가 나온 뒤 한 텀 안에 반영돼야 하므로 분기(약 90일)보다 짧게 잡는다.
+// 연간은 사업보고서가 3월에 한 번 갱신되지만, 365일로 두면 2월에 캐시된 종목이
+// 이듬해 2월까지 직전 사업연도를 놓친다. 그래서 100일로 줄여 3월 이후 확실히 재수집한다.
+//
+// 이 3종 setter는 null을 기록하지 않고 no-op으로 빠진다(기존 setDartCache와 다른 점).
+// null을 적재하면 TTL 동안 재시도가 막히는데, DART 일시 장애와 "정말 자료가 없는 종목"은
+// 응답만으로 구별되지 않아 장애를 최대 180일 굳혀버린다. 호출부 가드에만 의존하지 않고
+// 함수 자체에 정책을 박아 둔다.
+export async function getCompanyInfoCache(code, maxDays = 180) {
+  return kvGetFresh(`__company__${code}`, maxDays);
+}
+export async function setCompanyInfoCache(code, info) {
+  if (info == null) return;
+  await kvSet(`__company__${code}`, info);
+}
+
+export async function getMultiYearCache(code, maxDays = 100) {
+  return kvGetFresh(`__multiyear__${code}`, maxDays);
+}
+export async function setMultiYearCache(code, rows) {
+  if (rows == null) return;
+  await kvSet(`__multiyear__${code}`, rows);
+}
+
+export async function getQuarterlyCache(code, maxDays = 45) {
+  return kvGetFresh(`__quarterly__${code}`, maxDays);
+}
+export async function setQuarterlyCache(code, q) {
+  if (q == null) return;
+  await kvSet(`__quarterly__${code}`, q);
+}
+
+// 백필 진행률 표시용 — 접두사별 적재 건수
+export async function countKvPrefix(prefix) {
+  const sb = getSupabase();
+  const { count, error } = await sb.from('kt_fundamentals_cache')
+    .select('code', { count: 'exact', head: true }).like('code', `${prefix}%`);
+  if (error) throw new Error(error.message);
+  return count ?? 0;
+}
+
+// 접두사에 속한 키 중 TTL 이내인 것들의 종목코드 집합.
+// 백필에서 종목마다 캐시를 한 건씩 조회하면 3,930종목 × 3종 = 약 1.2만 회의 왕복이 생기고,
+// 그 대부분이 "이미 신선하니 건너뜀"으로 끝난다. 한 번에 받아서 메모리에서 거른다.
+// PostgREST 기본 반환 상한이 1000행이라 페이지네이션이 필요하다 — 없으면 1000번째 종목부터
+// 전부 미스로 보여 매 실행마다 같은 구간을 다시 수집한다.
+export async function listFreshKvCodes(prefix, maxDays) {
+  const sb = getSupabase();
+  const cutoff = new Date(Date.now() - maxDays * 86400000).toISOString();
+  const out = new Set();
+  // PostgREST db-max-rows 기본값이 1000이다. PAGE를 정확히 1000으로 두면 그 설정이
+  // 낮아질 때 첫 페이지에서 data.length < PAGE가 참이 되어 무증상으로 잘린다 — 여유를 둔다.
+  const PAGE = 500;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await sb.from('kt_fundamentals_cache')
+      .select('code').like('code', `${prefix}%`).gte('updated_at', cutoff)
+      // ORDER BY 없는 OFFSET은 행 순서를 보장하지 않는다. 이 테이블은 upsert(UPDATE)가
+      // 상시 일어나고 Postgres의 UPDATE는 힙 튜플을 뒤로 옮기므로, 페이지 사이에 쓰기가 끼면
+      // 행이 건너뛰어진다. 건너뛴 종목은 "미수집"으로 오판돼 매 실행 헛호출을 반복한다.
+      .order('code', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(error.message);
+    if (!data?.length) break;
+    for (const r of data) {
+      // LIKE의 '_'는 단일문자 와일드카드라 '__company__%'가 다른 키에도 매칭될 수 있다.
+      // 현재 키 네이밍에선 충돌이 없지만, 매칭되면 slice가 엉뚱한 코드를 Set에 넣는다.
+      if (!r.code.startsWith(prefix)) continue;
+      out.add(r.code.slice(prefix.length));
+    }
+    if (data.length < PAGE) break;
+  }
+  return out;
 }
 
 // DART 재무 캐시 전체 삭제 (스코어링 로직 변경 시 강제 재수집용)

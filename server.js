@@ -30,9 +30,9 @@ import {
   krxHistory, yahooHistory, isValidYahooResult,
   fetchDartDisclosures, fetchYahooNews,
   KRX_INDICES, YAHOO_SYMBOLS, fetchIndex, fetchYahooSymbol, fetchIndexOHLCV, fetchKospiFutures,
-  KS_UNIVERSE, KQ_UNIVERSE,
+  KS_UNIVERSE, KQ_UNIVERSE, hasYearData,
 } from './data.js';
-import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMacroHistory, saveMacroSnapshot, validateAppUser, getAppUsers, createAppUser, deleteAppUser, updateAppUserPassword, getSupabase, getWatchlist, addToWatchlist, removeFromWatchlist, getTrades, getHoldings, addTrade, deleteTrade, getThesis, upsertThesis, listTheses, getLatestMorningBrief, getUsScan, clearDartCache, setAppConfig, getAppConfig, appUserExists, createAppUserWithHash, upsertEmailVerification, getEmailVerification, verifyEmailCode, incrementVerificationAttempts, deleteEmailVerification } from './db.js';
+import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMacroHistory, saveMacroSnapshot, validateAppUser, getAppUsers, createAppUser, deleteAppUser, updateAppUserPassword, getSupabase, getWatchlist, addToWatchlist, removeFromWatchlist, getTrades, getHoldings, addTrade, deleteTrade, getThesis, upsertThesis, listTheses, getLatestMorningBrief, getUsScan, clearDartCache, setAppConfig, getAppConfig, appUserExists, createAppUserWithHash, upsertEmailVerification, getEmailVerification, verifyEmailCode, incrementVerificationAttempts, deleteEmailVerification, loadCorpCodeMap, getMultiYearCache, setMultiYearCache, getQuarterlyCache, getCompanyInfoCache } from './db.js';
 import { sendVerificationCode, isMailConfigured } from './mailer.js';
 
 const app = express();
@@ -388,6 +388,78 @@ app.post('/api/scan/us/trigger', async (req, res) => {
   const { runUsScan } = await import('./cron.js');
   runUsScan().catch(console.error);
   res.json({ ok: true, message: '미국 스캔 시작됨 (비동기)' });
+});
+
+// ── 펀더멘털 백필 트리거 (마스터/SCAN_SECRET) ─────────────────────
+// 전 종목 1회전은 DART 쿼터 약 3일치라 HTTP 응답 안에서 끝나지 않는다.
+// 비동기로 띄우고 진행 상황은 /api/backfill/fundamentals/status로 조회한다.
+// 상태는 프로세스 메모리에만 둔다 — Render 재시작 시 사라지지만 진짜 진행률은
+// 캐시 적재 건수(status의 last.cached)에 남으므로 재개에는 지장이 없다.
+let backfillState = { running: false, startedAt: null, finishedAt: null, last: null };
+
+// 일일 DART 예산 누적. running 플래그는 "동시" 실행만 막을 뿐 순차 반복은 못 막는다 —
+// 정기 실행이 15,000회를 쓰고 끝난 뒤 운영자가 workflow_dispatch로 두 번 더 돌리면
+// 45,000회가 되어 일일 쿼터 20,000회를 넘기고, 그날 남은 모든 DART 작업(일일 스캔의
+// Piotroski 재무, 공시, 재무제표 조회)이 통째로 실패한다.
+// 프로세스 재시작 시 초기화되는 한계는 있으나, 없으면 상한이 아예 없다.
+let dartDailyBudget = { day: '', used: 0 };
+const DART_DAILY_CAP = 19000; // 20,000 중 1,000은 일일 스캔·공시 조회 몫으로 남긴다
+
+app.post('/api/backfill/fundamentals/trigger', async (req, res) => {
+  if (!isScanSecretOrMaster(req)) return res.status(403).json({ error: 'Forbidden' });
+
+  // 중복 실행 방지. 일일 스캔과 달리 백필은 유한한 DART 쿼터를 태우므로,
+  // 두 번 겹치면 같은 종목을 두 배로 긁어 그날 남은 호출을 전부 날린다.
+  if (backfillState.running) {
+    return res.status(409).json({ error: '백필이 이미 실행 중', startedAt: backfillState.startedAt });
+  }
+
+  // 모듈 로드를 running 세팅보다 먼저 한다. 순서를 뒤집으면 import가 실패했을 때
+  // running=true인 채로 핸들러가 reject되어 프로세스 재시작 전까지 영구히 409만 나온다.
+  let runFundamentalsBackfill;
+  try {
+    ({ runFundamentalsBackfill } = await import('./cron.js'));
+  } catch (e) {
+    return res.status(500).json({ error: `백필 모듈 로드 실패: ${e.message}` });
+  }
+
+  // 숫자 파라미터는 서버에서 상한을 강제한다. maxDartCalls를 크게 넣으면 쿼터를 통째로
+  // 태울 수 있어 클라이언트 값을 그대로 신뢰하지 않는다.
+  const num = (v, def, min, max) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.floor(n))) : def;
+  };
+  const opts = {
+    limit:        num(req.body?.limit, 0, 0, 5000),
+    maxDartCalls: num(req.body?.maxDartCalls, 15000, 100, DART_DAILY_CAP),
+    full:         req.body?.full === true || req.body?.full === 'true',
+  };
+
+  const today = new Date().toISOString().slice(0, 10);
+  if (dartDailyBudget.day !== today) dartDailyBudget = { day: today, used: 0 };
+  const room = DART_DAILY_CAP - dartDailyBudget.used;
+  if (room < 100) {
+    return res.status(429).json({ error: '오늘 DART 예산 소진', used: dartDailyBudget.used, cap: DART_DAILY_CAP });
+  }
+  opts.maxDartCalls = Math.min(opts.maxDartCalls, room);
+
+  backfillState = { running: true, startedAt: new Date().toISOString(), finishedAt: null, last: null };
+  const settle = (last) => {
+    // 실제 선차감된 호출 수를 우선 쓰되, 결과를 못 받았으면 배정한 예산을 통째로 차감한다
+    // (적게 잡으면 남은 예산을 과대평가해 쿼터를 넘긴다 — 남는 쪽으로 틀려야 한다).
+    dartDailyBudget.used += Number.isFinite(last?.dartCallsBudgeted) ? last.dartCallsBudgeted : opts.maxDartCalls;
+    backfillState = { ...backfillState, running: false, finishedAt: new Date().toISOString(), last };
+  };
+  runFundamentalsBackfill(opts)
+    .then(settle)
+    .catch(e => settle({ ok: false, error: e.message }));
+
+  res.json({ ok: true, message: '펀더멘털 백필 시작됨 (비동기)', opts, dartBudgetRemaining: room });
+});
+
+app.get('/api/backfill/fundamentals/status', async (req, res) => {
+  if (!isScanSecretOrMaster(req)) return res.status(403).json({ error: 'Forbidden' });
+  res.json({ ...backfillState, dartDailyBudget, dartDailyCap: DART_DAILY_CAP });
 });
 
 // 이하 모든 /api/* 는 인증 필요
@@ -1461,18 +1533,56 @@ app.get('/api/sectors', async (req, res) => {
   }
 });
 
+// ── corp_code 매핑 인메모리 메모 ────────────────────────────────────
+// loadCorpCodeMap은 전 상장사 매핑이 담긴 단일 블롭 행을 읽어 JSON.parse 한다(약 3,930개 항목).
+// 요청마다 부르면 종목 상세를 열 때마다 100KB 파싱이 반복되므로 프로세스 안에서 1시간 캐시한다.
+let corpMapMemo = { map: null, ts: 0 };
+const CORP_MAP_TTL = 60 * 60 * 1000;
+async function resolveCorpCode(code) {
+  if (CORP_MAP[code]) return CORP_MAP[code];
+  if (!corpMapMemo.map || Date.now() - corpMapMemo.ts > CORP_MAP_TTL) {
+    const map = await loadCorpCodeMap().catch(() => null);
+    // loadCorpCodeMap은 실패 시 예외가 아니라 {}를 돌려준다. {}는 truthy라 그대로 메모하면
+    // Supabase가 순간 장애난 시점에 걸린 요청 하나가 1시간짜리 장애를 만든다 —
+    // 그동안 하드코딩 CORP_MAP에 없는 모든 종목이 400으로 떨어지고 자가 회복도 없다.
+    if (map && Object.keys(map).length > 0) corpMapMemo = { map, ts: Date.now() };
+  }
+  return corpMapMemo.map?.[code] || null;
+}
+
 // ── /api/financials ────────────────────────────────────────────────
+// 캐시 우선. 이 엔드포인트는 호출 1회당 DART 5회(최근 5개 사업연도)를 쓰는데,
+// 종목 상세를 열 때마다 그대로 나가면 사용자 몇 명이 훑는 것만으로 일일 쿼터가 녹는다.
+// 백필이 채워둔 __multiyear__를 읽고, 없을 때만 실시간 조회 후 같은 캐시에 적재한다.
 app.get('/api/financials', async (req, res) => {
   const code = req.query.code;
   if (!code) return res.status(400).json({ error: 'code 파라미터 필요' });
-  const dartKey = process.env.DART_API_KEY || '';
-  const corpCode = CORP_MAP[code];
-  if (!dartKey || !corpCode) {
-    return res.status(400).json({ error: 'DART API 키 또는 종목 코드 매핑 없음', code });
-  }
   try {
+    const cached = await getMultiYearCache(code).catch(() => undefined);
+    if (cached !== undefined && cached !== null) {
+      // 분기·개황도 함께 실어 보낸다 — 프런트가 TTM·업종을 별도 요청 없이 쓴다.
+      const [quarterly, company] = await Promise.all([
+        getQuarterlyCache(code).catch(() => null),
+        getCompanyInfoCache(code).catch(() => null),
+      ]);
+      return res.json({ code, rows: cached, quarterly: quarterly ?? null, company: company ?? null, cached: true });
+    }
+
+    const dartKey = process.env.DART_API_KEY || '';
+    // 하드코딩 CORP_MAP에만 의존하면 매핑에 없는 대다수 종목이 400으로 떨어진다.
+    // kt_corp_codes에 전 상장사가 적재돼 있으므로 그쪽까지 조회한다.
+    const corpCode = await resolveCorpCode(code);
+    if (!dartKey || !corpCode) {
+      return res.status(400).json({ error: 'DART API 키 또는 종목 코드 매핑 없음', code });
+    }
     const rows = await fetchDartMultiYear(corpCode, dartKey);
-    res.json({ code, rows });
+    // 원소 존재가 아니라 필드 내용으로 판정한다(data.js hasYearData 주석 참조).
+    // some(v => v != null)로 쓰면 DART 장애 중 사용자가 종목 상세를 한 번 여는 것만으로
+    // 빈 껍데기가 100일 TTL로 적재되고, 그 종목이 백필에서 100일간 제외된다.
+    if (Array.isArray(rows) && rows.some(hasYearData)) {
+      await setMultiYearCache(code, rows).catch(() => {});
+    }
+    res.json({ code, rows, quarterly: null, company: null, cached: false });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

@@ -35,6 +35,12 @@ crew.py
 KIS백엔드_실행.bat
 start_backend.bat
 
+# 로컬 검증 산출물 — login_resp.json에는 로그인 응답(토큰)이 담긴다. 실수로 커밋되면
+# 되돌려도 히스토리에 남으므로 파일명 단위로 막아 둔다.
+login_resp.json
+_tmp_*.mjs
+kt-*.png
+
 # 제외
 gh-pages-temp/
 .claude/

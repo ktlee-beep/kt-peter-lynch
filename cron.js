@@ -2,9 +2,9 @@
 // 매일 17:00 KST (UTC 08:00) — 전체 종목 스캔
 // 6시간마다 — 매크로 갱신
 import cron from 'node-cron';
-import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermoreScore, calcPiotroski } from './analysis.js';
-import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief, loadCorpCodeMap, upsertCorpCodes, getDartCache, setDartCache, saveUsScan } from './db.js';
-import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures, CORP_MAP, fetchCorpCodeMap, fetchDartFinancials, US_UNIVERSE, fetchUsStockDaily } from './data.js';
+import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermoreScore, calcPiotroski, calcGrowthStreak, hasNoLoss, calcTTM } from './analysis.js';
+import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief, loadCorpCodeMap, upsertCorpCodes, getDartCache, setDartCache, saveUsScan, getCompanyInfoCache, setCompanyInfoCache, getMultiYearCache, setMultiYearCache, getQuarterlyCache, setQuarterlyCache, countKvPrefix, listFreshKvCodes } from './db.js';
+import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures, CORP_MAP, fetchCorpCodeMap, fetchDartFinancials, US_UNIVERSE, fetchUsStockDaily, fetchDartCompanyInfo, fetchDartMultiYear, fetchDartQuarterly, hasYearData } from './data.js';
 
 const FUNDAMENTALS_TTL_MS = 24 * 60 * 60 * 1000; // PER/PBR/ROE는 주가 연동 — 1거래일 이상 지나면 재수집
 
@@ -14,6 +14,56 @@ function getScanUniverse() {
     ...KS_UNIVERSE.map(code => ({ code, yahoo_suffix: 'KS' })),
     ...KQ_UNIVERSE.map(code => ({ code, yahoo_suffix: 'KQ' })),
   ];
+}
+
+// ── 박세익 축 프로필 (연속성장·무적자·TTM) ──────────────────────
+// 캐시에 적재된 DART 연간·분기 데이터를 스크리너가 바로 필터할 수 있는 형태로 접는다.
+// 데이터가 없으면 0/false가 아니라 null을 반환한다 — "성장하지 않았다"와
+// "아직 수집하지 않았다"를 같은 값으로 만들면 백필 중인 종목이 전부 탈락으로 보인다.
+export function buildGrowthProfile(multiYear, quarterly) {
+  if (!Array.isArray(multiYear) || multiYear.length === 0) return null;
+  // 길이만 보면 안 된다. fetchDartMultiYear는 미확보 연도를 자리표시 객체로 채우므로
+  // 5개년이 전부 비어도 length는 5다. 그대로 통과시키면 streak 0 / parkSeikPass false가 나와
+  // "성장하지 않은 종목"과 구별되지 않는다 — 위 주석의 원칙이 정확히 깨지는 지점.
+  if (!multiYear.some(hasYearData)) return null;
+  const revSeries = multiYear.map(y => y?.revenue ?? null);
+  const opSeries  = multiYear.map(y => y?.operatingProfit ?? null);
+  const netSeries = multiYear.map(y => y?.netIncome ?? null);
+
+  const rev = calcGrowthStreak(revSeries);
+  const op  = calcGrowthStreak(opSeries);
+  const noLossOp3y = hasNoLoss(opSeries, 3);
+
+  // TTM은 분기 누적과 "그 전년" 연간을 짝지어야 한다. 연도 정합성은 calcTTM이 강제하므로
+  // 여기서는 prevFullYearRef로 연간 행을 찾아 넘기기만 한다(못 찾으면 null → calcTTM이 null).
+  const ttmOf = (cumKey, prevCumKey, annualKey) => {
+    if (!quarterly) return null;
+    const prevFull = multiYear.find(y => y?.year === quarterly.prevFullYearRef)?.[annualKey] ?? null;
+    return calcTTM({
+      cum: quarterly[cumKey], cumYear: quarterly.year,
+      prevFullYear: prevFull, prevFullYearOf: quarterly.prevFullYearRef,
+      prevCum: quarterly[prevCumKey],
+    });
+  };
+
+  return {
+    years: multiYear.map(y => y?.year ?? null),
+    revenueStreak: rev.streak, revenueComparable: rev.comparable,
+    opStreak:      op.streak,  opComparable:      op.comparable,
+    noLossOp3y,
+    noLossNet3y: hasNoLoss(netSeries, 3),
+    // 박세익 1축: 3년 연속 매출·영업이익 성장 + 3년 무적자.
+    // hasNoLoss는 판정 불가 시 null(falsy)을 돌려주므로 반드시 === true로 비교한다.
+    parkSeikPass: rev.streak >= 3 && op.streak >= 3 && noLossOp3y === true,
+    ttmRevenue:         ttmOf('cumRevenue',         'prevCumRevenue',         'revenue'),
+    ttmOperatingProfit: ttmOf('cumOperatingProfit', 'prevCumOperatingProfit', 'operatingProfit'),
+    latestQuarter: quarterly ? {
+      label:      quarterly.label,
+      revenueYoY: quarterly.revenueYoY,
+      opYoY:      quarterly.opYoY,
+      netYoY:     quarterly.netYoY,
+    } : null,
+  };
 }
 
 // ── 경량 종목 분석 (Naver 일봉 기반) ────────────────────────────
@@ -111,6 +161,17 @@ async function analyzeStockLean(code, corpResolver = null, dartKey = '') {
     }
     const fScore = calcPiotroski(dart, fundamentals);
 
+    // 저평가 선점(박세익 축) 입력 — 캐시 읽기 전용. 여기서 DART를 직접 호출하지 않는 것이 핵심이다.
+    // 일일 스캔은 매일 전 종목을 도는데 종목당 최대 12회(개황 1 + 연간 5 + 분기 6)를 호출하면
+    // 그것만으로 DART 일일 쿼터 20,000회를 넘긴다. 수집은 월 1회 runFundamentalsBackfill이
+    // 전담하고 스캔은 적재된 값을 읽기만 한다. 미적재 종목은 growth=null로 지나간다.
+    const [company, multiYear, quarterly] = await Promise.all([
+      getCompanyInfoCache(code).catch(() => undefined),
+      getMultiYearCache(code).catch(() => undefined),
+      getQuarterlyCache(code).catch(() => undefined),
+    ]);
+    const growth = buildGrowthProfile(multiYear, quarterly);
+
     const { pScore } = calcLynchScore(
       cur, ma5, ma20, ma60, rsiVal ?? 50, volRatio ?? 1, changeRate, dart, fundamentals,
     );
@@ -130,6 +191,11 @@ async function analyzeStockLean(code, corpResolver = null, dartKey = '') {
       fScore,       // 진짜 Piotroski (DART 통합) — 기존 null에서 실제 산출로 교체
       dart,         // 스크리너/리포트에서 매출성장·영업이익률 활용
       fundamentals, // 스크리너 PER/PBR/ROE 필터용
+      // 아래 3종은 analysis_json에 실려 저장된다 — 별도 컬럼 추가(DDL) 없이 스크리너가 소비한다.
+      growth,       // 박세익 축: 연속성장 스트릭·무적자·TTM
+      quarterly,    // 최근 분기 원본 (누적·YoY)
+      induty: company?.indutyCode ?? null,  // 표준산업분류 — 업종 상대비교/섹터 필터용
+      market: company?.market ?? null,
     };
   } catch {
     return null;
@@ -199,6 +265,152 @@ export async function refreshCorpCodes() {
   const n = await upsertCorpCodes(rows);
   console.log(`[Cron] DART 기업코드 ${n}/${rows.length}개 저장`);
   return { ok: true, count: n, total: rows.length };
+}
+
+// ── 펀더멘털 백필 (기업개황 · 연간 5개년 · 분기) ──────────────────
+// 한 종목을 채우는 데 최대 12회(개황 1 + 연간 5 + 분기 6)가 든다. 상장사 3,930개면
+// 약 47,000회로 DART 일일 쿼터 20,000회를 훨씬 넘는다. 그래서 한 번에 끝내려 하지 않고,
+// 호출 예산(maxDartCalls)에 걸리면 중단하고 다음 실행이 신선한 캐시를 건너뛰며 이어받는
+// 재개형 구조로 만든다 — 기본 예산이면 3회 실행에 전 종목 1회전이 끝난다.
+//
+// 실제 호출 수를 계측하는 대신 함수별 상한으로 예산을 잡는다. 과소 추정하면 쿼터를 넘겨
+// 그날 남은 모든 DART 작업이 막히므로, 남는 쪽으로 틀리는 편이 옳다.
+const BACKFILL_COST = { company: 1, multi: 5, quarter: 6 };
+
+async function backfillOne({ code, need }, corpResolver, dartKey) {
+  const corp = corpResolver(code);
+
+  let info = null;
+  if (need.company) {
+    info = await fetchDartCompanyInfo(corp, dartKey).catch(() => null);
+    if (info) await setCompanyInfoCache(code, info).catch(() => {});
+  } else {
+    info = await getCompanyInfoCache(code).catch(() => null);
+  }
+
+  // 분기 제출월 추정에 결산월이 필요하다. 못 구했을 때 12를 넘기면 12월 결산으로 단정하고
+  // 제출기한 최적화가 켜지는데, 3월 결산사에서는 존재하는 보고서를 영원히 건너뛴다.
+  // 0을 넘겨 최적화를 끄면 호출 몇 번을 더 쓰는 대신 무증상 누락이 사라진다(COST에 이미 반영).
+  const accMonth = Number.isFinite(info?.accMonth) ? info.accMonth : 0;
+
+  const [multi, q] = await Promise.all([
+    need.multi   ? fetchDartMultiYear(corp, dartKey).catch(() => null) : Promise.resolve(null),
+    need.quarter ? fetchDartQuarterly(corp, dartKey, accMonth).catch(() => null) : Promise.resolve(null),
+  ]);
+
+  // 원소 존재가 아니라 필드 내용으로 판정한다 — hasYearData 주석 참조.
+  // some(v => v != null)로 쓰면 DART 장애로 5개년이 전부 빈 응답이어도 true가 되어
+  // 빈 껍데기가 100일 TTL로 적재되고, 그 종목은 100일간 재수집에서 제외된다.
+  const multiHasData = Array.isArray(multi) && multi.some(hasYearData);
+  if (need.multi   && multiHasData) await setMultiYearCache(code, multi).catch(() => {});
+  if (need.quarter && q)            await setQuarterlyCache(code, q).catch(() => {});
+
+  // 아무것도 못 받았으면 캐시에 null을 쓰지 않는다. null을 적재하면 TTL 동안 재시도가 막히는데,
+  // DART 일시 장애와 "정말 자료가 없는 종목"은 응답만 봐서는 구별되지 않아 장애를 100일 굳힌다.
+  // 대신 자료가 없는 종목은 매 실행 재시도되므로 empty 카운터로 드러난다.
+  const got = (need.company && !!info) || multiHasData || (need.quarter && !!q);
+  return { empty: !got };
+}
+
+export async function runFundamentalsBackfill({ limit = 0, maxDartCalls = 15000, full = false } = {}) {
+  const dartKey = process.env.DART_API_KEY;
+  if (!dartKey) { console.log('[Backfill] DART_API_KEY 없음 — 중단'); return { ok: false, error: 'DART_API_KEY 미설정' }; }
+
+  let corpMap = await loadCorpCodeMap().catch(() => ({}));
+  if (Object.keys(corpMap).length === 0) {
+    await refreshCorpCodes().catch(e => console.error('[Backfill] corp_code 부트스트랩 실패:', e.message));
+    corpMap = await loadCorpCodeMap().catch(() => ({}));
+  }
+  const corpResolver = (code) => corpMap[code] || CORP_MAP[code] || null;
+
+  // full=true는 corp_code 매핑에 있는 전 상장사(약 3,930), 기본은 일일 스캔과 같은 대상.
+  // Phase 2(유니버스 확장) 전에도 데이터를 미리 쌓아둘 수 있도록 스위치로 열어둔다.
+  // 비-full일 때 runDailyScan과 같은 순서(kt_stocks 우선 → 하드코딩 폴백)를 쓰는 게 중요하다.
+  // getScanUniverse()만 보면 kt_stocks에만 있는 종목이 스캔 대상인데도 영원히 안 채워진다.
+  let codes;
+  if (full) {
+    codes = Object.keys(corpMap);
+  } else {
+    const active = await getActiveStocks().catch(() => []);
+    codes = (active.length ? active : getScanUniverse()).map(s => s.code);
+  }
+
+  // 신선도 사전조회. 실패 시 빈 집합으로 폴백하면 "전부 미수집"으로 보여 이미 채운 종목까지
+  // 다시 긁어 예산을 통째로 태운다 — 조회가 실패하면 수집 자체를 하지 않는 편이 낫다.
+  let freshCo, freshMy, freshQ;
+  try {
+    [freshCo, freshMy, freshQ] = await Promise.all([
+      listFreshKvCodes('__company__',   180),
+      listFreshKvCodes('__multiyear__', 100),
+      listFreshKvCodes('__quarterly__',  45),
+    ]);
+  } catch (e) {
+    console.error('[Backfill] 캐시 신선도 조회 실패 — 중단:', e.message);
+    return { ok: false, error: `캐시 신선도 조회 실패: ${e.message}` };
+  }
+
+  let skipped = 0, noCorp = 0;
+  const pending = [];
+  for (const code of codes) {
+    const need = {
+      company: !freshCo.has(code),
+      multi:   !freshMy.has(code),
+      quarter: !freshQ.has(code),
+    };
+    if (!need.company && !need.multi && !need.quarter) { skipped++; continue; }
+    if (!corpResolver(code)) { noCorp++; continue; }
+    pending.push({
+      code, need,
+      cost: (need.company ? BACKFILL_COST.company : 0)
+          + (need.multi   ? BACKFILL_COST.multi   : 0)
+          + (need.quarter ? BACKFILL_COST.quarter : 0),
+    });
+  }
+  const truncatedByLimit = limit > 0 && pending.length > limit;
+  if (truncatedByLimit) pending.length = limit;
+
+  console.log(`[Backfill] 대상 ${codes.length}종목 — 수집필요 ${pending.length} / 신선 ${skipped} / corp_code없음 ${noCorp}`);
+
+  const CHUNK = 8;
+  let calls = 0, done = 0, empty = 0, stoppedBy = truncatedByLimit ? 'limit' : null;
+
+  for (let i = 0; i < pending.length; i += CHUNK) {
+    const chunk = pending.slice(i, i + CHUNK);
+    const chunkCost = chunk.reduce((s, p) => s + p.cost, 0);
+    if (calls + chunkCost > maxDartCalls) { stoppedBy = 'quota'; break; }
+    calls += chunkCost;
+
+    const res = await Promise.allSettled(chunk.map(p => backfillOne(p, corpResolver, dartKey)));
+    for (const r of res) {
+      if (r.status === 'fulfilled' && r.value && !r.value.empty) done++;
+      else empty++;
+    }
+
+    if ((i / CHUNK) % 25 === 0) {
+      console.log(`[Backfill] ${i + chunk.length}/${pending.length} — 적재 ${done}, 무자료 ${empty}, 호출 ${calls}/${maxDartCalls}`);
+    }
+    await new Promise(r => setTimeout(r, 300)); // DART 과부하 방지
+  }
+
+  const [nCo, nMy, nQ] = await Promise.all([
+    countKvPrefix('__company__').catch(() => -1),
+    countKvPrefix('__multiyear__').catch(() => -1),
+    countKvPrefix('__quarterly__').catch(() => -1),
+  ]);
+
+  const result = {
+    ok: true, universe: codes.length, targeted: pending.length,
+    filled: done, empty, freshSkipped: skipped, noCorpCode: noCorp,
+    dartCallsBudgeted: calls, maxDartCalls,
+    stoppedBy,                       // 'quota' | 'limit' | null(완주)
+    truncatedByLimit,
+    // 주의: limit로 자른 경우 pending이 이미 잘려 있어 이 값은 "전체 백로그"가 아니라
+    // "이번 배치의 잔여"다. 전체 진행률은 아래 cached 건수로 볼 것.
+    batchRemaining: pending.length - done - empty,
+    cached: { company: nCo, multiYear: nMy, quarterly: nQ },
+  };
+  console.log(`[Backfill] 완료 — 적재 ${done}, 무자료 ${empty}, 배치잔여 ${result.batchRemaining}, 중단사유 ${stoppedBy ?? '없음(완주)'}`);
+  return result;
 }
 
 // ── 전체 스캔 (청크 단위 처리) ───────────────────────────────────
