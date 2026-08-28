@@ -22,10 +22,33 @@ export function getSupabase() {
   return _supabase;
 }
 
+// 온디맨드 분석이 그날의 크론 결과를 덮어쓸 때, 크론에만 있는 필드를 살려서 합친다.
+// analysis_json은 통 blob이고 PK가 (code, analysis_date)라 upsert 한 번이면 통째로 교체된다.
+// 온디맨드 경로(analyzeStock)는 park·matrixZone·growth를 만들지 않으므로, 관심종목 화면을
+// 여는 것만으로 그날의 박세익 데이터가 사라진다. 화면 조회가 스크리너 결과를 지우는 셈이다.
+// 지우는 대신 "온디맨드 결과에 없는 키만" 기존 값에서 이어받는다 —
+// 온디맨드가 실제로 계산한 값(주가·지표)은 최신이므로 그대로 이긴다.
+async function mergeStoredAnalysis(sb, code, date, result) {
+  try {
+    const { data } = await sb.from('kt_daily_analysis')
+      .select('analysis_json').eq('code', code).eq('analysis_date', date).maybeSingle();
+    if (!data?.analysis_json) return result;
+    const prev = JSON.parse(data.analysis_json);
+    if (!prev || typeof prev !== 'object') return result;
+    const merged = { ...result };
+    for (const k of Object.keys(prev)) if (merged[k] === undefined) merged[k] = prev[k];
+    return merged;
+  } catch {
+    // 병합 실패가 저장 자체를 막으면 안 된다 — 최신 지표를 잃는 쪽이 더 나쁘다.
+    return result;
+  }
+}
+
 // 분석 결과 저장 (ON CONFLICT → upsert)
 export async function saveAnalysisToDB(code, result) {
   const sb = getSupabase();
   const today = new Date().toISOString().slice(0, 10);
+  const stored = await mergeStoredAnalysis(sb, code, today, result);
   try {
     await sb.from('kt_daily_analysis').upsert({
       code,
@@ -41,7 +64,7 @@ export async function saveAnalysisToDB(code, result) {
       close_price:      result.close    ?? null,
       change_rate:      result.changeRate ?? null,
       vol_ratio:        result.volRatio  ?? null,
-      analysis_json:    JSON.stringify(result),
+      analysis_json:    JSON.stringify(stored),
       data_source:      'on-demand',
     }, { onConflict: 'code,analysis_date' });
   } catch {}
@@ -575,6 +598,16 @@ export async function getUsScan() {
 export async function saveUniverseMeta(payload) { await kvSet('__universe__', payload); }
 export async function getUniverseMeta() {
   const row = await kvGet('__universe__');
+  if (!row) return null;
+  try { return JSON.parse(row.raw_json); } catch { return null; }
+}
+
+// ── PER 유니버스 중앙값 (박세익 스코어 저평가 가점 기준) ──────────
+// 스캔이 청크 단위로 즉시 저장하는 구조라 스캔 도중에는 전 종목 PER이 아직 모이지 않는다.
+// 직전 스캔에서 구한 값을 다음 스캔이 읽는다 — 근거는 cron.js pickPerMedian 주석 참조.
+export async function savePerMedian(payload) { await kvSet('__per_median__', payload); }
+export async function getPerMedian() {
+  const row = await kvGet('__per_median__');
   if (!row) return null;
   try { return JSON.parse(row.raw_json); } catch { return null; }
 }

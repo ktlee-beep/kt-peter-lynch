@@ -137,5 +137,48 @@ ok('실패 시 종목별 DART 호출 0', fake.stats.dartCalls - before, 0);
 // 0회 호출로 하루치 예산이 소진돼 429로 잠기는 경로(M-1).
 ok('조기반환도 예산 사용량 0을 명시', r4.dartCallsBudgeted, 0);
 
+// ── 9. saveAnalysisToDB 병합 — 온디맨드가 크론 결과를 지우지 않는가 ──
+// analysis_json은 통 blob이고 PK가 (code, analysis_date)라 upsert 한 번이면 통째로 교체된다.
+// 온디맨드 경로는 park·matrixZone·growth를 만들지 않으므로, 관심종목 화면을 여는 것만으로
+// 그날의 박세익 데이터가 사라진다 — 화면 조회가 스크리너 결과를 지우는 셈이다.
+console.log('\n=== 9. saveAnalysisToDB 병합 ===');
+fake.cfg.honorOrder = true; fake.cfg.onPageServed = null;
+const readJson = (code) => {
+  const row = fake.table.rows.find(r => r.code === code);
+  return row ? JSON.parse(row.analysis_json) : null;
+};
+
+fake.reset();
+// 크론이 먼저 저장한 상태
+await db.saveAnalysisToDB('005930', {
+  close: 70000, pScore: 60, lScore: 30,
+  park: { score: 82, grade: 'A (선점 유력)', gated: null, reasons: ['매출 3년 연속 증가'] },
+  matrixZone: 'SEONJEOM', growth: { revenueStreak: 3 },
+});
+// 이어서 온디맨드가 같은 날 같은 종목을 저장 — park/matrixZone/growth 없음
+await db.saveAnalysisToDB('005930', { close: 71000, pScore: 62, lScore: 33 });
+
+const merged = readJson('005930');
+ok('행은 하나로 유지', fake.table.rows.length, 1);
+ok('park 보존', merged.park?.score, 82);
+ok('matrixZone 보존', merged.matrixZone, 'SEONJEOM');
+ok('growth 보존', merged.growth?.revenueStreak, 3);
+// 온디맨드가 실제로 계산한 값은 최신이므로 그대로 이겨야 한다 — 병합이 "되돌리기"가 되면 안 된다.
+ok('최신 종가는 덮어씀', merged.close, 71000);
+ok('최신 점수는 덮어씀', [merged.pScore, merged.lScore], [62, 33]);
+
+// 온디맨드가 park를 명시적으로 담아 오면 그 값이 이긴다(undefined일 때만 이어받는다).
+fake.reset();
+await db.saveAnalysisToDB('000660', { close: 100, park: { score: 10 } });
+await db.saveAnalysisToDB('000660', { close: 110, park: { score: 90 } });
+ok('명시된 park는 최신값 우선', readJson('000660').park.score, 90);
+
+// 기존 행이 깨진 JSON이어도 저장 자체는 막히면 안 된다 — 최신 지표를 잃는 쪽이 더 나쁘다.
+fake.reset();
+fake.table.rows.push({ code: '035420', analysis_date: new Date().toISOString().slice(0, 10),
+  analysis_json: '{깨진 JSON', updated_at: new Date().toISOString() });
+await db.saveAnalysisToDB('035420', { close: 200, pScore: 55 });
+ok('깨진 기존 JSON → 저장 성공', readJson('035420')?.close, 200);
+
 console.log(`\n통과 ${pass} / 실패 ${fail}`);
 process.exit(fail ? 1 : 0);

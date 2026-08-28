@@ -663,7 +663,13 @@ export function hasNoLoss(series, years = 3) {
   if (!Number.isInteger(years) || years < 1) return null; // slice(-0)=전체 배열이라 조용히 오판정된다
   const tail = trimTrailingNulls(series).slice(-years);
   if (tail.length < years || tail.some(v => v == null)) return null;
-  return tail.every(v => v > 0);
+  if (tail.some(v => v < 0)) return false;   // 적자 확정
+  // 0은 "적자"가 아니라 "부호를 모름"이다. 입력은 억원 단위 반올림(Math.round(v/1e8))이라
+  // ±5천만원 사이 영업이익이 전부 0이 된다. 이를 false로 돌려주면 호출부가 하드 컷을
+  // 걸어 "확인하지 못한 것"을 "확인해서 나쁜 것"으로 확정 판정한다.
+  // calcGrowthStreak이 같은 반올림 위험을 prev===0 이탈로 이미 처리하고 있다 — 대칭을 맞춘다.
+  if (tail.some(v => v === 0)) return null;
+  return true;
 }
 
 // TTM(최근 12개월) = 당기 누적 + 전년 연간 − 전년 동기 누적.
@@ -678,6 +684,103 @@ export function calcTTM({ cum, cumYear, prevFullYear, prevFullYearOf, prevCum })
   if (!Number.isInteger(cumYear) || !Number.isInteger(prevFullYearOf)) return null;
   if (prevFullYearOf !== cumYear - 1) return null; // 기간 불일치 — 조용히 계산하면 안 된다
   return cum + prevFullYear - prevCum;
+}
+
+// 중앙값. 평균이 아니라 중앙값인 이유는 PER 분포가 소수의 극단값에 통째로 끌려가기 때문이다.
+// (Phase 4 RS 백분위도 같은 성격의 횡단면 통계라 여기 둔다.)
+export function median(nums) {
+  const s = (Array.isArray(nums) ? nums : []).filter(v => Number.isFinite(v)).sort((a, b) => a - b);
+  if (!s.length) return null;
+  const mid = s.length >> 1;
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+// ── 박세익 축 스코어 (저평가 선점) ──────────────────────────────
+// "매출도 영업이익도 3년 연속 늘었고 적자도 없는데, 주가만 빠진 기업."
+//
+// 배점은 초안이다. 박세익은 조건만 말했을 뿐 가중치를 제시한 적이 없고, 낙폭 -30%의
+// 30도 임의값이다("주가만 이렇게 빠진 거"). runBacktest로 조정하기 전까지 확정 취급 금지.
+export const PARK_WEIGHTS = Object.freeze({
+  revenueStreak: 25, opStreak: 25, noLoss3y: 20, dropDeep: 20, dropMild: 12, cheapPer: 10,
+});
+export const PARK_DROP_DEEP = -30;  // 고점 대비 하락률(%) — 음수
+export const PARK_DROP_MILD = -20;
+
+// growth = buildGrowthProfile 결과, priceCtx = { pctFrom52wHigh, w52Partial }, fund = { per },
+// opts = { perMedian }. 반환 { score 0..100|null, grade, gated, reasons[] }.
+export function calcParkScore(growth, priceCtx = {}, fund = {}, opts = {}) {
+  const out = (score, grade, gated, reasons) => ({ score, grade, gated, reasons });
+  // 숫자·숫자문자열만 숫자로 본다. Number(null)·Number('')·Number([])는 전부 0이라
+  // 그대로 쓰면 "데이터 없음"이 "낙폭 0%"·"PER 0"으로 둔갑한다. 세 입력(스트릭·낙폭·PER)에
+  // 같은 정책을 적용한다 — 한 함수 안에서 필드마다 강제 규칙이 다르면 그 자체가 결함이다.
+  const toNum = (v) => {
+    if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+    if (typeof v === 'string' && v.trim() !== '') { const n = Number(v); return Number.isFinite(n) ? n : null; }
+    return null;
+  };
+
+  // 1) 게이트 — 감점이 아니라 즉시 탈락.
+  // 적자 배제를 합산으로 처리하면 다른 항목의 고득점이 상쇄해 배제가 무력화된다.
+  // 박세익이 가장 강하게 경고한 지점이라("3년 안에 적자가 한 번이라도 있으면 피하자")
+  // 점수 체계 밖의 하드 컷으로 둔다.
+  if (!growth) return out(null, '데이터 없음', 'NO_DATA', ['성장 프로필 없음']);
+  // noLossOp3y는 판정 불가일 때 null이다. null은 falsy라 `!noLoss`로 쓰면 "적자 있음"과
+  // "아직 모름"이 같은 값이 된다 — 반드시 ===로 명시 비교한다.
+  if (growth.noLossOp3y === false) return out(0, 'D (제외)', 'LOSS_3Y', ['3년 내 영업적자']);
+  if (growth.noLossOp3y !== true)  return out(null, '데이터 없음', 'NO_DATA', ['3년 무적자 판정 불가']);
+
+  // 3년 연속 증가를 확인하려면 전년 대비 비교가 3회 성립해야 한다(연간 4개년).
+  // 여기서 0점을 주면 신규상장주와 백필 미완 종목이 "성장하지 못한 기업"과 구분되지 않는다.
+  // NO_DATA와 코드를 나누는 이유는 감시 목적이다 — 전자는 백필 누락 신호, 후자는 종목 특성.
+  const rc = toNum(growth.revenueComparable) ?? 0, oc = toNum(growth.opComparable) ?? 0;
+  if (rc < 3 || oc < 3) {
+    return out(null, '데이터 없음', 'SHORT_HISTORY', [`비교 가능 연수 부족 (매출 ${rc}, 영업이익 ${oc})`]);
+  }
+
+  // 2) 배점
+  let score = 0; const reasons = [];
+  const revS = toNum(growth.revenueStreak) ?? 0, opS = toNum(growth.opStreak) ?? 0;
+  if (revS >= 3) { score += PARK_WEIGHTS.revenueStreak; reasons.push(`매출 ${revS}년 연속 증가`); }
+  if (opS  >= 3) { score += PARK_WEIGHTS.opStreak;      reasons.push(`영업이익 ${opS}년 연속 증가`); }
+  score += PARK_WEIGHTS.noLoss3y; reasons.push('3년 무적자');
+
+  // 주가 낙폭 — 상장 1년 미만이면 점수를 주지 않고 사유를 남긴다. 짧은 구간의 고가를
+  // 52주 고가로 쓰면 낙폭이 과소 산출되어, 정작 안 빠진 종목이 "빠진 종목"으로 들어온다.
+  const pct = toNum(priceCtx?.pctFrom52wHigh);
+  if (priceCtx?.w52Partial === true) reasons.push('52주 데이터 부족 — 낙폭 미반영');
+  else if (pct === null)             reasons.push('고점 대비 낙폭 산출 불가');
+  else if (pct <= PARK_DROP_DEEP)    { score += PARK_WEIGHTS.dropDeep; reasons.push(`고점 대비 ${pct.toFixed(0)}%`); }
+  else if (pct <= PARK_DROP_MILD)    { score += PARK_WEIGHTS.dropMild; reasons.push(`고점 대비 ${pct.toFixed(0)}%`); }
+
+  // PER 저평가 — 기준은 유니버스 중앙값(섹터 중앙값은 kt_stocks.sector 충전 후 v2).
+  // 기준이 없으면 가점을 건너뛴다. 없는 기준으로 10점을 주는 것보다 전 종목이 똑같이
+  // 10점을 못 받는 편이 낫다 — 종목 간 상대 순위가 보존된다.
+  const per = toNum(fund?.per), med = toNum(opts?.perMedian);
+  if (med === null || med <= 0)      reasons.push('PER 중앙값 없음 — 저평가 가점 제외');
+  else if (per === null || per <= 0) reasons.push('PER 없음');
+  else if (per < med) { score += PARK_WEIGHTS.cheapPer; reasons.push(`PER ${per.toFixed(1)} < 중앙값 ${med.toFixed(1)}`); }
+
+  score = Math.max(0, Math.min(100, score));
+  const grade = score >= 80 ? 'A (선점 유력)' : score >= 60 ? 'B (후보)' : score >= 40 ? 'C (관망)' : 'D (제외)';
+  return out(score, grade, null, reasons);
+}
+
+// 2축 매트릭스. 박세익 축(실적)과 리버모어 축(주가 강도)의 교차로 구간을 판정한다.
+// 임계값 60/45/40은 초안이며 유니버스 분포에 의존한다 — 최종 유니버스에서 캘리브레이션할 것.
+// 60~45 사이(실적 좋고 주가는 애매)와 40~60 사이(실적 애매)를 NEUTRAL로 비워두는 건 의도다.
+// 판단을 유보해야 하는 구간에 이름을 붙이면 없는 신호를 있는 것처럼 읽게 된다.
+export function matrixZone(parkScore, livermoreScore, gated = null) {
+  // 적자 게이트에 걸린 종목은 0점이지만 "확인해서 나쁜 것"이라 0점 계산 종목과 성격이 다르다.
+  // 그대로 일반 분기를 타면 리버모어 60 미만에서 NEUTRAL이 되어, 3년 내 적자가 확정된 회사가
+  // "중간" 딱지를 달고 검증된 평범한 종목들과 같은 칸에 앉는다. 별도 구간으로 뺀다.
+  if (gated === 'LOSS_3Y') return Number(livermoreScore) >= 60 ? 'STORY_WARN' : 'EXCLUDED';
+  // 점수 없음(NO_DATA·SHORT_HISTORY)을 0으로 뭉개면 백필 미완 종목이 전부 STORY_WARN으로
+  // 몰려 경고 자체가 신뢰를 잃는다. null은 null로 남긴다.
+  if (!Number.isFinite(parkScore) || !Number.isFinite(livermoreScore)) return 'NO_DATA';
+  if (parkScore >= 60 && livermoreScore <  45) return 'SEONJEOM';    // 선점 후보: 실적은 좋은데 소외
+  if (parkScore >= 60 && livermoreScore >= 60) return 'BREAKOUT';    // 캔슬림 구간: 시장이 인식 시작
+  if (parkScore <  40 && livermoreScore >= 60) return 'STORY_WARN';  // 스토리주 경고: 실적 없이 오름
+  return 'NEUTRAL';
 }
 
 export function calcPiotroski(dart, fund) {

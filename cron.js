@@ -2,8 +2,8 @@
 // 매일 17:00 KST (UTC 08:00) — 전체 종목 스캔
 // 6시간마다 — 매크로 갱신
 import cron from 'node-cron';
-import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermoreScore, calcPiotroski, calcGrowthStreak, hasNoLoss, calcTTM } from './analysis.js';
-import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief, loadCorpCodeMap, upsertCorpCodes, getDartCache, setDartCache, saveUsScan, getCompanyInfoCache, setCompanyInfoCache, getMultiYearCache, setMultiYearCache, getQuarterlyCache, setQuarterlyCache, countKvPrefix, listFreshKvCodes, listAllStocks, upsertStocks, deactivateStocks, saveUniverseMeta } from './db.js';
+import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermoreScore, calcPiotroski, calcGrowthStreak, hasNoLoss, calcTTM, calcParkScore, matrixZone, median } from './analysis.js';
+import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief, loadCorpCodeMap, upsertCorpCodes, getDartCache, setDartCache, saveUsScan, getCompanyInfoCache, setCompanyInfoCache, getMultiYearCache, setMultiYearCache, getQuarterlyCache, setQuarterlyCache, countKvPrefix, listFreshKvCodes, listAllStocks, upsertStocks, deactivateStocks, saveUniverseMeta, savePerMedian, getPerMedian } from './db.js';
 import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures, CORP_MAP, fetchCorpCodeMap, fetchDartFinancials, US_UNIVERSE, fetchUsStockDaily, fetchDartCompanyInfo, fetchDartMultiYear, fetchDartQuarterly, hasYearData, fetchNaverMarketSum, filterUniverse } from './data.js';
 
 const FUNDAMENTALS_TTL_MS = 24 * 60 * 60 * 1000; // PER/PBR/ROE는 주가 연동 — 1거래일 이상 지나면 재수집
@@ -198,9 +198,31 @@ export function buildGrowthProfile(multiYear, quarterly) {
   };
 }
 
+// ── PER 유니버스 중앙값 (박세익 저평가 가점 기준) ────────────────
+// 스캔은 청크(30종목)마다 즉시 저장한다. 그래서 스캔 도중에는 전 종목 PER이 아직 모이지
+// 않아 "유니버스 중앙값"을 그 자리에서 만들 수 없다. 선택지는 둘뿐이었다 —
+//   (a) 전 종목을 메모리에 모았다가 마지막에 한 번에 저장
+//   (b) 직전 스캔에서 구한 중앙값을 오늘 쓰고, 오늘 값은 내일을 위해 남기기
+// (a)는 스캔이 중간에 죽으면 그날 결과가 통째로 사라져 지금의 스트리밍 저장 내구성을 버린다.
+// 시장 전체 PER 중앙값은 하루 사이에 의미 있게 움직이지 않으므로 (b)의 1일 지연을 택한다.
+const PER_MEDIAN_MIN_SAMPLE = 100;   // 표본이 이보다 적으면 그건 "유니버스 중앙값"이 아니다
+const PER_MEDIAN_MAX_AGE_DAYS = 14;  // 그 이상 묵은 값은 다른 국면의 숫자다 — 없느니만 못하다
+const PER_SANE_MAX = 1000;           // 적자 직전 기업의 PER 수천 배를 표본에서 제외
+
+// 저장된 중앙값을 쓸 수 있는지 판정. 못 쓰면 null — 호출부는 저평가 가점을 건너뛴다.
+export function pickPerMedian(meta, nowMs = Date.now()) {
+  if (!meta || !Number.isFinite(meta.median) || meta.median <= 0) return null;
+  if (!Number.isFinite(meta.n) || meta.n < PER_MEDIAN_MIN_SAMPLE) return null;
+  const ts = Date.parse(meta.at ?? '');
+  if (!Number.isFinite(ts)) return null;
+  if (nowMs - ts > PER_MEDIAN_MAX_AGE_DAYS * 86400000) return null;
+  return meta.median;
+}
+
 // ── 경량 종목 분석 (Naver 일봉 기반) ────────────────────────────
 // corpResolver(code)→corp_code, dartKey: DART 재무로 진짜 Piotroski 산출
-async function analyzeStockLean(code, corpResolver = null, dartKey = '') {
+// ctx.perMedian: 박세익 스코어의 PER 저평가 가점 기준 (없으면 해당 항목 미반영)
+async function analyzeStockLean(code, corpResolver = null, dartKey = '', ctx = {}) {
   try {
     // count=280: 52주(거래일 약 252일) + 휴장 버퍼. Phase 4 RS 12개월 산출도 동일 데이터를 재사용한다.
     const naverUrl = `https://fchart.stock.naver.com/sise.nhn?symbol=${code}&timeframe=day&count=280&requestType=0`;
@@ -312,6 +334,10 @@ async function analyzeStockLean(code, corpResolver = null, dartKey = '') {
       macdVal?.lastCross ?? null, bb,
     );
 
+    // 박세익 축 스코어와 2축 매트릭스. 리버모어 점수가 나온 뒤라야 존을 판정할 수 있다.
+    const park = calcParkScore(growth, { pctFrom52wHigh, w52Partial }, fundamentals, { perMedian: ctx?.perMedian ?? null });
+    const zone = matrixZone(park.score, lScore, park.gated);
+
     return {
       code, close: cur, changeRate, volRatio, rsi: rsiVal, source: 'naver',
       macd: macdVal, bb,
@@ -323,8 +349,10 @@ async function analyzeStockLean(code, corpResolver = null, dartKey = '') {
       fScore,       // 진짜 Piotroski (DART 통합) — 기존 null에서 실제 산출로 교체
       dart,         // 스크리너/리포트에서 매출성장·영업이익률 활용
       fundamentals, // 스크리너 PER/PBR/ROE 필터용
-      // 아래 3종은 analysis_json에 실려 저장된다 — 별도 컬럼 추가(DDL) 없이 스크리너가 소비한다.
+      // 아래 5종은 analysis_json에 실려 저장된다 — 별도 컬럼 추가(DDL) 없이 스크리너가 소비한다.
       growth,       // 박세익 축: 연속성장 스트릭·무적자·TTM
+      park,         // 박세익 스코어 { score, grade, gated, reasons }
+      matrixZone: zone,  // SEONJEOM / BREAKOUT / STORY_WARN / NEUTRAL / EXCLUDED / NO_DATA
       quarterly,    // 최근 분기 원본 (누적·YoY)
       induty: company?.indutyCode ?? null,  // 표준산업분류 — 업종 상대비교/섹터 필터용
       market: company?.market ?? null,
@@ -562,6 +590,7 @@ export async function runDailyScan() {
   const today = new Date().toISOString().slice(0, 10);
 
   let stocks;
+  let fallbackUniverse = false;
   try {
     stocks = await getActiveStocks();
   } catch (e) {
@@ -571,6 +600,7 @@ export async function runDailyScan() {
   if (!stocks.length) {
     console.warn('[Cron] 활성 종목 0건 — 하드코딩 유니버스 사용');
     stocks = getScanUniverse();
+    fallbackUniverse = true;
   }
 
   // corp_code 매핑 로드 — 비어 있으면 DART에서 1회 부트스트랩 (A: 전체 상장사 매핑)
@@ -584,6 +614,10 @@ export async function runDailyScan() {
   const corpResolver = (code) => corpMap[code] || CORP_MAP[code] || null;
   console.log(`[Cron] corp_code 매핑 ${Object.keys(corpMap).length}개, DART키 ${dartKey ? '있음' : '없음'}`);
 
+  // 박세익 저평가 가점 기준 — 직전 스캔이 남긴 값(없으면 null → 해당 항목 미반영)
+  const perMedian = pickPerMedian(await getPerMedian().catch(() => null));
+  console.log(`[Cron] PER 중앙값 기준: ${perMedian ?? '없음 (저평가 가점 제외)'}`);
+
   const batchId = `${today}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     await createScanBatch(batchId, stocks.length);
@@ -591,10 +625,13 @@ export async function runDailyScan() {
 
   const CHUNK_SIZE = 30;
   let totalProcessed = 0, totalFailed = 0, totalBuy = 0;
+  const perSample = [];
+  const zoneTally = { SEONJEOM: 0, BREAKOUT: 0, STORY_WARN: 0, NEUTRAL: 0, EXCLUDED: 0, NO_DATA: 0 };
+  const gateTally = { NO_DATA: 0, SHORT_HISTORY: 0, LOSS_3Y: 0 };
 
   for (let i = 0; i < stocks.length; i += CHUNK_SIZE) {
     const chunk = stocks.slice(i, i + CHUNK_SIZE);
-    const results = await Promise.allSettled(chunk.map(({ code }) => analyzeStockLean(code, corpResolver, dartKey)));
+    const results = await Promise.allSettled(chunk.map(({ code }) => analyzeStockLean(code, corpResolver, dartKey, { perMedian })));
 
     const rows = [];
     let chunkBuy = 0, chunkFail = 0;
@@ -605,6 +642,16 @@ export async function runDailyScan() {
       const a = r.value;
       const signal = a.combinedSignal?.signal ?? 'HOLD';
       if (signal === 'BUY') chunkBuy++;
+
+      // 내일 쓸 PER 중앙값 표본. 적자 기업의 음수 PER과 적자 직전의 수천 배 PER은 뺀다 —
+      // 중앙값이 극단값에 강하다고 해서 의미 없는 값을 표본에 넣을 이유는 없다.
+      const perVal = Number(a.fundamentals?.per);
+      if (Number.isFinite(perVal) && perVal > 0 && perVal < PER_SANE_MAX) perSample.push(perVal);
+      // 존·게이트 분포는 스캔 로그에만 남긴다. NO_DATA/SHORT_HISTORY가 급증하면 백필이
+      // 밀린 것이고, 그건 조용히 진행되면 "선점 후보가 없는 날"로 오독된다.
+      zoneTally[a.matrixZone] = (zoneTally[a.matrixZone] ?? 0) + 1;
+      if (a.park?.gated) gateTally[a.park.gated] = (gateTally[a.park.gated] ?? 0) + 1;
+
       rows.push({
         code:            chunk[j].code,
         analysis_date:   today,
@@ -640,7 +687,25 @@ export async function runDailyScan() {
   }
 
   try { await completeScanBatch(batchId); } catch {}
+
+  // 다음 스캔이 쓸 PER 중앙값. 표본이 모자라면 갱신하지 않는다 — 덮어써 버리면
+  // 어제의 정상값까지 잃고, 다음 날도 표본이 모자라면 가점이 영구히 죽는다.
+  // 폴백 유니버스(199종목 대형주 하드코딩)에서도 갱신하지 않는다. 표본 수(약 170)는
+  // 최소치를 넘기지만 구성이 대형주 편향이라, DB 일시 장애 하루가 이후 최대 14일간
+  // 전 종목의 저평가 가점 기준을 대형주 중앙값으로 오염시킨다. 표본 "수"가 아니라
+  // 표본 "대표성"이 깨지는 경우라 개수 게이트로는 걸러지지 않는다.
+  const perMed = median(perSample);
+  if (fallbackUniverse) {
+    console.warn(`[Cron] 폴백 유니버스 스캔 — PER 중앙값 갱신 생략 (표본 ${perSample.length}건, 대형주 편향)`);
+  } else if (perMed != null && perSample.length >= PER_MEDIAN_MIN_SAMPLE) {
+    await savePerMedian({ median: perMed, n: perSample.length, at: new Date().toISOString() })
+      .catch(e => console.error('[Cron] PER 중앙값 저장 실패:', e.message));
+  } else {
+    console.warn(`[Cron] PER 표본 ${perSample.length}건 — 중앙값 갱신 생략 (최소 ${PER_MEDIAN_MIN_SAMPLE})`);
+  }
+
   console.log(`[Cron] 스캔 완료 — 처리: ${totalProcessed}, 실패: ${totalFailed}, BUY: ${totalBuy}`);
+  console.log(`[Cron] 매트릭스 ${JSON.stringify(zoneTally)} / 박세익 게이트 ${JSON.stringify(gateTally)} / PER중앙값 ${perMed ?? '-'}(표본 ${perSample.length})`);
 
   // Feature 3: 급등락(±5%) 종목 뉴스 펄스 분석 캐시 워밍 (최대 5개, 비동기)
   (async () => {

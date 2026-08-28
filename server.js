@@ -1213,23 +1213,47 @@ app.post('/api/scan/trigger-admin', authMiddleware, adminMiddleware, async (req,
 // ── /api/screener ──────────────────────────────────────────────────
 const screenerCache = new Map(); // key -> { data, ts }
 const SCREENER_TTL = 60 * 60 * 1000; // 1h
+const SCREENER_CACHE_MAX = 200;      // 키가 사용자 입력 조합이라 상한이 없으면 무한히 증식한다
+const ZONES = ['SEONJEOM', 'BREAKOUT', 'STORY_WARN', 'NEUTRAL', 'EXCLUDED', 'NO_DATA'];
+
+// Map은 삽입 순서를 보존하므로 가장 오래된 키부터 버린다(FIFO). LRU까지 갈 이유는 없다 —
+// TTL 1시간이라 어차피 오래된 항목은 곧 무효가 된다. 여기 목적은 메모리 상한뿐이다.
+function setScreenerCache(key, value) {
+  screenerCache.set(key, value);
+  while (screenerCache.size > SCREENER_CACHE_MAX) {
+    screenerCache.delete(screenerCache.keys().next().value);
+  }
+}
 
 app.get('/api/screener', async (req, res) => {
   const {
     per_max, pbr_max, roe_min, debt_max,
-    lynch_min, piotroski_min,
+    lynch_min, piotroski_min, park_min, zone,
     sort = 'lynch_score', page = '1', limit = '20',
     preset,
   } = req.query;
 
   // Preset → override filters
-  let filters = { per_max, pbr_max, roe_min, debt_max, lynch_min, piotroski_min };
+  let filters = { per_max, pbr_max, roe_min, debt_max, lynch_min, piotroski_min, park_min, zone };
   if (preset === 'lynch') {
     filters = { per_max: '20', pbr_max: '3', roe_min: '10', debt_max: '150', lynch_min: '50' };
   } else if (preset === 'value') {
     filters = { per_max: '10', pbr_max: '1', roe_min: '8', debt_max: '200', lynch_min: '0' };
   } else if (preset === 'growth') {
     filters = { per_max: '40', pbr_max: '5', roe_min: '15', debt_max: '100', lynch_min: '60' };
+  } else if (preset === 'park') {
+    // 저평가 선점 — 실적은 3년 연속 좋은데 주가는 아직 안 움직인 구간.
+    // 밸류에이션 필터를 걸지 않는 게 핵심이다. PER/PBR 상한을 얹으면 박세익 스코어가
+    // 이미 반영한 저평가 조건을 두 번 거는 셈이라, 실적이 좋아 PER이 오른 종목부터 잘린다.
+    filters = { park_min: '60', zone: 'SEONJEOM' };
+  }
+
+  // zone은 이름 필터라 오타가 조용히 무시되면 필터가 통째로 사라진다 — 전 유니버스가
+  // "선점 후보"로 돌아온다. PER 상한 오타(무시해도 결과가 넓어질 뿐)와 달리 여기서는
+  // 오작동 방향이 위험한 쪽이라 열어주지 말고 거절한다. 캐시에 임의 문자열이 키로
+  // 들어가는 것도 함께 막힌다(screenerCache는 무제한 Map이다).
+  if (filters.zone !== undefined && !ZONES.includes(filters.zone)) {
+    return res.status(400).json({ error: `zone 값이 올바르지 않습니다. 허용: ${ZONES.join(', ')}` });
   }
 
   const cacheKey = JSON.stringify(filters) + sort;
@@ -1237,7 +1261,9 @@ app.get('/api/screener', async (req, res) => {
   if (cached && Date.now() - cached.ts < SCREENER_TTL) {
     const pg = parseInt(page), lm = parseInt(limit);
     const slice = cached.data.slice((pg - 1) * lm, pg * lm);
-    return res.json({ items: slice, total: cached.data.length, page: pg, fromCache: true });
+    // 미계측 안내는 캐시에도 함께 실린다 — 안 그러면 첫 응답 이후 1시간 동안 "후보 0건"으로 보인다.
+    return res.json({ items: slice, total: cached.data.length, page: pg, fromCache: true,
+      ...(cached.message ? { message: cached.message } : {}) });
   }
 
   try {
@@ -1268,11 +1294,21 @@ app.get('/api/screener', async (req, res) => {
     const fDebtMax  = pNum(filters.debt_max);
     const fLynchMin = pNum(filters.lynch_min);
     const fPioMin   = pNum(filters.piotroski_min);
+    const fParkMin  = pNum(filters.park_min);
+    const fZone     = ZONES.includes(filters.zone) ? filters.zone : null;  // 검증은 위에서 끝났다
 
     const results = [];
+    let parkRows = 0;  // park 필드를 실제로 들고 있는 행 수 — 0건과 "미계측"을 구분하기 위함
     for (const r of deduped) {
-      let fund = {};
-      try { const j = JSON.parse(r.analysis_json || '{}'); fund = j.fundamentals || {}; } catch {}
+      let fund = {}, park = null, mZone = null, pctHigh = null;
+      try {
+        const j = JSON.parse(r.analysis_json || '{}');
+        fund = j.fundamentals || {};
+        park = j.park || null;
+        mZone = j.matrixZone || null;
+        pctHigh = pNum(j.pctFrom52wHigh);
+      } catch {}
+      if (park) parkRows++;
 
       const per = pNum(fund.per);
       const pbr = pNum(fund.pbr);
@@ -1287,6 +1323,12 @@ app.get('/api/screener', async (req, res) => {
       if (fDebtMax !== null && debt !== null && debt > fDebtMax) continue;
       if (fLynchMin !== null && r.lynch_score < fLynchMin)         continue;
       if (fPioMin  !== null && r.piotroski_score < fPioMin)        continue;
+      // 박세익 점수는 PER/PBR과 달리 null을 통과시키지 않는다. 여기서 null은 "지표 하나가
+      // 빈 종목"이 아니라 "3년 실적을 확인하지 못한 종목"이고, 적자 게이트에 걸린 종목도
+      // 0점으로 여기서 함께 잘린다. 확인하지 못한 것을 후보로 올리면 게이트가 무의미해진다.
+      const parkScore = pNum(park?.score);
+      if (fParkMin !== null && !(parkScore !== null && parkScore >= fParkMin)) continue;
+      if (fZone !== null && mZone !== fZone) continue;
 
       const name = r.kt_stocks?.name || krxName(r.code) || r.code;
 
@@ -1295,6 +1337,9 @@ app.get('/api/screener', async (req, res) => {
         per, pbr, roe, debtRatio: debt, marketCap: mktCap,
         close: r.close_price, changeRate: r.change_rate, rsi: r.rsi,
         lynchScore: r.lynch_score, piotroskiScore: r.piotroski_score,
+        livermoreScore: r.livermore_score,
+        parkScore, parkGrade: park?.grade ?? null, parkGated: park?.gated ?? null,
+        parkReasons: park?.reasons ?? [], matrixZone: mZone, pctFrom52wHigh: pctHigh,
         combinedScore: r.combined_score, analysisDate: r.analysis_date,
       });
     }
@@ -1305,19 +1350,28 @@ app.get('/api/screener', async (req, res) => {
       : sort === 'per'       ? 'per'
       : sort === 'pbr'       ? 'pbr'
       : sort === 'roe'       ? 'roe'
+      : sort === 'park'      ? 'parkScore'
+      // 낙폭 정렬은 오름차순이다 — pctFrom52wHigh는 음수라 작을수록 많이 빠진 종목이다.
+      : sort === 'drop'      ? 'pctFrom52wHigh'
       : 'combinedScore';
-    const ascending = ['per','pbr'].includes(sort);
+    const ascending = ['per','pbr','drop'].includes(sort);
     results.sort((a, b) => {
       const va = a[sortKey] ?? (ascending ? Infinity : -Infinity);
       const vb = b[sortKey] ?? (ascending ? Infinity : -Infinity);
       return ascending ? va - vb : vb - va;
     });
 
-    screenerCache.set(cacheKey, { data: results, ts: Date.now() });
+    // 박세익 필터를 걸었는데 park를 가진 행이 하나도 없으면 "후보 0건"이 아니라 "미계측"이다.
+    // 둘 다 빈 배열로 나가면 화면에서 구분할 방법이 없어 백필 누락이 조용히 묻힌다.
+    const parkFiltered = fParkMin !== null || fZone !== null;
+    const message = (parkFiltered && parkRows === 0 && deduped.length > 0)
+      ? '박세익 스코어가 아직 계산되지 않았습니다. 다음 전체 스캔 이후 사용 가능합니다.'
+      : undefined;
+    setScreenerCache(cacheKey, { data: results, ts: Date.now(), message });
 
     const pg = parseInt(page), lm = parseInt(limit);
     const slice = results.slice((pg - 1) * lm, pg * lm);
-    res.json({ items: slice, total: results.length, page: pg });
+    res.json({ items: slice, total: results.length, page: pg, ...(message ? { message } : {}) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
