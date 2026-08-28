@@ -278,16 +278,86 @@ export async function deleteEmailVerification(email) {
   await sb.from('email_verifications').delete().eq('email', email.toLowerCase());
 }
 
+// PostgREST 전체 페이지 순회 공용 루틴.
+// 서버는 db-max-rows로 응답 행수를 잘라도 경고를 주지 않는다. "요청한 만큼 안 왔으면
+// 마지막 페이지"라는 판정은 상한이 PAGE보다 낮은 순간 첫 페이지에서 참이 되어 그 지점부터
+// 통째로 잘린다. 받은 만큼만 전진하고 빈 페이지에서만 멈추면 서버 상한이 얼마든 결과가 같다.
+// orderBy는 필수다 — 정렬 없는 OFFSET은 페이지 사이에 UPDATE가 끼면 행을 건너뛴다
+// (Postgres의 UPDATE는 힙 튜플을 새 위치에 쓴다). 반드시 유니크 컬럼으로 전순서를 준다.
+// build()는 호출할 때마다 새 쿼리 빌더를 반환해야 한다 — postgrest-js 빌더는 1회용이다.
+async function fetchAllPages(build, { orderBy, page = 500, maxPages = 500, label = 'query' }) {
+  const out = [];
+  for (let from = 0, p = 0; ; p++) {
+    if (p >= maxPages) throw new Error(`${label} 페이지 상한 ${maxPages} 초과 — 서버 반환 상한 확인 필요`);
+    const { data, error } = await build()
+      .order(orderBy, { ascending: true })
+      .range(from, from + page - 1);
+    if (error) throw new Error(error.message);
+    if (!data?.length) break;
+    // push(...data)로 펼치지 않는다 — 인자 개수 한도가 있어 page를 크게 넘기면 RangeError가 난다.
+    for (const row of data) out.push(row);
+    from += data.length;
+  }
+  return out;
+}
+
 // 활성 종목 목록 (스캔용)
+// 정렬 키를 market+code에서 code 단독으로 바꿨다. 페이지네이션의 안전성은 정렬이
+// 전순서(total order)일 때만 성립하는데 market은 중복이 많아 타이 구간에서 순서가 흔들린다.
+// code는 PK라 전순서다. 스캔 순서만 달라지고 대상 집합은 같다.
+// 예외를 삼키지 않는다 — 호출부(runDailyScan·runFundamentalsBackfill)가 이미
+// catch 후 하드코딩 유니버스로 폴백한다. 여기서 []를 반환하면 "종목 없음"과
+// "조회 실패"가 구분되지 않는다.
 export async function getActiveStocks() {
   const sb = getSupabase();
-  const { data } = await sb
-    .from('kt_stocks')
-    .select('code, yahoo_suffix')
-    .eq('is_active', 1)
-    .order('market')
-    .order('code');
-  return data ?? [];
+  return fetchAllPages(
+    () => sb.from('kt_stocks').select('code, yahoo_suffix').eq('is_active', 1),
+    { orderBy: 'code', label: 'getActiveStocks' },
+  );
+}
+
+// 종목 마스터 전체 (유니버스 갱신 시 이탈 종목 계산용)
+export async function listAllStocks() {
+  const sb = getSupabase();
+  return fetchAllPages(
+    // market이 필요하다 — 이탈 상한을 시장별로도 걸려면 기존 활성 종목의 시장 구분이 있어야 한다.
+    () => sb.from('kt_stocks').select('code, market, is_active'),
+    { orderBy: 'code', label: 'listAllStocks' },
+  );
+}
+
+// 종목 마스터 일괄 upsert.
+// payload에 없는 컬럼(sector·created_at)은 PostgREST의 ON CONFLICT SET 목록에 들어가지
+// 않으므로 기존 값이 보존된다. 단 모든 행의 키 구성이 같아야 한다(PostgREST 제약).
+export async function upsertStocks(rows) {
+  if (!rows?.length) return 0;
+  const sb = getSupabase();
+  let n = 0;
+  for (let i = 0; i < rows.length; i += 500) {
+    const chunk = rows.slice(i, i + 500);
+    // count로 실제 반영 행수를 받는다. chunk.length는 "보낸 수"라서 서버가 일부만 처리해도
+    // 성공처럼 보고된다 — 상태 API의 숫자가 실제와 다르면 사고를 눈으로 못 잡는다.
+    const { error, count } = await sb.from('kt_stocks').upsert(chunk, { onConflict: 'code', count: 'exact' });
+    if (error) throw new Error(`kt_stocks upsert 실패: ${error.message}`);
+    n += count ?? chunk.length;
+  }
+  return n;
+}
+
+// 유니버스에서 빠진 종목은 삭제하지 않고 비활성화한다.
+// kt_daily_analysis.code가 kt_stocks를 참조하므로 삭제하면 과거 분석 이력이 통째로 끊긴다.
+export async function deactivateStocks(codes) {
+  if (!codes?.length) return 0;
+  const sb = getSupabase();
+  let n = 0;
+  for (let i = 0; i < codes.length; i += 200) {
+    const chunk = codes.slice(i, i + 200);
+    const { error, count } = await sb.from('kt_stocks')
+      .update({ is_active: 0 }, { count: 'exact' }).in('code', chunk);
+    if (error) throw new Error(`kt_stocks 비활성화 실패: ${error.message}`);
+    n += count ?? chunk.length;
+  }
+  return n;
 }
 
 // 배치 시작 기록
@@ -499,6 +569,16 @@ export async function getUsScan() {
   try { return JSON.parse(row.raw_json); } catch { return null; }
 }
 
+// ── 유니버스 메타 (시총·거래대금) ─────────────────────────────────
+// kt_stocks에는 시총 컬럼이 없고 운영 DB에 DDL 권한이 없으므로 KV 블롭에 함께 남긴다.
+// RS Rating(Phase 4)은 유니버스 내 백분위라 시총·거래대금을 재조회 없이 읽어야 한다.
+export async function saveUniverseMeta(payload) { await kvSet('__universe__', payload); }
+export async function getUniverseMeta() {
+  const row = await kvGet('__universe__');
+  if (!row) return null;
+  try { return JSON.parse(row.raw_json); } catch { return null; }
+}
+
 // ── DART 기업코드 매핑 (전체 상장사 code → corp_code) ─────────────
 // 단일 블롭(__corpmap__)으로 저장 — 약 3,900개, ~100KB
 export async function upsertCorpCodes(rows) {
@@ -588,35 +668,18 @@ export async function listFreshKvCodes(prefix, maxDays) {
   const sb = getSupabase();
   const cutoff = new Date(Date.now() - maxDays * 86400000).toISOString();
   const out = new Set();
-  // 서버가 요청한 PAGE보다 적게 줄 수 있다 — PostgREST의 db-max-rows가 상한이고,
-  // Supabase 기본값 1000은 프로젝트 설정으로 더 낮출 수 있다. 그래서 "덜 왔으면 마지막
-  // 페이지"라는 판정(data.length < PAGE → break)을 쓰면 안 된다. 상한이 PAGE보다 낮은
-  // 순간 첫 페이지에서 참이 되어 그 지점부터 통째로 잘리고, 잘린 종목은 "미수집"으로
-  // 오판돼 매 실행 헛호출을 반복한다. 실측: 상한 300 / PAGE 500이면 2,500건 중 300건만
-  // 수집되고 경고 하나 없이 끝난다.
-  // 받은 만큼만 전진하고 빈 페이지에서만 멈추면 서버 상한이 얼마든 결과가 같다.
-  // 반복 상한. 정상 상황(상한 1000, 접두사당 4천 행 미만)에서는 10회 미만으로 끝난다.
-  // 상한이 비정상적으로 낮으면 요청이 직렬로 수백 회 나가고, 그동안 백필 running 플래그가
-  // 모든 트리거를 막는다. 조용히 느려지는 대신 소리 내며 실패하게 둔다.
-  const PAGE = 500, MAX_PAGES = 500;
-  for (let from = 0, page = 0; ; page++) {
-    if (page >= MAX_PAGES) throw new Error(`listFreshKvCodes(${prefix}) 페이지 상한 ${MAX_PAGES} 초과 — 서버 반환 상한 확인 필요`);
-    const { data, error } = await sb.from('kt_fundamentals_cache')
-      .select('code').like('code', `${prefix}%`).gte('updated_at', cutoff)
-      // ORDER BY 없는 OFFSET은 행 순서를 보장하지 않는다. 이 테이블은 upsert(UPDATE)가
-      // 상시 일어나고 Postgres의 UPDATE는 힙 튜플을 뒤로 옮기므로, 페이지 사이에 쓰기가 끼면
-      // 행이 건너뛰어진다. 건너뛴 종목은 "미수집"으로 오판돼 매 실행 헛호출을 반복한다.
-      .order('code', { ascending: true })
-      .range(from, from + PAGE - 1);
-    if (error) throw new Error(error.message);
-    if (!data?.length) break;
-    for (const r of data) {
-      // LIKE의 '_'는 단일문자 와일드카드라 '__company__%'가 다른 키에도 매칭될 수 있다.
-      // 현재 키 네이밍에선 충돌이 없지만, 매칭되면 slice가 엉뚱한 코드를 Set에 넣는다.
-      if (!r.code.startsWith(prefix)) continue;
-      out.add(r.code.slice(prefix.length));
-    }
-    from += data.length;
+  // 페이지 순회 규칙(서버 상한·ORDER BY 필요성)은 fetchAllPages 주석 참조.
+  // 같은 로직을 손으로 두 번 쓰다가 getActiveStocks 쪽에 절단 결함이 남았던 전례가 있어
+  // 공용 루틴으로 합쳤다.
+  const rows = await fetchAllPages(
+    () => sb.from('kt_fundamentals_cache').select('code').like('code', `${prefix}%`).gte('updated_at', cutoff),
+    { orderBy: 'code', label: `listFreshKvCodes(${prefix})` },
+  );
+  for (const r of rows) {
+    // LIKE의 '_'는 단일문자 와일드카드라 '__company__%'가 다른 키에도 매칭될 수 있다.
+    // 현재 키 네이밍에선 충돌이 없지만, 매칭되면 slice가 엉뚱한 코드를 Set에 넣는다.
+    if (!r.code.startsWith(prefix)) continue;
+    out.add(r.code.slice(prefix.length));
   }
   return out;
 }

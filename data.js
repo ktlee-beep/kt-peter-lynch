@@ -349,6 +349,120 @@ export async function fetchCorpCodeMap(dartKey) {
   return rows;
 }
 
+// ── 유니버스 원천: 전 종목 시총·거래대금 일괄 조회 ────────────────
+// 계획서는 KRX(data.krx.co.kr getJsonData.cmd)를 1순위로 뒀지만 2026-08-28 실측에서
+// 세션 쿠키 발급이 막혀 본문 "LOGOUT"과 함께 HTTP 400만 돌아왔다. 메인 페이지를 먼저
+// 받아 쿠키를 챙기는 웜업을 붙여도 __smVisitorID만 오고 JSESSIONID가 발급되지 않는다.
+// 대신 네이버 모바일 시세 목록이 같은 정보(코드·이름·시장·시총·거래대금)를 한 번에 준다.
+// 시장당 2회, 총 4회 호출로 전 종목을 받으므로 종목별 조회(3,900회) 대비 비용이 없는 수준.
+const SISE_LIST_URL = 'https://m.stock.naver.com/api/json/sise/siseListJson.nhn';
+const SISE_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+  'Referer': 'https://finance.naver.com/sise/sise_market_sum.naver',
+  'Accept': 'application/json',
+};
+
+// 응답 1행 → 내부 표준형. 단위 환산이 이 함수에만 있도록 가둔다.
+// marketSumRaw·aa 모두 백만원 단위다(삼성전자 실측: marketSumRaw 1,502,493,602 =
+// 1,502조원). 앱 전체가 억원을 가정하므로(fetchNaverFundamentals와 동일) 100으로 나눈다.
+// 불리언 플래그가 true·"true"·1 중 무엇으로 올지 네이버가 보장하지 않는다. === true만 보면
+// 표현이 바뀌는 순간 ETF/ETN이 전부 통과하는데, 이들 종목코드는 대부분 끝자리가 0이라
+// 보통주 정규식이 백스톱이 되어주지 못한다(069500·102110·550010 전부 통과).
+const flag = (v) => v === true || v === 1 || v === 'true' || v === 'Y' || v === '1';
+
+function normalizeSiseRow(it, market) {
+  const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+  const cap = num(it.marketSumRaw);
+  const val = num(it.aa);
+  return {
+    code: String(it.cd || ''),
+    name: String(it.nm || '').trim(),
+    market,
+    marketCap:    cap != null ? cap / 100 : null,  // 억원
+    tradingValue: val != null ? val / 100 : null,  // 억원 (당일 누적 거래대금)
+    price: num(it.nv),
+    isEtf: flag(it.etf),
+    isEtn: flag(it.etn),
+    // tyn의 의미는 네이버가 공개하지 않는다 [확인 필요]. 실측상 Y인 종목은 시총 중앙값이
+    // 낮고 거래대금이 미미해 거래정지로 보이지만, 추정으로 종목을 떨어뜨리진 않는다.
+    // 필터에 쓰지 않고 원본만 남겨 나중에 판단할 근거로 둔다.
+    tyn: it.tyn ?? null,
+  };
+}
+
+export async function fetchNaverMarketSum() {
+  const rows = [];
+  for (const [sosok, market] of [[0, 'KOSPI'], [1, 'KOSDAQ']]) {
+    let seen = 0, total = null;
+    // pageSize 2000은 서버가 받아준 값이고 상한 광고는 없다. 총건수를 응답에서 받아
+    // 그만큼만 돌고, 페이지 상한에서 소리 내며 멈춘다 — 무한 루프로 새지 않게.
+    for (let page = 1; page <= 10; page++) {
+      const r = await fetch(`${SISE_LIST_URL}?menu=market_sum&sosok=${sosok}&pageSize=2000&page=${page}`,
+        { headers: SISE_HEADERS });
+      if (!r.ok) throw new Error(`네이버 시세목록 HTTP ${r.status} (${market} p${page})`);
+      const j = await r.json();
+      const res = j?.result || j;
+      // 형식이 바뀌면 빈 배열로 흘려보내면 안 된다 — 유니버스가 0이 되어 전 종목이
+      // 상장폐지처럼 보인다. 모양이 다르면 즉시 실패시켜 폴백 경로를 타게 한다.
+      if (!Array.isArray(res?.itemList)) throw new Error(`네이버 시세목록 응답 형식 변경 (${market} p${page})`);
+      // totCnt는 루프 종료 조건이자 아래 완전성 검사의 기준값이다. 이 한 필드를 `|| 0`으로
+      // 흘리면 결함이 둘 동시에 생긴다 — (a) seen >= 0이 즉시 참이라 1페이지에서 탈출하고
+      // (b) "수집 부족" 검사가 공허해진다. 그 조합이면 한 시장이 통째로 비어도 예외 없이
+      // 성공하고, 빠진 종목 전부가 유니버스 이탈로 판정돼 is_active가 꺼진다.
+      // itemList는 엄격히 검증하면서 totCnt만 느슨하게 두면 그 비대칭이 그대로 사고가 된다.
+      if (total == null) {
+        total = Number(res.totCnt);
+        if (!Number.isFinite(total) || total <= 0) {
+          throw new Error(`네이버 시세목록 totCnt 이상 (${market}): ${JSON.stringify(res.totCnt)}`);
+        }
+      }
+      if (res.itemList.length === 0) break;
+      for (const it of res.itemList) rows.push(normalizeSiseRow(it, market));
+      seen += res.itemList.length;
+      if (seen >= total) break;
+    }
+    // 총건수보다 적게 받았으면 조용히 넘어가지 않는다. 반쪽 유니버스를 그대로 반영하면
+    // 빠진 종목이 전부 "유니버스 이탈"로 판정돼 is_active가 꺼진다.
+    // total은 위에서 양수임이 보장되므로 `total &&` 같은 단락 조건을 붙이지 않는다.
+    if (seen < total) throw new Error(`${market} 수집 부족: ${seen}/${total}`);
+  }
+  return rows;
+}
+
+// 스팩(기업인수목적회사)은 합병 전까지 영업활동이 없어 성장 스크리닝 대상이 아니다.
+const SPAC_RE = /스팩|기업인수목적/;
+
+// 유니버스 필터. 순수 함수로 분리해 원천 없이도 단위 검증이 가능하게 둔다.
+export function filterUniverse(rows, { minCapEok = 1000, minValueEok = 3 } = {}) {
+  const stats = { total: rows.length, dup: 0, etfEtn: 0, preferred: 0, spac: 0, noData: 0, belowCap: 0, belowValue: 0 };
+  const kept = [];
+  const seen = new Set();
+  for (const r of rows) {
+    if (r.isEtf || r.isEtn) { stats.etfEtn++; continue; }
+    // 보통주만 남긴다. KRX 종목코드는 보통주만 끝자리가 0이고 우선주는 5·7·9 또는
+    // 영문(00680K 미래에셋증권2우B)이 붙는다. 2026-08-28 전 종목 실측에서 ETF/ETN을
+    // 제외한 끝자리 비(非)0 종목 114개가 전부 우선주였다 — 오탈락 0건.
+    if (!/^\d{5}0$/.test(r.code)) { stats.preferred++; continue; }
+    if (SPAC_RE.test(r.name)) { stats.spac++; continue; }
+    if (r.marketCap == null || r.tradingValue == null) { stats.noData++; continue; }
+    if (r.marketCap < minCapEok) { stats.belowCap++; continue; }
+    // 거래대금 하한은 낮게 잡는다. 이 전략의 표적은 "실적은 좋은데 주가가 빠진" 종목이라
+    // 거래가 한산한 경우가 많다 — 하한을 높이면 찾으려는 대상을 먼저 잘라낸다.
+    // 거래정지·껍데기 종목만 걷어내는 용도.
+    if (r.tradingValue < minValueEok) { stats.belowValue++; continue; }
+    // 원천 목록은 실시간 시가총액 순이라 페이지 사이에 순위가 바뀌면 같은 종목이 두 페이지에
+    // 걸쳐 온다. 그대로 두면 한 upsert 본문에 같은 PK가 두 번 들어가고, Postgres가
+    // "ON CONFLICT DO UPDATE command cannot affect row a second time"(SQLSTATE 21000)로
+    // 청크를 통째로 거부해 갱신 전체가 실패한다. PostgREST 페이지네이션 쪽에서 정렬 불안정을
+    // 이미 다뤘으니 원천 쪽도 같은 기준으로 막는다 — 여기가 오히려 정렬 키가 더 불안정하다.
+    // 탈락 집계를 흐리지 않도록 모든 필터를 통과한 뒤에 본다 — 문제는 upsert 본문의 중복이다.
+    if (seen.has(r.code)) { stats.dup++; continue; }
+    seen.add(r.code);
+    kept.push(r);
+  }
+  return { kept, stats };
+}
+
 export async function fetchDartFinancials(corpCode, dartKey) {
   const curYear = new Date().getFullYear();
   for (const bsnsYear of [curYear - 1, curYear - 2]) {

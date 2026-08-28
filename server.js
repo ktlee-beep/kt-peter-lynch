@@ -462,6 +462,43 @@ app.get('/api/backfill/fundamentals/status', async (req, res) => {
   res.json({ ...backfillState, dartDailyBudget, dartDailyCap: DART_DAILY_CAP });
 });
 
+// ── 유니버스 갱신 트리거 (마스터/SCAN_SECRET) ─────────────────────
+// 월 1회. 네이버 일괄 조회 4회 + upsert 3회 + 비활성화라 보통 20초 안에 끝나지만,
+// Render 무료 티어의 요청 타임아웃에 걸리면 실행 도중 끊긴 채로 남는다. 백필과 같은 방식으로
+// 비동기 실행 후 /api/universe/status로 결과를 조회한다.
+let universeState = { running: false, startedAt: null, finishedAt: null, last: null };
+
+app.post('/api/universe/refresh', async (req, res) => {
+  if (!isScanSecretOrMaster(req)) return res.status(403).json({ error: 'Forbidden' });
+  if (universeState.running) {
+    return res.status(409).json({ error: '유니버스 갱신이 이미 실행 중', startedAt: universeState.startedAt });
+  }
+
+  // 백필 트리거와 같은 순서 — import 실패 시 running=true로 남지 않게 먼저 로드한다.
+  // 입력 클램프는 cron.js가 갖는다 — 범위가 유니버스 로직의 일부라 그쪽에서 단위 검증된다.
+  let refreshUniverse, normalizeUniverseOpts;
+  try {
+    ({ refreshUniverse, normalizeUniverseOpts } = await import('./cron.js'));
+  } catch (e) {
+    return res.status(500).json({ error: `유니버스 모듈 로드 실패: ${e.message}` });
+  }
+
+  const opts = normalizeUniverseOpts(req.body);
+
+  universeState = { running: true, startedAt: new Date().toISOString(), finishedAt: null, last: null };
+  const settle = (last) => {
+    universeState = { ...universeState, running: false, finishedAt: new Date().toISOString(), last };
+  };
+  refreshUniverse(opts).then(settle).catch(e => settle({ ok: false, error: e.message }));
+
+  res.json({ ok: true, message: '유니버스 갱신 시작됨 (비동기)', opts });
+});
+
+app.get('/api/universe/status', async (req, res) => {
+  if (!isScanSecretOrMaster(req)) return res.status(403).json({ error: 'Forbidden' });
+  res.json(universeState);
+});
+
 // 이하 모든 /api/* 는 인증 필요
 app.use('/api', authMiddleware);
 

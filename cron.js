@@ -3,8 +3,8 @@
 // 6시간마다 — 매크로 갱신
 import cron from 'node-cron';
 import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermoreScore, calcPiotroski, calcGrowthStreak, hasNoLoss, calcTTM } from './analysis.js';
-import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief, loadCorpCodeMap, upsertCorpCodes, getDartCache, setDartCache, saveUsScan, getCompanyInfoCache, setCompanyInfoCache, getMultiYearCache, setMultiYearCache, getQuarterlyCache, setQuarterlyCache, countKvPrefix, listFreshKvCodes } from './db.js';
-import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures, CORP_MAP, fetchCorpCodeMap, fetchDartFinancials, US_UNIVERSE, fetchUsStockDaily, fetchDartCompanyInfo, fetchDartMultiYear, fetchDartQuarterly, hasYearData } from './data.js';
+import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief, loadCorpCodeMap, upsertCorpCodes, getDartCache, setDartCache, saveUsScan, getCompanyInfoCache, setCompanyInfoCache, getMultiYearCache, setMultiYearCache, getQuarterlyCache, setQuarterlyCache, countKvPrefix, listFreshKvCodes, listAllStocks, upsertStocks, deactivateStocks, saveUniverseMeta } from './db.js';
+import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures, CORP_MAP, fetchCorpCodeMap, fetchDartFinancials, US_UNIVERSE, fetchUsStockDaily, fetchDartCompanyInfo, fetchDartMultiYear, fetchDartQuarterly, hasYearData, fetchNaverMarketSum, filterUniverse } from './data.js';
 
 const FUNDAMENTALS_TTL_MS = 24 * 60 * 60 * 1000; // PER/PBR/ROE는 주가 연동 — 1거래일 이상 지나면 재수집
 
@@ -14,6 +14,138 @@ function getScanUniverse() {
     ...KS_UNIVERSE.map(code => ({ code, yahoo_suffix: 'KS' })),
     ...KQ_UNIVERSE.map(code => ({ code, yahoo_suffix: 'KQ' })),
   ];
+}
+
+// ── 유니버스 갱신 (월 1회) ───────────────────────────────────────
+// 하드코딩 199종목(KS 153 + KQ 46)을 시장 전체에서 걸러낸 목록으로 대체한다.
+// 원천은 네이버 일괄 시세 1종뿐이다. 계획서의 폴백(DART corpCode.xml)은 채택하지 않았다 —
+// corpCode.xml에는 시장구분도 시가총액도 없어서 아래 필터를 아예 적용할 수 없고, 보충하려면
+// 종목별 조회 3,900회가 필요한데 그 경로 역시 네이버라 원천이 죽으면 같이 죽는다.
+// 대신 "실패하면 아무것도 바꾸지 않는다"를 폴백으로 삼는다. 기존 kt_stocks가 그대로 남고,
+// 그마저 비어 있으면 getScanUniverse()의 하드코딩 199종목이 여전히 바닥을 받친다.
+const UNIVERSE_MIN_SANE = 500;        // 정상치는 1,100종목대(2026-08-28 실측)
+const UNIVERSE_MIN_PER_MARKET = 100;  // 실측 KOSPI 441 / KOSDAQ 695 (2026-08-28)
+const DEPART_RATIO = 0.3;
+
+// 트리거 입력(JSON 본문) 정규화. HTTP 핸들러가 아니라 여기 두는 이유는 두 가지다 —
+// 클램프 범위가 유니버스 로직의 일부이고, 여기 있어야 자격증명·서버 기동 없이 검증된다.
+export function normalizeUniverseOpts(body = {}) {
+  // Number(null)·Number('')·Number([])·Number(false)는 전부 0이고 Number.isFinite를 통과한다.
+  // 그대로 클램프하면 {"minCapEok":null}이 기본값 1000이 아니라 하한 100이 되어 유니버스가
+  // 2,000종목대로 부푼다. 더 나쁜 건 그 다음이다 — 팽창에는 상한 가드가 없고 축소에만 있어서,
+  // 다음 달 기본값 실행이 이탈 상한에 걸려 force 없이는 매달 실패한다. 잘못된 수동 실행
+  // 한 번이 정기 작업을 영구 정지시키지 않도록 숫자·숫자문자열만 받는다.
+  const num = (v, def, min, max) => {
+    if (typeof v !== 'number' && !(typeof v === 'string' && v.trim() !== '')) return def;
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : def;
+  };
+  return {
+    // 시총 하한을 0으로 두면 껍데기까지 들어와 백필 예산이 터진다 — 하한의 하한을 100억으로 강제.
+    minCapEok:   num(body?.minCapEok, 1000, 100, 100000),
+    minValueEok: num(body?.minValueEok, 3, 0, 1000),
+    dryRun: body?.dryRun === true || body?.dryRun === 'true',
+    force:  body?.force  === true || body?.force  === 'true',
+  };
+}
+
+export async function refreshUniverse({ minCapEok = 1000, minValueEok = 3, dryRun = false, force = false } = {}) {
+  const t0 = Date.now();
+  let rows;
+  try {
+    rows = await fetchNaverMarketSum();
+  } catch (e) {
+    console.error('[Universe] 원천 조회 실패 — 기존 유니버스 유지:', e.message);
+    return { ok: false, error: `원천 조회 실패: ${e.message}`, changed: false };
+  }
+
+  const { kept, stats } = filterUniverse(rows, { minCapEok, minValueEok });
+  console.log(`[Universe] 원본 ${stats.total} → 통과 ${kept.length}`, JSON.stringify(stats));
+
+  // 원천이 조용히 반쪽만 주면 나머지가 전부 "유니버스 이탈"로 보여 is_active가 통째로 꺼진다.
+  // 그 상태로 일일 스캔이 돌면 분석 대상이 사라지고, 되돌리려면 다음 달까지 기다려야 한다.
+  if (kept.length < UNIVERSE_MIN_SANE) {
+    return { ok: false, error: `유니버스 ${kept.length}종목 — 최소 ${UNIVERSE_MIN_SANE} 미만이라 반영 중단`, changed: false, stats };
+  }
+
+  // 합계 하한만으로는 한 시장이 통째로 사라지는 사고를 못 잡는다. 실측 구성(KOSPI 441 +
+  // KOSDAQ 695)에서 코스피가 전멸해도 남는 695종목은 위 검사를 여유롭게 통과한다.
+  const byMarket = { KOSPI: 0, KOSDAQ: 0 };
+  for (const r of kept) byMarket[r.market] = (byMarket[r.market] || 0) + 1;
+  const thinMarket = Object.entries(byMarket).filter(([, n]) => n < UNIVERSE_MIN_PER_MARKET);
+  if (thinMarket.length) {
+    return { ok: false, changed: false, stats, byMarket,
+      error: `${thinMarket.map(([m, n]) => `${m} ${n}종목`).join(', ')} — 시장별 최소 ${UNIVERSE_MIN_PER_MARKET} 미만이라 반영 중단` };
+  }
+
+  // ETF/ETN이 한 건도 안 걸러졌다면 걸러진 게 아니라 플래그 표현이 바뀐 것이다.
+  // 이들 종목코드는 대부분 끝자리가 0이라 보통주 정규식이 백스톱이 되지 못한다 — 그대로
+  // 반영하면 ETF가 유니버스에 섞여 DART 백필 예산이 새고 스캐너가 ETF를 종목으로 분석한다.
+  // 실측 4,305행 중 1,536건이 ETF/ETN이었다. 0은 정상 범위가 아니다.
+  if (stats.etfEtn === 0) {
+    return { ok: false, changed: false, stats,
+      error: 'ETF/ETN 탈락 0건 — 원천 플래그 형식 변경 의심, 반영 중단' };
+  }
+
+  let prev;
+  try {
+    prev = await listAllStocks();
+  } catch (e) {
+    return { ok: false, error: `기존 종목 조회 실패: ${e.message}`, changed: false, stats };
+  }
+  const nowSet = new Set(kept.map(r => r.code));
+  const prevActiveRows = prev.filter(p => p.is_active === 1);
+  const prevActive = prevActiveRows.length;
+  const departed = prevActiveRows.filter(p => !nowSet.has(p.code)).map(p => p.code);
+
+  // 이탈이 비정상적으로 많으면 원천이 다른 집합을 준 것으로 본다. 상장폐지·시총 미달로
+  // 한 달에 수백 종목이 한꺼번에 빠지는 일은 없다. 의도한 대량 정리는 force로 명시한다.
+  // 전체와 시장별을 함께 본다 — 한 시장의 대량 소실은 전체 비율로 희석돼(예: 300/1,136 = 26%)
+  // 합계만 보면 통과한다. 활성 이력이 없는 시장은 건너뛴다(하드코딩 유니버스에서 넘어오는 첫 실행).
+  const overLimit = [];
+  const checkDepart = (label, departedN, activeN) => {
+    const limit = Math.max(100, Math.floor(activeN * DEPART_RATIO));
+    if (departedN > limit) overLimit.push(`${label} 이탈 ${departedN} > 상한 ${limit}(활성 ${activeN}의 ${DEPART_RATIO * 100}%)`);
+  };
+  checkDepart('전체', departed.length, prevActive);
+  for (const mk of Object.keys(byMarket)) {
+    const active = prevActiveRows.filter(p => p.market === mk);
+    if (!active.length) continue;
+    checkDepart(mk, active.filter(p => !nowSet.has(p.code)).length, active.length);
+  }
+  if (!force && overLimit.length) {
+    return { ok: false, changed: false, stats, byMarket,
+      error: `${overLimit.join(' / ')} — force 없이는 반영하지 않음` };
+  }
+
+  const toUpsert = kept.map(r => ({
+    code: r.code, name: r.name, market: r.market, is_active: 1,
+    yahoo_suffix: r.market === 'KOSPI' ? 'KS' : 'KQ',
+  }));
+
+  if (dryRun) {
+    return { ok: true, dryRun: true, changed: false, universe: kept.length, prevActive, byMarket,
+      departed: departed.length, stats, thresholds: { minCapEok, minValueEok },
+      sample: kept.slice(0, 5).map(r => `${r.code} ${r.name} ${Math.round(r.marketCap)}억`) };
+  }
+
+  // 순서가 중요하다. kt_daily_analysis.code가 kt_stocks를 참조하므로 종목 마스터가 먼저다.
+  const upserted = await upsertStocks(toUpsert);
+  const deactivated = await deactivateStocks(departed);
+
+  // 시총·거래대금은 kt_stocks에 컬럼이 없다(운영 DDL 권한 없음). Phase 4의 RS 백분위와
+  // 유동성 재필터가 재조회 없이 쓰도록 KV 블롭에 같이 남긴다.
+  await saveUniverseMeta({
+    updatedAt: new Date().toISOString(),
+    thresholds: { minCapEok, minValueEok },
+    stats,
+    stocks: kept.map(r => ({ c: r.code, m: Math.round(r.marketCap), v: Math.round(r.tradingValue) })),
+  });
+
+  const out = { ok: true, changed: true, universe: kept.length, prevActive, byMarket, upserted, deactivated,
+    stats, thresholds: { minCapEok, minValueEok }, elapsedMs: Date.now() - t0 };
+  console.log('[Universe] 갱신 완료', JSON.stringify(out));
+  return out;
 }
 
 // ── 박세익 축 프로필 (연속성장·무적자·TTM) ──────────────────────
@@ -350,7 +482,13 @@ export async function runFundamentalsBackfill({ limit = 0, maxDartCalls = 15000,
   if (full) {
     codes = Object.keys(corpMap);
   } else {
-    const active = await getActiveStocks().catch(() => []);
+    // 폴백은 조용하면 안 된다. 유니버스 확장 후 낙차가 1,136 → 199라, DB 일시 장애로
+    // 대상이 83% 줄어도 로그가 없으면 "그냥 그날 적게 돌았다"로 지나간다.
+    const active = await getActiveStocks().catch(e => {
+      console.error('[Backfill] kt_stocks 조회 실패 — 하드코딩 유니버스로 폴백:', e.message);
+      return [];
+    });
+    if (!active.length) console.warn('[Backfill] 활성 종목 0건 — 하드코딩 유니버스 사용');
     codes = (active.length ? active : getScanUniverse()).map(s => s.code);
   }
 
@@ -426,10 +564,14 @@ export async function runDailyScan() {
   let stocks;
   try {
     stocks = await getActiveStocks();
-  } catch {
+  } catch (e) {
+    console.error('[Cron] kt_stocks 조회 실패 — 하드코딩 유니버스로 폴백:', e.message);
     stocks = [];
   }
-  if (!stocks.length) stocks = getScanUniverse();
+  if (!stocks.length) {
+    console.warn('[Cron] 활성 종목 0건 — 하드코딩 유니버스 사용');
+    stocks = getScanUniverse();
+  }
 
   // corp_code 매핑 로드 — 비어 있으면 DART에서 1회 부트스트랩 (A: 전체 상장사 매핑)
   let corpMap = await loadCorpCodeMap().catch(() => ({}));
