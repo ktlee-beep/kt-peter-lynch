@@ -2,9 +2,9 @@
 // 매일 17:00 KST (UTC 08:00) — 전체 종목 스캔
 // 6시간마다 — 매크로 갱신
 import cron from 'node-cron';
-import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermoreScore, calcPiotroski, calcGrowthStreak, hasNoLoss, calcTTM, calcParkScore, matrixZone, median } from './analysis.js';
-import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief, loadCorpCodeMap, upsertCorpCodes, getDartCache, setDartCache, saveUsScan, getCompanyInfoCache, setCompanyInfoCache, getMultiYearCache, setMultiYearCache, getQuarterlyCache, setQuarterlyCache, countKvPrefix, listFreshKvCodes, listAllStocks, upsertStocks, deactivateStocks, saveUniverseMeta, savePerMedian, getPerMedian } from './db.js';
-import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures, CORP_MAP, fetchCorpCodeMap, fetchDartFinancials, US_UNIVERSE, fetchUsStockDaily, fetchDartCompanyInfo, fetchDartMultiYear, fetchDartQuarterly, hasYearData, fetchNaverMarketSum, filterUniverse } from './data.js';
+import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermoreScore, calcPiotroski, calcGrowthStreak, hasNoLoss, calcTTM, calcParkScore, matrixZone, median, calcRsRatios, rsPercentile, buildRsBreakpoints, calcSupplyTrend, seonjeomTriggers, SEONJEOM_PARK_MIN } from './analysis.js';
+import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief, loadCorpCodeMap, upsertCorpCodes, getDartCache, setDartCache, saveUsScan, getCompanyInfoCache, setCompanyInfoCache, setMultiYearCache, setQuarterlyCache, getGrowthCaches, countKvPrefix, listFreshKvCodes, listAllStocks, upsertStocks, deactivateStocks, saveUniverseMeta, savePerMedian, getPerMedian, getIndexCloses, mergeIndexCloses, saveRsDist, getRsDist, getSupplyCache, setSupplyCache, saveSeonjeomAlerts } from './db.js';
+import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures, CORP_MAP, fetchCorpCodeMap, fetchDartFinancials, US_UNIVERSE, fetchUsStockDaily, fetchDartCompanyInfo, fetchDartMultiYear, fetchDartQuarterly, hasYearData, fetchNaverMarketSum, filterUniverse, fetchIndexOHLCV, fetchNaverInvestor, KRX_INDICES } from './data.js';
 
 const FUNDAMENTALS_TTL_MS = 24 * 60 * 60 * 1000; // PER/PBR/ROE는 주가 연동 — 1거래일 이상 지나면 재수집
 
@@ -209,6 +209,38 @@ const PER_MEDIAN_MIN_SAMPLE = 100;   // 표본이 이보다 적으면 그건 "�
 const PER_MEDIAN_MAX_AGE_DAYS = 14;  // 그 이상 묵은 값은 다른 국면의 숫자다 — 없느니만 못하다
 const PER_SANE_MAX = 1000;           // 적자 직전 기업의 PER 수천 배를 표본에서 제외
 
+// ── Phase 4-1: RS 컨텍스트 ────────────────────────────────────────
+// 종목은 자기 시장 지수와 비교한다. KOSDAQ 종목을 KOSPI로 재면 2026년처럼 두 지수가
+// 갈라진 국면에서 코스닥 전체가 통째로 "시장 대비 약함"으로 찍힌다 — 종목 고유의
+// 상대강도를 재려는 지표에서 시장 효과가 그대로 남는 셈이다.
+const RS_INDEX_BY_SUFFIX = { KS: 'kospi', KQ: 'kosdaq' };
+const RS_MIN_SAMPLE = 200;           // 이보다 적은 표본의 분위점은 "유니버스 백분위"가 아니다
+
+// 지수 시계열을 누적 병합해 읽어온다. 야후는 6개월치만 주므로 매일 덮어쓰면 RS120이
+// 경계에서 끊긴다(mergeIndexCloses 주석 참조). 야후가 죽어도 누적분으로 계속 산출한다 —
+// 하루치 결측은 indexCloseOnOrBefore의 tolerance가 흡수한다.
+async function loadRsContext() {
+  const series = {};
+  for (const [suffix, id] of Object.entries(RS_INDEX_BY_SUFFIX)) {
+    const meta = KRX_INDICES.find(x => x.id === id);
+    let rows = null;
+    try {
+      const fresh = await fetchIndexOHLCV(meta.yahooSymbol, '6mo');
+      rows = await mergeIndexCloses(id, fresh.map(r => ({ d: r.date, c: r.close })));
+    } catch (e) {
+      console.error(`[Cron] 지수 ${id} 갱신 실패 — 누적분으로 진행:`, e.message);
+      rows = await getIndexCloses(id).catch(() => []);
+    }
+    series[suffix] = rows || [];
+  }
+  // 백분위 기준은 직전 스캔의 분포다(db.js saveRsDist 주석). 없으면 rsPercentile이 null을
+  // 돌려주고 선점 트리거의 RS 조건만 빠진다 — 나머지 두 조건은 그대로 돈다.
+  const dist = await getRsDist().catch(() => null);
+  const breaks = Array.isArray(dist?.breaks) && dist.breaks.length === 101 ? dist.breaks : null;
+  console.log(`[Cron] RS 지수 KOSPI ${series.KS?.length ?? 0}봉 / KOSDAQ ${series.KQ?.length ?? 0}봉, 백분위 기준 ${breaks ? `${dist.n}종목(${dist.date})` : '없음'}`);
+  return { series, breaks };
+}
+
 // 저장된 중앙값을 쓸 수 있는지 판정. 못 쓰면 null — 호출부는 저평가 가점을 건너뛴다.
 export function pickPerMedian(meta, nowMs = Date.now()) {
   if (!meta || !Number.isFinite(meta.median) || meta.median <= 0) return null;
@@ -319,11 +351,8 @@ async function analyzeStockLean(code, corpResolver = null, dartKey = '', ctx = {
     // 일일 스캔은 매일 전 종목을 도는데 종목당 최대 12회(개황 1 + 연간 5 + 분기 6)를 호출하면
     // 그것만으로 DART 일일 쿼터 20,000회를 넘긴다. 수집은 월 1회 runFundamentalsBackfill이
     // 전담하고 스캔은 적재된 값을 읽기만 한다. 미적재 종목은 growth=null로 지나간다.
-    const [company, multiYear, quarterly] = await Promise.all([
-      getCompanyInfoCache(code).catch(() => undefined),
-      getMultiYearCache(code).catch(() => undefined),
-      getQuarterlyCache(code).catch(() => undefined),
-    ]);
+    // 3종을 .in() 한 번으로 읽는다 — 종목당 왕복 3회가 1회가 된다(db.js getGrowthCaches 주석 참조).
+    const { company, multiYear, quarterly } = await getGrowthCaches(code);
     const growth = buildGrowthProfile(multiYear, quarterly);
 
     const { pScore } = calcLynchScore(
@@ -337,6 +366,16 @@ async function analyzeStockLean(code, corpResolver = null, dartKey = '', ctx = {
     // 박세익 축 스코어와 2축 매트릭스. 리버모어 점수가 나온 뒤라야 존을 판정할 수 있다.
     const park = calcParkScore(growth, { pctFrom52wHigh, w52Partial }, fundamentals, { perMedian: ctx?.perMedian ?? null });
     const zone = matrixZone(park.score, lScore, park.gated);
+
+    // RS(시장 대비 상대강도) — Phase 4-1. 지수 시계열은 스캔 시작 시 한 번 읽어 ctx로 넘어온다.
+    // 종목마다 야후를 때리면 3,900회가 되고, 그건 이 스캔에서 가장 비싼 항목이 된다.
+    const rsRatios = calcRsRatios(closes, items.map(i => i.d), ctx?.indexSeries ?? null);
+    const rs = {
+      rs20: rsRatios.rs20, rs60: rsRatios.rs60, rs120: rsRatios.rs120,
+      score: rsRatios.rsScore,
+      pct: rsPercentile(rsRatios.rsScore, ctx?.rsBreaks ?? null),
+      partial: rsRatios.partial,
+    };
 
     return {
       code, close: cur, changeRate, volRatio, rsi: rsiVal, source: 'naver',
@@ -353,6 +392,7 @@ async function analyzeStockLean(code, corpResolver = null, dartKey = '', ctx = {
       growth,       // 박세익 축: 연속성장 스트릭·무적자·TTM
       park,         // 박세익 스코어 { score, grade, gated, reasons }
       matrixZone: zone,  // SEONJEOM / BREAKOUT / STORY_WARN / NEUTRAL / EXCLUDED / NO_DATA
+      rs,           // 시장 대비 상대강도 { rs20, rs60, rs120, score, pct, partial }
       quarterly,    // 최근 분기 원본 (누적·YoY)
       induty: company?.indutyCode ?? null,  // 표준산업분류 — 업종 상대비교/섹터 필터용
       market: company?.market ?? null,
@@ -618,6 +658,13 @@ export async function runDailyScan() {
   const perMedian = pickPerMedian(await getPerMedian().catch(() => null));
   console.log(`[Cron] PER 중앙값 기준: ${perMedian ?? '없음 (저평가 가점 제외)'}`);
 
+  // RS 지수 시계열 + 직전 스캔 백분위 기준. 실패해도 스캔은 계속한다 — RS는 부가 지표라
+  // 여기서 던지면 그날 전 종목 분석이 통째로 날아간다.
+  const rsCtx = await loadRsContext().catch(e => {
+    console.error('[Cron] RS 컨텍스트 로드 실패 — RS 없이 진행:', e.message);
+    return { series: {}, breaks: null };
+  });
+
   const batchId = `${today}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     await createScanBatch(batchId, stocks.length);
@@ -626,12 +673,19 @@ export async function runDailyScan() {
   const CHUNK_SIZE = 30;
   let totalProcessed = 0, totalFailed = 0, totalBuy = 0;
   const perSample = [];
+  const rsSample = [];
   const zoneTally = { SEONJEOM: 0, BREAKOUT: 0, STORY_WARN: 0, NEUTRAL: 0, EXCLUDED: 0, NO_DATA: 0 };
   const gateTally = { NO_DATA: 0, SHORT_HISTORY: 0, LOSS_3Y: 0 };
 
   for (let i = 0; i < stocks.length; i += CHUNK_SIZE) {
     const chunk = stocks.slice(i, i + CHUNK_SIZE);
-    const results = await Promise.allSettled(chunk.map(({ code }) => analyzeStockLean(code, corpResolver, dartKey, { perMedian })));
+    const results = await Promise.allSettled(chunk.map((s) => analyzeStockLean(s.code, corpResolver, dartKey, {
+      perMedian,
+      // 지수 시계열이 없으면 undefined가 넘어가고 calcRsRatios가 전부 null을 돌려준다 —
+      // 알 수 없는 지수로 대신 재느니 RS를 비우는 쪽이 맞다.
+      indexSeries: rsCtx.series[s.yahoo_suffix],
+      rsBreaks: rsCtx.breaks,
+    })));
 
     const rows = [];
     let chunkBuy = 0, chunkFail = 0;
@@ -647,6 +701,9 @@ export async function runDailyScan() {
       // 중앙값이 극단값에 강하다고 해서 의미 없는 값을 표본에 넣을 이유는 없다.
       const perVal = Number(a.fundamentals?.per);
       if (Number.isFinite(perVal) && perVal > 0 && perVal < PER_SANE_MAX) perSample.push(perVal);
+      // 내일 쓸 RS 분포 표본. partial(상장 6개월 미만 등)은 rs20만으로 계산된 값이라
+      // 120일까지 다 채운 종목과 같은 분포에 넣으면 기준선이 단기 변동에 끌린다.
+      if (Number.isFinite(a.rs?.score) && !a.rs.partial) rsSample.push(a.rs.score);
       // 존·게이트 분포는 스캔 로그에만 남긴다. NO_DATA/SHORT_HISTORY가 급증하면 백필이
       // 밀린 것이고, 그건 조용히 진행되면 "선점 후보가 없는 날"로 오독된다.
       zoneTally[a.matrixZone] = (zoneTally[a.matrixZone] ?? 0) + 1;
@@ -702,6 +759,18 @@ export async function runDailyScan() {
       .catch(e => console.error('[Cron] PER 중앙값 저장 실패:', e.message));
   } else {
     console.warn(`[Cron] PER 표본 ${perSample.length}건 — 중앙값 갱신 생략 (최소 ${PER_MEDIAN_MIN_SAMPLE})`);
+  }
+
+  // 다음 스캔이 쓸 RS 백분위 기준. 생략 조건은 PER 중앙값과 같은 이유다 — 폴백 유니버스의
+  // 대형주 편향 분포로 덮어쓰면 이후 전 종목의 RS 백분위가 대형주 기준으로 매겨진다.
+  const rsBreaksNew = buildRsBreakpoints(rsSample);
+  if (fallbackUniverse) {
+    console.warn(`[Cron] 폴백 유니버스 스캔 — RS 분포 갱신 생략 (표본 ${rsSample.length}건)`);
+  } else if (rsBreaksNew && rsSample.length >= RS_MIN_SAMPLE) {
+    await saveRsDist({ breaks: rsBreaksNew, n: rsSample.length, date: today, at: new Date().toISOString() })
+      .catch(e => console.error('[Cron] RS 분포 저장 실패:', e.message));
+  } else {
+    console.warn(`[Cron] RS 표본 ${rsSample.length}건 — 분포 갱신 생략 (최소 ${RS_MIN_SAMPLE})`);
   }
 
   console.log(`[Cron] 스캔 완료 — 처리: ${totalProcessed}, 실패: ${totalFailed}, BUY: ${totalBuy}`);
@@ -877,12 +946,140 @@ async function evaluateAlertSettings() {
   }
 }
 
+// ── Phase 4-2: 수급 수집 ─────────────────────────────────────────
+// 스캔 안에 넣지 않는다. 전 종목이면 네이버 호출이 3,900회 늘어 스캔 시간이 대략 두 배가
+// 되는데, 수급은 스캔 결과를 즉시 바꾸지 않으므로 그 비용을 스캔에 물릴 이유가 없다.
+// 스캔이 끝난 뒤 별도 예산으로 돈다.
+//
+// 대상은 박세익 축을 통과한 종목(parkScore >= 60)뿐이다. 선점 트리거의 게이트가 어차피
+// 그 조건이라 나머지 종목의 수급은 지금 쓰이지 않는다 — 전 종목 수집은 하루 3,900회를
+// 쓰고 그중 95%를 버리는 일이 된다. 게이트가 넓어지면 여기 필터만 풀면 된다.
+const SUPPLY_MAX_FETCH = 400;      // 1.2초 간격 × 400 = 약 8분. Render 무료 티어에서 안전한 상한
+const SUPPLY_DELAY_MS = 1200;
+const SUPPLY_TTL_DAYS = 3;         // 주말·연휴에 같은 값을 다시 받아오지 않을 만큼만
+
+export async function runSupplyCollect({ maxFetch = SUPPLY_MAX_FETCH } = {}) {
+  console.log('[Cron] 수급 수집 시작');
+  const today = new Date().toISOString().slice(0, 10);
+  try {
+    const { data, error } = await getSupabase()
+      .from('kt_daily_analysis')
+      .select('code, analysis_json')
+      .eq('analysis_date', today)
+      .limit(5000);
+    if (error) throw new Error(error.message);
+    if (!data?.length) { console.warn('[Cron] 오늘 분석 결과 없음 — 수급 수집 생략'); return { fetched: 0, skipped: 0 }; }
+
+    // 박세익 점수 내림차순 — 예산이 모자라면 후보성이 높은 종목부터 채운다.
+    const targets = [];
+    for (const row of data) {
+      let a;
+      try { a = typeof row.analysis_json === 'string' ? JSON.parse(row.analysis_json) : row.analysis_json; }
+      catch { continue; }
+      const score = Number(a?.park?.score);
+      if (Number.isFinite(score) && score >= SEONJEOM_PARK_MIN) targets.push({ code: row.code, score });
+    }
+    targets.sort((a, b) => b.score - a.score);
+    console.log(`[Cron] 수급 대상 ${targets.length}종목 (박세익 ${SEONJEOM_PARK_MIN}점 이상), 예산 ${maxFetch}회`);
+
+    let fetched = 0, skipped = 0, failed = 0;
+    for (const t of targets) {
+      if (fetched >= maxFetch) {
+        // 상한에 걸려 남긴 종목 수를 반드시 남긴다. 조용히 자르면 "수급 신호가 없는 날"과
+        // "예산이 모자라 못 본 날"이 로그에서 구분되지 않는다.
+        console.warn(`[Cron] 수급 예산 소진 — ${targets.length - fetched - skipped}종목 미수집`);
+        break;
+      }
+      const cached = await getSupplyCache(t.code, SUPPLY_TTL_DAYS).catch(() => undefined);
+      if (cached !== undefined) { skipped++; continue; }
+      const rows = await fetchNaverInvestor(t.code).catch(() => null);
+      if (rows?.length) { await setSupplyCache(t.code, rows).catch(() => {}); fetched++; }
+      else failed++;
+      await new Promise(r => setTimeout(r, SUPPLY_DELAY_MS));
+    }
+    console.log(`[Cron] 수급 수집 완료 — 신규 ${fetched}, 캐시 ${skipped}, 실패 ${failed}`);
+    return { fetched, skipped, failed };
+  } catch (e) {
+    console.error('[Cron] 수급 수집 오류:', e.message);
+    return { fetched: 0, skipped: 0, error: e.message };
+  }
+}
+
+// ── Phase 4-3: 선점 트리거 평가 ──────────────────────────────────
+// RS 백분위의 "상승 전환"은 오늘 값만으로는 알 수 없으므로 어제 저장분과 비교한다.
+// analyzeStockLean 안에서 종목마다 전일 행을 읽으면 3,900회 왕복이 되니, 스캔이 끝난 뒤
+// 이틀치를 한 번에 읽어 여기서 판정한다(evaluateAlertSettings와 같은 방식).
+export async function evaluateSeonjeomTriggers() {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const from = new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10);
+    const { data, error } = await getSupabase()
+      .from('kt_daily_analysis')
+      .select('code, analysis_date, change_rate, vol_ratio, analysis_json')
+      .gte('analysis_date', from)
+      .order('analysis_date', { ascending: false })
+      .limit(20000);
+    if (error) throw new Error(error.message);
+    if (!data?.length) { console.warn('[Cron] 선점 평가 — 분석 데이터 없음'); return []; }
+
+    // code별로 최신 2개(오늘·직전 영업일). 주말·휴장으로 날짜가 건너뛰므로 고정 하루 전이
+    // 아니라 "존재하는 직전 행"을 쓴다.
+    const byCode = new Map();
+    for (const r of data) {
+      const arr = byCode.get(r.code) ?? [];
+      if (arr.length < 2) { arr.push(r); byCode.set(r.code, arr); }
+    }
+
+    const parse = (r) => {
+      try { return typeof r.analysis_json === 'string' ? JSON.parse(r.analysis_json) : r.analysis_json; }
+      catch { return null; }
+    };
+
+    const fired = [];
+    for (const [code, [cur, prev]] of byCode) {
+      if (cur.analysis_date !== today) continue;   // 오늘 스캔이 안 된 종목은 판정하지 않는다
+      const a = parse(cur);
+      if (!Number.isFinite(Number(a?.park?.score)) || Number(a.park.score) < SEONJEOM_PARK_MIN) continue;
+
+      const supplyRows = await getSupplyCache(code, SUPPLY_TTL_DAYS).catch(() => undefined);
+      const supply = supplyRows ? calcSupplyTrend(supplyRows) : null;
+      const t = seonjeomTriggers({
+        parkScore: a.park.score,
+        rsPct: a.rs?.pct ?? null,
+        rsPctPrev: prev ? (parse(prev)?.rs?.pct ?? null) : null,
+        supply,
+        volRatio: cur.vol_ratio,
+        changeRate: cur.change_rate,
+      });
+      if (t.fired) {
+        fired.push({
+          code, parkScore: a.park.score, zone: a.matrixZone,
+          rsPct: a.rs?.pct ?? null, hits: t.hits, reasons: t.reasons,
+        });
+      }
+    }
+
+    fired.sort((x, y) => y.parkScore - x.parkScore);
+    await saveSeonjeomAlerts({ date: today, count: fired.length, items: fired, at: new Date().toISOString() })
+      .catch(e => console.error('[Cron] 선점 알림 저장 실패:', e.message));
+    console.log(`[Cron] 선점 트리거 ${fired.length}건${fired.length ? ': ' + fired.slice(0, 10).map(f => `${f.code}(${f.hits.join('+')})`).join(', ') : ''}`);
+    return fired;
+  } catch (e) {
+    console.error('[Cron] 선점 평가 오류:', e.message);
+    return [];
+  }
+}
+
 // ── cron 등록 ────────────────────────────────────────────────────
 export function startCron() {
   // 매 영업일 20:00 KST = UTC 11:00
   cron.schedule('0 11 * * 1-5', async () => {
     await runDailyScan().catch(e => console.error('[Cron] 스캔 오류:', e));
     await evaluateAlertSettings().catch(e => console.error('[Cron] 알림 평가 오류:', e));
+    // 수급 → 선점 순서를 지킨다. 선점 트리거의 수급 조건이 방금 채운 캐시를 읽으므로
+    // 순서가 뒤집히면 첫날은 수급 조건이 통째로 빠진 채 판정된다.
+    await runSupplyCollect().catch(e => console.error('[Cron] 수급 수집 오류:', e));
+    await evaluateSeonjeomTriggers().catch(e => console.error('[Cron] 선점 평가 오류:', e));
   }, { timezone: 'UTC' });
 
   // 6시간마다 매크로 갱신

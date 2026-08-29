@@ -301,25 +301,63 @@ export async function deleteEmailVerification(email) {
   await sb.from('email_verifications').delete().eq('email', email.toLowerCase());
 }
 
-// PostgREST 전체 페이지 순회 공용 루틴.
+// 페이지 단위 재시도 간격(ms). 이게 없으면 3,900종목 백필 도중 페이지 한 장이 실패하는
+// 것만으로 이미 받아둔 수천 행을 버리고 처음부터 다시 돈다.
+//
+// 한 번만 재시도한다. postgrest-js 2.105.4가 GET에 대해 이미 3회(1s/2s/4s) 자동 재시도를
+// 하기 때문이다 — 여기서 3회를 더 걸면 페이지 한 장에 최대 16요청 30초가 되고, 백필이
+// listFreshKvCodes를 3개 병렬로 띄우므로 DB 장애 시 크론이 그만큼 매달린다(2026-08-29 실측).
+// 라이브러리 재시도가 흡수하지 못하는 구간(연속 4회 이상, 그리고 라이브러리가 대상으로
+// 삼지 않는 503·520 외 오류)만 여기서 한 번 더 받는다. 최악 예산은 페이지당 8요청·약 15초다.
+const PAGE_RETRY_DELAYS = [500];
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// PostgREST 전체 페이지 순회 공용 루틴 (keyset 방식).
 // 서버는 db-max-rows로 응답 행수를 잘라도 경고를 주지 않는다. "요청한 만큼 안 왔으면
 // 마지막 페이지"라는 판정은 상한이 PAGE보다 낮은 순간 첫 페이지에서 참이 되어 그 지점부터
 // 통째로 잘린다. 받은 만큼만 전진하고 빈 페이지에서만 멈추면 서버 상한이 얼마든 결과가 같다.
-// orderBy는 필수다 — 정렬 없는 OFFSET은 페이지 사이에 UPDATE가 끼면 행을 건너뛴다
-// (Postgres의 UPDATE는 힙 튜플을 새 위치에 쓴다). 반드시 유니크 컬럼으로 전순서를 준다.
+//
+// 전진은 OFFSET이 아니라 마지막 행의 정렬 키를 커서로 삼는다(keyset). OFFSET은 정렬이
+// 있어도 페이지 사이에 앞쪽 행이 삭제되면 뒤쪽이 앞으로 당겨져 그만큼 건너뛰고,
+// 서버가 매 페이지 offset 행을 세고 버려야 해서 뒤로 갈수록 느려진다. `code > cursor`는
+// 인덱스 탐색 한 번이고, 재시도로 같은 페이지를 다시 요청해도 결과가 같다(멱등).
+// orderBy는 필수이며 유니크 컬럼이어야 한다 — 값이 중복되면 gt가 동률 행을 통째로 건너뛴다.
+// orderBy 컬럼은 select 목록에 반드시 포함돼야 한다(커서를 뽑아야 하므로).
 // build()는 호출할 때마다 새 쿼리 빌더를 반환해야 한다 — postgrest-js 빌더는 1회용이다.
 async function fetchAllPages(build, { orderBy, page = 500, maxPages = 500, label = 'query' }) {
   const out = [];
-  for (let from = 0, p = 0; ; p++) {
+  let cursor = null;
+  for (let p = 0; ; p++) {
     if (p >= maxPages) throw new Error(`${label} 페이지 상한 ${maxPages} 초과 — 서버 반환 상한 확인 필요`);
-    const { data, error } = await build()
-      .order(orderBy, { ascending: true })
-      .range(from, from + page - 1);
-    if (error) throw new Error(error.message);
+
+    let data = null, lastErr = null;
+    for (let attempt = 0; ; attempt++) {
+      // .gt()를 .order() 앞에 붙인다. 런타임에서는 순서가 무관하지만(postgrest-js의
+      // order()는 this를 그대로 돌려주고 FilterBuilder가 TransformBuilder를 상속한다),
+      // 타입 선언상으로는 order() 반환형에 필터 메서드가 없다 — 나중에 타입체크를 켤 때
+      // 이 줄만 깨지는 일을 피한다.
+      let q = build();
+      if (cursor !== null) q = q.gt(orderBy, cursor);
+      const res = await q.order(orderBy, { ascending: true }).limit(page)
+        .then(r => r, e => ({ data: null, error: { message: e?.message || String(e) } }));
+      if (!res.error) { data = res.data; lastErr = null; break; }
+      lastErr = res.error;
+      if (attempt >= PAGE_RETRY_DELAYS.length) break;
+      await sleep(PAGE_RETRY_DELAYS[attempt]);
+    }
+    if (lastErr) {
+      throw new Error(`${label} 페이지 조회 실패(재시도 ${PAGE_RETRY_DELAYS.length}회): ${lastErr.message}`);
+    }
+
     if (!data?.length) break;
     // push(...data)로 펼치지 않는다 — 인자 개수 한도가 있어 page를 크게 넘기면 RangeError가 난다.
     for (const row of data) out.push(row);
-    from += data.length;
+    const next = data[data.length - 1]?.[orderBy];
+    // 커서를 못 뽑으면 다음 페이지가 첫 페이지와 같아져 무한 루프가 된다. 조용히 도는 대신 끊는다.
+    if (next === undefined || next === null) {
+      throw new Error(`${label}: 정렬 키 '${orderBy}'가 응답에 없어 keyset 순회 불가 — select 목록 확인`);
+    }
+    cursor = next;
   }
   return out;
 }
@@ -612,6 +650,72 @@ export async function getPerMedian() {
   try { return JSON.parse(row.raw_json); } catch { return null; }
 }
 
+// ══════════════════════════════════════════════════════════════════
+// Phase 4 — RS·수급·선점 알림 (전부 KV. 운영 DB에 DDL 권한이 없어 정식 테이블을 만들지 않는다)
+// ══════════════════════════════════════════════════════════════════
+
+// 지수 종가 시계열. 야후는 6개월치만 주므로 매일 덮어쓰면 RS120(≈6개월)이 경계에서 끊긴다.
+// 기존 시계열에 신규분을 날짜 기준으로 병합해 누적한다 — 하루 한 번 돌면 창이 계속 늘어난다.
+const INDEX_CLOSES_KEEP = 400;   // 거래일 기준 ≈19개월. RS120에 필요한 최소치의 3배 여유.
+
+export async function getIndexCloses(indexId) {
+  const row = await kvGet(`__index_closes__${indexId}`);
+  if (!row) return [];
+  try {
+    const v = JSON.parse(row.raw_json);
+    return Array.isArray(v) ? v : [];
+  } catch { return []; }
+}
+
+// incoming: [{d:'YYYYMMDD', c:number}] — 순서 무관. 반환값은 병합 후 오름차순 시계열.
+// 같은 날짜가 겹치면 새 값이 이긴다(장중 스냅샷이 종가로 확정되는 경우).
+export async function mergeIndexCloses(indexId, incoming) {
+  const byDate = new Map();
+  for (const r of await getIndexCloses(indexId)) {
+    if (r?.d != null && Number.isFinite(r?.c)) byDate.set(String(r.d), Number(r.c));
+  }
+  for (const r of (Array.isArray(incoming) ? incoming : [])) {
+    const d = String(r?.d ?? '').replace(/-/g, '');
+    const c = Number(r?.c);
+    if (/^\d{8}$/.test(d) && Number.isFinite(c) && c > 0) byDate.set(d, c);
+  }
+  const merged = [...byDate.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .slice(-INDEX_CLOSES_KEEP).map(([d, c]) => ({ d, c }));
+  await kvSet(`__index_closes__${indexId}`, merged);
+  return merged;
+}
+
+// RS 횡단면 분포(분위점 101개). 스캔이 청크 단위로 즉시 저장하는 구조라 스캔 도중에는
+// 전 종목 RS가 아직 모이지 않는다 — PER 중앙값과 똑같은 사정이라 같은 해법을 쓴다.
+// 직전 스캔의 분포로 오늘의 백분위를 매긴다. 하루 지연은 백분위 자체가 완만해서 무해하고,
+// 지연을 없애려면 전 종목을 메모리에 모았다가 두 번째 패스를 돌아야 하는데
+// Render 무료 티어 메모리로는 감당이 안 된다.
+export async function saveRsDist(payload) { await kvSet('__rs_dist__', payload); }
+export async function getRsDist() {
+  const row = await kvGet('__rs_dist__');
+  if (!row) return null;
+  try { return JSON.parse(row.raw_json); } catch { return null; }
+}
+
+// 종목별 투자자 순매수 원자료(네이버 25일치). 파생 지표는 저장하지 않고 매번 계산한다 —
+// 지표 정의가 바뀔 때 원자료가 남아 있어야 재계산이 되기 때문이다.
+export async function getSupplyCache(code, maxDays = 3) {
+  return kvGetFresh(`__supply__${code}`, maxDays);
+}
+export async function setSupplyCache(code, rows) {
+  if (rows == null) return;
+  await kvSet(`__supply__${code}`, rows);
+}
+
+// 선점 트리거 결과. alert_settings는 사용자·종목별 구독 테이블이라 "시장 전체에서 오늘
+// 발동한 종목"을 담을 자리가 없다. 매일 덮어쓰는 단일 블롭으로 따로 둔다.
+export async function saveSeonjeomAlerts(payload) { await kvSet('__seonjeom__', payload); }
+export async function getSeonjeomAlerts() {
+  const row = await kvGet('__seonjeom__');
+  if (!row) return null;
+  try { return JSON.parse(row.raw_json); } catch { return null; }
+}
+
 // ── DART 기업코드 매핑 (전체 상장사 code → corp_code) ─────────────
 // 단일 블롭(__corpmap__)으로 저장 — 약 3,900개, ~100KB
 export async function upsertCorpCodes(rows) {
@@ -628,13 +732,49 @@ export async function loadCorpCodeMap() {
   try { return JSON.parse(row.raw_json) || {}; } catch { return {}; }
 }
 
-// TTL 인지 KV 조회. 미스는 undefined, "조회했지만 데이터 없음"은 null로 구분한다 —
+// 손상된 행에 찍는 시각. 삭제하지 않고 updated_at만 과거로 밀어 "신선하지 않음"으로 만든다.
+const KV_STALE_STAMP = '1970-01-01T00:00:00.000Z';
+
+// raw_json이 깨진 행은 kvGetFresh에서는 미스(undefined)지만, listFreshKvCodes는
+// updated_at만 보므로 "신선"으로 집계한다. 그래서 백필은 매번 건너뛰고 읽기는 매번 실패하는
+// 영구 구멍이 된다 — TTL이 180일이면 반년간 무증상으로 남는다.
+// 읽는 쪽이 손상을 발견한 그 자리에서 신선도를 떨어뜨려 다음 백필이 대상으로 잡게 한다.
+// 행을 지우지 않는 이유는 원인 추적용 원본을 남기기 위해서다(어차피 다음 수집이 덮어쓴다).
+//
+// 진행 중인 키를 기억해 중복 발송을 막는다. 순차 읽기는 TTL 검사가 파싱보다 앞이라
+// 두 번째 읽기부터 저절로 수렴하지만, 같은 키를 동시에 읽으면(예: /api/financials 동시 요청)
+// 전부 아직 옛 updated_at을 보고 각자 PATCH를 쏜다 — 20 동시 읽기에 19회 발송을 실측했다.
+// 결과가 같은 멱등 UPDATE라 정합성 문제는 아니지만, 쓰기 횟수가 "행당 1회"가 아니라
+// "동시성만큼"이 되는 건 캐시 계층이 낼 비용이 아니다.
+const kvStaleInFlight = new Set();
+
+async function markKvStale(key) {
+  if (kvStaleInFlight.has(key)) return;
+  kvStaleInFlight.add(key);
+  try {
+    const sb = getSupabase();
+    await sb.from('kt_fundamentals_cache').update({ updated_at: KV_STALE_STAMP }).eq('code', key);
+  } finally {
+    kvStaleInFlight.delete(key);
+  }
+}
+
+// TTL 판정 + 역직렬화. 미스는 undefined, "조회했지만 데이터 없음"은 null로 구분한다 —
 // 둘을 합치면 DART에 자료가 없는 종목을 매 실행마다 다시 때리게 된다.
-async function kvGetFresh(key, maxDays) {
-  const row = await kvGet(key);
+function decodeKvRow(row, key, maxDays) {
   if (!row) return undefined;
-  if (Date.now() - new Date(row.updated_at).getTime() > maxDays * 86400000) return undefined;
-  try { return JSON.parse(row.raw_json); } catch { return undefined; }
+  const ts = new Date(row.updated_at).getTime();
+  if (!Number.isFinite(ts) || Date.now() - ts > maxDays * 86400000) return undefined;
+  try {
+    return JSON.parse(row.raw_json);
+  } catch {
+    markKvStale(key).catch(() => {});   // 자가치유는 부가작업 — 실패해도 읽기 결과를 바꾸지 않는다
+    return undefined;
+  }
+}
+
+async function kvGetFresh(key, maxDays) {
+  return decodeKvRow(await kvGet(key), key, maxDays);
 }
 
 // ── DART 재무 캐시 (분기 데이터 → 기본 90일 TTL) ──────────────────
@@ -659,7 +799,14 @@ export async function setDartCache(code, dart) {
 // null을 적재하면 TTL 동안 재시도가 막히는데, DART 일시 장애와 "정말 자료가 없는 종목"은
 // 응답만으로 구별되지 않아 장애를 최대 180일 굳혀버린다. 호출부 가드에만 의존하지 않고
 // 함수 자체에 정책을 박아 둔다.
-export async function getCompanyInfoCache(code, maxDays = 180) {
+//
+// TTL 숫자는 아래 상수 3개가 단일 출처다. 개별 getter와 getGrowthCaches가 같은 키를 서로
+// 다른 기준으로 읽으면(한쪽만 고쳤을 때) 같은 캐시가 호출 경로에 따라 신선/만료로 갈린다.
+export const COMPANY_TTL_DAYS   = 180;
+export const MULTIYEAR_TTL_DAYS = 100;
+export const QUARTERLY_TTL_DAYS = 45;
+
+export async function getCompanyInfoCache(code, maxDays = COMPANY_TTL_DAYS) {
   return kvGetFresh(`__company__${code}`, maxDays);
 }
 export async function setCompanyInfoCache(code, info) {
@@ -667,7 +814,7 @@ export async function setCompanyInfoCache(code, info) {
   await kvSet(`__company__${code}`, info);
 }
 
-export async function getMultiYearCache(code, maxDays = 100) {
+export async function getMultiYearCache(code, maxDays = MULTIYEAR_TTL_DAYS) {
   return kvGetFresh(`__multiyear__${code}`, maxDays);
 }
 export async function setMultiYearCache(code, rows) {
@@ -675,12 +822,44 @@ export async function setMultiYearCache(code, rows) {
   await kvSet(`__multiyear__${code}`, rows);
 }
 
-export async function getQuarterlyCache(code, maxDays = 45) {
+export async function getQuarterlyCache(code, maxDays = QUARTERLY_TTL_DAYS) {
   return kvGetFresh(`__quarterly__${code}`, maxDays);
 }
 export async function setQuarterlyCache(code, q) {
   if (q == null) return;
   await kvSet(`__quarterly__${code}`, q);
+}
+
+// 위 3종을 한 번에 읽는다. 셋 다 같은 테이블의 다른 키일 뿐이라 .in()으로 묶으면
+// 왕복이 3회에서 1회로 준다. 일일 스캔은 종목마다 이 셋을 읽으므로 3,900종목이면
+// 11,700회가 3,900회가 된다 — Render 무료 티어에서 스캔 시간을 좌우하는 구간이다.
+// TTL은 키마다 다르므로(위 *_TTL_DAYS 상수) 행별로 따로 판정한다.
+// 조회 실패는 예외를 던지지 않고 전부 undefined로 떨어뜨린다 — 호출부는 이미
+// "캐시 없음"을 정상 경로로 처리하고, 셋을 따로 읽던 시절에도 한 번의 DB 장애는
+// 어차피 셋 모두를 실패시켰다.
+export async function getGrowthCaches(code, opts = {}) {
+  const {
+    companyDays   = COMPANY_TTL_DAYS,
+    multiYearDays = MULTIYEAR_TTL_DAYS,
+    quarterlyDays = QUARTERLY_TTL_DAYS,
+  } = opts;
+  const kCompany = `__company__${code}`, kMulti = `__multiyear__${code}`, kQuarter = `__quarterly__${code}`;
+  let rows = [];
+  try {
+    const sb = getSupabase();
+    const { data, error } = await sb.from('kt_fundamentals_cache')
+      .select('code, raw_json, updated_at').in('code', [kCompany, kMulti, kQuarter]);
+    if (error) throw new Error(error.message);
+    rows = data || [];
+  } catch {
+    return { company: undefined, multiYear: undefined, quarterly: undefined };
+  }
+  const byKey = new Map(rows.map(r => [r.code, r]));
+  return {
+    company:   decodeKvRow(byKey.get(kCompany), kCompany, companyDays),
+    multiYear: decodeKvRow(byKey.get(kMulti),   kMulti,   multiYearDays),
+    quarterly: decodeKvRow(byKey.get(kQuarter), kQuarter, quarterlyDays),
+  };
 }
 
 // 백필 진행률 표시용 — 접두사별 적재 건수

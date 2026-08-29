@@ -23,6 +23,7 @@ import {
   calcPiotroski, runBacktest, koreanMarketFlags,
   analyzeNewsSentiment, SENTIMENT_POS, SENTIMENT_NEG,
   detectLeverageETF, calcVolumePriceDivergence, runBacktestMulti,
+  calcSupplyTrend,
 } from './analysis.js';
 import {
   CORP_MAP, fetchYahooSummary, fetchDartFinancials, fetchDartMultiYear, fetchNaverFundamentals, fetchNaverInvestor,
@@ -32,7 +33,7 @@ import {
   KRX_INDICES, YAHOO_SYMBOLS, fetchIndex, fetchYahooSymbol, fetchIndexOHLCV, fetchKospiFutures,
   KS_UNIVERSE, KQ_UNIVERSE, hasYearData,
 } from './data.js';
-import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMacroHistory, saveMacroSnapshot, validateAppUser, getAppUsers, createAppUser, deleteAppUser, updateAppUserPassword, getSupabase, getWatchlist, addToWatchlist, removeFromWatchlist, getTrades, getHoldings, addTrade, deleteTrade, getThesis, upsertThesis, listTheses, getLatestMorningBrief, getUsScan, clearDartCache, setAppConfig, getAppConfig, appUserExists, createAppUserWithHash, upsertEmailVerification, getEmailVerification, verifyEmailCode, incrementVerificationAttempts, deleteEmailVerification, loadCorpCodeMap, getMultiYearCache, setMultiYearCache, getQuarterlyCache, getCompanyInfoCache } from './db.js';
+import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMacroHistory, saveMacroSnapshot, validateAppUser, getAppUsers, createAppUser, deleteAppUser, updateAppUserPassword, getSupabase, getWatchlist, addToWatchlist, removeFromWatchlist, getTrades, getHoldings, addTrade, deleteTrade, getThesis, upsertThesis, listTheses, getLatestMorningBrief, getUsScan, clearDartCache, setAppConfig, getAppConfig, appUserExists, createAppUserWithHash, upsertEmailVerification, getEmailVerification, verifyEmailCode, incrementVerificationAttempts, deleteEmailVerification, loadCorpCodeMap, setMultiYearCache, getGrowthCaches, getSeonjeomAlerts, getSupplyCache, getRsDist } from './db.js';
 import { sendVerificationCode, isMailConfigured } from './mailer.js';
 
 const app = express();
@@ -1228,13 +1229,13 @@ function setScreenerCache(key, value) {
 app.get('/api/screener', async (req, res) => {
   const {
     per_max, pbr_max, roe_min, debt_max,
-    lynch_min, piotroski_min, park_min, zone,
+    lynch_min, piotroski_min, park_min, zone, rs_min,
     sort = 'lynch_score', page = '1', limit = '20',
     preset,
   } = req.query;
 
   // Preset → override filters
-  let filters = { per_max, pbr_max, roe_min, debt_max, lynch_min, piotroski_min, park_min, zone };
+  let filters = { per_max, pbr_max, roe_min, debt_max, lynch_min, piotroski_min, park_min, zone, rs_min };
   if (preset === 'lynch') {
     filters = { per_max: '20', pbr_max: '3', roe_min: '10', debt_max: '150', lynch_min: '50' };
   } else if (preset === 'value') {
@@ -1296,17 +1297,19 @@ app.get('/api/screener', async (req, res) => {
     const fPioMin   = pNum(filters.piotroski_min);
     const fParkMin  = pNum(filters.park_min);
     const fZone     = ZONES.includes(filters.zone) ? filters.zone : null;  // 검증은 위에서 끝났다
+    const fRsMin    = pNum(filters.rs_min);   // RS 백분위 하한(0~100)
 
     const results = [];
     let parkRows = 0;  // park 필드를 실제로 들고 있는 행 수 — 0건과 "미계측"을 구분하기 위함
     for (const r of deduped) {
-      let fund = {}, park = null, mZone = null, pctHigh = null;
+      let fund = {}, park = null, mZone = null, pctHigh = null, rs = null;
       try {
         const j = JSON.parse(r.analysis_json || '{}');
         fund = j.fundamentals || {};
         park = j.park || null;
         mZone = j.matrixZone || null;
         pctHigh = pNum(j.pctFrom52wHigh);
+        rs = j.rs || null;
       } catch {}
       if (park) parkRows++;
 
@@ -1329,6 +1332,10 @@ app.get('/api/screener', async (req, res) => {
       const parkScore = pNum(park?.score);
       if (fParkMin !== null && !(parkScore !== null && parkScore >= fParkMin)) continue;
       if (fZone !== null && mZone !== fZone) continue;
+      // RS 백분위도 박세익과 같은 취급이다. null은 "지수 시계열을 못 구했거나 상장 직후"라
+      // 상대강도를 확인하지 못한 상태이지 "약하지 않다"가 아니다.
+      const rsPct = pNum(rs?.pct);
+      if (fRsMin !== null && !(rsPct !== null && rsPct >= fRsMin)) continue;
 
       const name = r.kt_stocks?.name || krxName(r.code) || r.code;
 
@@ -1340,6 +1347,7 @@ app.get('/api/screener', async (req, res) => {
         livermoreScore: r.livermore_score,
         parkScore, parkGrade: park?.grade ?? null, parkGated: park?.gated ?? null,
         parkReasons: park?.reasons ?? [], matrixZone: mZone, pctFrom52wHigh: pctHigh,
+        rsPct, rsScore: pNum(rs?.score), rsPartial: rs?.partial ?? null,
         combinedScore: r.combined_score, analysisDate: r.analysis_date,
       });
     }
@@ -1351,6 +1359,7 @@ app.get('/api/screener', async (req, res) => {
       : sort === 'pbr'       ? 'pbr'
       : sort === 'roe'       ? 'roe'
       : sort === 'park'      ? 'parkScore'
+      : sort === 'rs'        ? 'rsPct'
       // 낙폭 정렬은 오름차순이다 — pctFrom52wHigh는 음수라 작을수록 많이 빠진 종목이다.
       : sort === 'drop'      ? 'pctFrom52wHigh'
       : 'combinedScore';
@@ -1372,6 +1381,51 @@ app.get('/api/screener', async (req, res) => {
     const pg = parseInt(page), lm = parseInt(limit);
     const slice = results.slice((pg - 1) * lm, pg * lm);
     res.json({ items: slice, total: results.length, page: pg, ...(message ? { message } : {}) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── /api/seonjeom ──────────────────────────────────────────────────
+// 오늘 선점 트리거가 발동한 종목. /api/alerts와 분리한 이유는 성격이 달라서다 —
+// alerts는 사용자가 구독한 종목의 개인 알림이고, 이쪽은 시장 전체를 훑은 스크린 결과다.
+// 계산은 야간 배치(cron evaluateSeonjeomTriggers)가 끝내두므로 여기서는 읽기만 한다.
+app.get('/api/seonjeom', async (req, res) => {
+  try {
+    const [blob, dist] = await Promise.all([
+      getSeonjeomAlerts(),
+      getRsDist().catch(() => null),
+    ]);
+    // RS 기준선의 산출일·표본 수를 함께 내보낸다. 트리거의 RS 조건은 이 분포에 의존하므로
+    // 기준선이 없거나 묵었으면 "발동 0건"의 의미가 달라진다.
+    const rsBaseline = dist ? { date: dist.date ?? null, n: dist.n ?? null } : null;
+    if (!blob) {
+      return res.json({ date: null, count: 0, items: [], rsBaseline, message: '선점 평가가 아직 실행되지 않았습니다. 야간 스캔 이후 사용 가능합니다.' });
+    }
+    const items = Array.isArray(blob.items) ? blob.items : [];
+    const withName = items.map(it => ({ ...it, name: krxName(it.code) || it.code }));
+    // 하루 지난 결과는 지우지 않고 날짜를 함께 돌려준다 — 화면에서 "오늘 0건"과
+    // "어제 결과가 남아 있음"을 구분할 수 있어야 배치 실패가 조용히 묻히지 않는다.
+    const today = new Date().toISOString().slice(0, 10);
+    res.json({
+      date: blob.date ?? null, count: withName.length, items: withName,
+      stale: blob.date !== today, at: blob.at ?? null, rsBaseline,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 단일 종목의 수급 추세. 선점 트리거가 무엇을 보고 발동했는지 화면에서 되짚기 위한 것이라
+// 원자료가 아니라 파생 지표를 돌려준다. [확인 필요] 순매수 단위가 미확인이라
+// netBuyToCapPct는 여기서 산출하지 않는다(analysis.js calcSupplyTrend 주석 참조).
+app.get('/api/supply/:code', async (req, res) => {
+  const code = String(req.params.code || '').trim();
+  if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: '종목코드는 6자리 숫자입니다.' });
+  try {
+    const rows = await getSupplyCache(code, 7);
+    if (rows === undefined) return res.json({ code, trend: null, message: '수급 데이터 없음 (박세익 60점 이상 종목만 수집)' });
+    res.json({ code, trend: calcSupplyTrend(rows), rows });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1649,13 +1703,10 @@ app.get('/api/financials', async (req, res) => {
   const code = req.query.code;
   if (!code) return res.status(400).json({ error: 'code 파라미터 필요' });
   try {
-    const cached = await getMultiYearCache(code).catch(() => undefined);
+    // 연간·분기·개황을 .in() 한 번으로 읽는다. 분기·개황도 함께 실어 보내야 프런트가
+    // TTM·업종을 별도 요청 없이 쓴다 — 어차피 셋 다 필요하니 왕복을 나눌 이유가 없다.
+    const { company, multiYear: cached, quarterly } = await getGrowthCaches(code);
     if (cached !== undefined && cached !== null) {
-      // 분기·개황도 함께 실어 보낸다 — 프런트가 TTM·업종을 별도 요청 없이 쓴다.
-      const [quarterly, company] = await Promise.all([
-        getQuarterlyCache(code).catch(() => null),
-        getCompanyInfoCache(code).catch(() => null),
-      ]);
       return res.json({ code, rows: cached, quarterly: quarterly ?? null, company: company ?? null, cached: true });
     }
 

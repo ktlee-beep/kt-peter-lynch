@@ -45,6 +45,8 @@ function applyFilters(rows, params) {
     const val = rest.join('.');
     if (op === 'eq')       out = out.filter(r => String(r[k]) === val);
     else if (op === 'gte') out = out.filter(r => String(r[k]) >= val);
+    // keyset 페이지네이션의 커서. 텍스트 컬럼(code)이라 Postgres도 사전순 비교다.
+    else if (op === 'gt')  out = out.filter(r => String(r[k]) > val);
     else if (op === 'in') {
       // PostgREST 형식: code=in.("a","b") — 값에 따라 따옴표가 붙기도, 안 붙기도 한다.
       const set = new Set(val.replace(/^\(|\)$/g, '').split(',')
@@ -129,7 +131,17 @@ export function install() {
         const cols = sel.split(',').map(s => s.trim());
         page = page.map(r => Object.fromEntries(cols.map(c => [c, r[c]])));
       }
-      if (cfg.onPageServed) cfg.onPageServed({ offset, served: page.length });
+      // keyset 순회에서는 offset이 항상 0이다 — 커서를 같이 넘겨야 훅이 페이지를 구분할 수 있다.
+      // code 파라미터는 한 요청에 두 번 실린다(like.__prefix__* + gt.커서). get()은 첫 번째만
+      // 돌려주므로 like 값이 커서로 잡혀 모든 페이지가 같은 값으로 보인다 — gt.만 골라낸다.
+      const cursor = u.searchParams.getAll('code').find(v => v.startsWith('gt.'));
+      // 훅이 Response를 돌려주면 그것을 그대로 응답한다 — 특정 HTTP 상태로 실패를 주입하는 통로다.
+      // 훅에서 예외를 던지면 fetch 거절이 되는데, postgrest-js는 fetch 거절과 503·520을
+      // 자체적으로 3회 재시도하므로 그 경로만으로는 db.js 계층의 재시도를 겨냥해 시험할 수 없다.
+      if (cfg.onPageServed) {
+        const injected = cfg.onPageServed({ offset, served: page.length, cursor });
+        if (injected instanceof Response) return injected;
+      }
       if (method === 'HEAD') return new Response(null, { status: 200, headers });
       return new Response(JSON.stringify(page), { status: 200, headers });
     }

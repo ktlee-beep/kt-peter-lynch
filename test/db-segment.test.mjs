@@ -36,8 +36,11 @@ ok(`${N}건 전수 수집`, (await db.listFreshKvCodes('__multiyear__', 100)).si
 // ── 2. 페이지 사이 쓰기 — ORDER BY가 실제로 방어하는지 ──
 console.log('\n=== 2. 페이지네이션 중 upsert 발생 ===');
 const midWrite = () => {
-  fake.cfg.onPageServed = ({ offset }) => {
-    if (offset !== 0) return;
+  // keyset 순회는 offset이 항상 0이라 "첫 페이지"를 offset으로 판별할 수 없다 — 플래그로 한 번만 건다.
+  let fired = false;
+  fake.cfg.onPageServed = () => {
+    if (fired) return;
+    fired = true;
     // 첫 페이지 직후 앞쪽 행 30건을 갱신 → 물리적으로 배열 끝으로 이동
     const moved = fake.table.rows.splice(0, 30);
     for (const r of moved) fake.table.rows.push({ ...r, updated_at: new Date().toISOString() });
@@ -49,6 +52,71 @@ fake.cfg.honorOrder = false; midWrite();
 const unordered = (await db.listFreshKvCodes('__multiyear__', 100)).size;
 console.log(`  참고 ORDER BY 무시 서버에서는 ${unordered}건 (${N - unordered}건 누락) — M4 수정이 실효적임을 보임`);
 fake.cfg.onPageServed = null; fake.cfg.honorOrder = true;
+
+// ── 2b. 페이지 사이 삭제 — keyset(L-1)이 OFFSET과 갈리는 지점 ──
+// ORDER BY만으로는 삭제를 막지 못한다. 이미 서빙된 앞쪽 행이 사라지면 뒤쪽 행이 그만큼
+// 당겨져 다음 OFFSET이 그 구간을 통째로 건너뛴다. 커서(code > 마지막값)는 영향받지 않는다.
+console.log('\n=== 2b. 페이지네이션 중 삭제 발생 ===');
+let deleted = false;
+fake.cfg.onPageServed = () => {
+  if (deleted) return;
+  deleted = true;
+  const doomed = [...fake.table.rows].sort((a, b) => (a.code < b.code ? -1 : 1)).slice(0, 30);
+  for (const d of doomed) {
+    const i = fake.table.rows.findIndex(r => r.code === d.code);
+    if (i >= 0) fake.table.rows.splice(i, 1);
+  }
+};
+// 첫 페이지에서 이미 받아둔 30건이므로 결과 집합은 여전히 N이어야 한다.
+ok('페이지 사이 삭제에도 전수', (await db.listFreshKvCodes('__multiyear__', 100)).size, N);
+fake.cfg.onPageServed = null;
+
+// ── 2c. 페이지 단위 재시도/백오프 ──
+// 백필은 페이지를 수십 장 넘긴다. 그중 한 장이 502로 튀는 것만으로 이미 받은 수천 행을
+// 버리고 처음부터 다시 도는 구조였다.
+//
+// 실패를 예외(=fetch 거절)로 주입하면 postgrest-js가 자체 재시도 3회(1s/2s/4s)로 먼저
+// 흡수한다 — 2회짜리 장애로는 db.js 계층이 있든 없든 통과해서 아무것도 검증하지 못한다.
+// 그래서 기본 케이스는 라이브러리가 재시도하지 않는 상태(500)로 주입하고, 라이브러리
+// 재시도를 소진시키는 경로는 아래에서 따로 한 번만 확인한다.
+console.log('\n=== 2c. 페이지 단위 재시도 ===');
+fake.reset();
+for (let i = 0; i < 1200; i++) fake.seed(`__multiyear__${String(i).padStart(6, '0')}`, [{ y: 1 }], 1);
+const err500 = () => Response.json({ message: '일시 장애', code: 'XX000' }, { status: 500 });
+let hard = 1;
+fake.cfg.onPageServed = () => (hard-- > 0 ? err500() : undefined);
+ok('500 1회 → 계층 재시도로 완주', (await db.listFreshKvCodes('__multiyear__', 100)).size, 1200);
+fake.cfg.onPageServed = () => err500();
+const permErr = await db.listFreshKvCodes('__multiyear__', 100).then(() => null, e => e.message);
+// 무한 재시도로 조용히 매달리면 크론이 통째로 멈춘다 — 유한 횟수 뒤에는 소리 내며 실패해야 한다.
+ok('영구 장애 → 재시도 소진 후 throw', /재시도/.test(permErr || ''), true);
+
+// 재시도는 같은 페이지를 다시 요청한다 — keyset 커서가 실패한 페이지에서 이미 전진해 있으면
+// 구간이 빠지고, 성공분을 되감으면 그 페이지가 두 번 쌓인다. Set을 돌려주는
+// listFreshKvCodes로는 중복이 보이지 않으므로 배열을 돌려주는 경로로 확인한다.
+fake.reset();
+for (let i = 0; i < 1200; i++) {
+  fake.stocks.rows.push({ code: String(i).padStart(6, '0'), market: 'KOSPI', is_active: 1 });
+}
+let midFail = 1;
+fake.cfg.onPageServed = ({ cursor }) => (cursor && midFail-- > 0 ? err500() : undefined);
+const retried = await db.listAllStocks();
+ok('중간 페이지 재시도 후 행 수 정확', retried.length, 1200);
+ok('중간 페이지 재시도 후 중복 없음', new Set(retried.map(r => r.code)).size, 1200);
+
+// 라이브러리 재시도를 넘기는 연속 실패에서만 db.js 계층이 실제로 일한다.
+// 4연속 fetch 거절 = postgrest-js의 4회 시도 소진 → db.js가 한 번 더 받아 완주.
+// 라이브러리 백오프(1+2+4초) 때문에 이 한 줄만 7초 남짓 걸린다.
+fake.reset();
+for (let i = 0; i < 600; i++) fake.seed(`__multiyear__${String(i).padStart(6, '0')}`, [{ y: 1 }], 1);
+let boom = 4;
+fake.cfg.onPageServed = () => { if (boom-- > 0) throw new Error('일시 장애'); };
+ok('fetch 거절 4연속 → 계층 재시도로 완주', (await db.listFreshKvCodes('__multiyear__', 100)).size, 600);
+fake.cfg.onPageServed = null;
+
+// 이후 검증들이 2500건 데이터셋을 전제하므로 원복한다.
+fake.reset();
+for (let i = 0; i < N; i++) fake.seed(`__multiyear__${String(i).padStart(6, '0')}`, [{ year: 2025 }], 1);
 
 // ── 3. 서버 db-max-rows가 PAGE(500)보다 작을 때 (L2가 실제로 막아주는가) ──
 console.log('\n=== 3. db-max-rows 상한이 낮은 서버 ===');
@@ -69,6 +137,32 @@ fake.seed('__company__005930', { a: 1 }, 1);
 fake.seed('XXcompanyYY111111', { a: 1 }, 1);   // '_'가 단일문자 와일드카드라 LIKE에는 걸린다
 const co = await db.listFreshKvCodes('__company__', 180);
 ok('정상 키만 포함', [...co].sort(), ['005930']);
+
+// ── 4b. 손상된 raw_json의 자가치유 (L-3) ──
+// 깨진 행은 kvGetFresh에선 미스지만 listFreshKvCodes는 updated_at만 보므로 "신선"으로 센다.
+// 백필은 영원히 건너뛰고 읽기는 영원히 실패하는 영구 구멍 — TTL이 180일이면 반년간 무증상이다.
+console.log('\n=== 4b. 손상 행 자가치유 ===');
+fake.reset();
+fake.table.rows.push({ code: '__multiyear__000001', raw_json: '{깨진 JSON',
+  updated_at: new Date().toISOString() });
+fake.seed('__multiyear__000002', [{ year: 2025 }], 1);
+ok('치유 전 — 손상 행이 신선으로 집계됨', (await db.listFreshKvCodes('__multiyear__', 100)).has('000001'), true);
+ok('손상 행 읽기 → undefined', await db.getMultiYearCache('000001'), undefined);
+await new Promise(r => setTimeout(r, 50));  // markKvStale은 읽기를 막지 않도록 fire-and-forget이다
+const healed = await db.listFreshKvCodes('__multiyear__', 100);
+ok('읽은 뒤 — 신선 목록에서 빠짐(백필 대상 복귀)', healed.has('000001'), false);
+ok('정상 행은 영향 없음', healed.has('000002'), true);
+// 행을 지우지 않는다 — 다음 수집이 덮어쓰므로 원인 추적용 원본을 남겨도 손해가 없다.
+ok('손상 행 자체는 보존', fake.table.rows.some(r => r.code === '__multiyear__000001'), true);
+
+// 순차 읽기는 TTL 검사가 파싱보다 앞이라 두 번째부터 저절로 수렴하지만, 동시 읽기는 전부
+// 아직 옛 updated_at을 보고 각자 PATCH를 쏜다 — 쓰기 횟수가 "행당 1회"가 아니라 "동시성만큼"이 된다.
+fake.reset();
+fake.table.rows.push({ code: '__multiyear__000003', raw_json: '{깨진', updated_at: new Date().toISOString() });
+fake.stats.pgUpdates = 0;
+await Promise.all(Array.from({ length: 20 }, () => db.getMultiYearCache('000003')));
+await new Promise(r => setTimeout(r, 50));
+ok('동시 20회 읽기 → 치유 PATCH 1회', fake.stats.pgUpdates, 1);
 
 // ── 5. TTL 경계 ──
 console.log('\n=== 5. TTL 필터 ===');
@@ -179,6 +273,40 @@ fake.table.rows.push({ code: '035420', analysis_date: new Date().toISOString().s
   analysis_json: '{깨진 JSON', updated_at: new Date().toISOString() });
 await db.saveAnalysisToDB('035420', { close: 200, pScore: 55 });
 ok('깨진 기존 JSON → 저장 성공', readJson('035420')?.close, 200);
+
+// ── 10. getGrowthCaches 배치 조회 (L-6) ──
+// 종목당 3회 왕복 × 3,900종목 = 11,700회. 같은 테이블의 다른 키일 뿐이라 .in()으로 묶는다.
+console.log('\n=== 10. getGrowthCaches 배치 조회 ===');
+fake.reset();
+fake.seed('__company__005930', { indutyCode: '264' }, 1);
+fake.seed('__multiyear__005930', [{ year: 2025, revenue: 100 }], 90);   // 100일 TTL 이내
+fake.seed('__quarterly__005930', { rev: 10 }, 60);                       // 45일 TTL 초과
+const sel0 = fake.stats.pgSelects;
+const gc = await db.getGrowthCaches('005930');
+ok('왕복 1회로 3종', fake.stats.pgSelects - sel0, 1);
+ok('개황 적중', gc.company, { indutyCode: '264' });
+ok('연간 적중', gc.multiYear, [{ year: 2025, revenue: 100 }]);
+// TTL은 키마다 다르다(개황 180 / 연간 100 / 분기 45) — 한 번에 읽어도 행별로 따로 판정해야 한다.
+ok('분기는 자기 TTL로 만료', gc.quarterly, undefined);
+
+fake.reset();
+fake.seed('__company__000660', { indutyCode: '261' }, 170);  // 180일 TTL 이내
+fake.seed('__multiyear__000660', [{ year: 2024 }], 170);     // 100일 TTL 초과
+const gc2 = await db.getGrowthCaches('000660');
+ok('개황 170일 → 신선', gc2.company, { indutyCode: '261' });
+ok('연간 170일 → 만료', gc2.multiYear, undefined);
+ok('없는 키 → undefined', gc2.quarterly, undefined);
+
+const gcNone = await db.getGrowthCaches('999999');
+ok('전부 미스', [gcNone.company, gcNone.multiYear, gcNone.quarterly], [null, null, null]);
+
+// 배치 조회도 손상 행을 자가치유해야 한다 — 개별 조회에만 있으면 스캔 경로에서 구멍이 남는다.
+fake.reset();
+fake.table.rows.push({ code: '__multiyear__035420', raw_json: '{깨진', updated_at: new Date().toISOString() });
+const gcBad = await db.getGrowthCaches('035420');
+ok('손상 행 → undefined', gcBad.multiYear, undefined);
+await new Promise(r => setTimeout(r, 50));
+ok('배치 경로도 신선도 하향', (await db.listFreshKvCodes('__multiyear__', 100)).has('035420'), false);
 
 console.log(`\n통과 ${pass} / 실패 ${fail}`);
 process.exit(fail ? 1 : 0);

@@ -1115,3 +1115,246 @@ export function calcQualityScreen(dart, fundamentals, pScore, fScore) {
 
   return { verdict, grade, passCount: passed.length, failCount: failed.length, total: checks.length, checks };
 }
+
+// ══════════════════════════════════════════════════════════════════
+// Phase 4 — 전환 감지 (선점의 실행)
+// 발굴(박세익 축)만으로는 선점이 아니다. 선점 구간에 있던 종목이 "움직이기 시작하는
+// 순간"을 잡는 지표들이다. 전부 순수 함수로 두어 DB·네트워크 없이 검증 가능하게 한다.
+// ══════════════════════════════════════════════════════════════════
+
+// 숫자 강제. 빈 문자열·배열·불리언이 0으로 둔갑하는 Number()의 함정을 막는다
+// (calcParkScore 내부 toNum과 같은 규칙 — 그쪽은 지역 헬퍼라 재사용하지 않고 별도로 둔다).
+function num(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+// ── 4-1. RS (시장 대비 상대강도) ────────────────────────────────────
+export const RS_WINDOWS = [20, 60, 120];
+// 최근 구간에 더 큰 가중치를 준다. IBD RS Rating이 최근 분기를 두 배로 세는 것과 같은
+// 취지다(IBD 원식은 독점 지표라 재현하지 않고, 동일 성격의 공개 가중을 쓴다).
+const RS_WEIGHTS = { 20: 0.40, 60: 0.35, 120: 0.25 };
+// 지수 종가를 날짜로 못 찾을 때 며칠까지 거슬러 올라가 볼 것인가.
+// 한국 증시 최장 연휴(설·추석 + 주말)가 5일 안팎이라 7일이면 정상 휴장은 모두 흡수한다.
+const RS_DATE_TOLERANCE_DAYS = 7;
+
+// 'YYYYMMDD' / 'YYYY-MM-DD' 혼용을 하나로 맞춘다. 종목 시세는 네이버(YYYYMMDD),
+// 지수는 야후(YYYY-MM-DD)에서 오므로 정규화 없이 비교하면 전부 미스가 난다.
+export function normDate(d) {
+  const s = String(d ?? '').replace(/-/g, '');
+  return /^\d{8}$/.test(s) ? s : null;
+}
+
+const rsDayDiff = (a, b) => {
+  const p = (s) => Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8));
+  return Math.abs(p(a) - p(b)) / 86400000;
+};
+
+// 오름차순 지수 시계열에서 date 이하의 마지막 종가. 휴장·결측을 tolerance 안에서 흡수한다.
+// 정확히 같은 날을 요구하면 종목(KRX 거래일)과 지수(야후 집계일)의 하루 어긋남만으로 RS가
+// 통째로 null이 되고, 무제한 소급하면 두 달 전 지수와 오늘 주가를 비교하게 된다.
+export function indexCloseOnOrBefore(series, date, toleranceDays = RS_DATE_TOLERANCE_DAYS) {
+  const target = normDate(date);
+  if (!target || !Array.isArray(series) || !series.length) return null;
+  let lo = 0, hi = series.length - 1, found = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (String(series[mid]?.d) <= target) { found = mid; lo = mid + 1; }
+    else hi = mid - 1;
+  }
+  if (found < 0) return null;
+  const row = series[found];
+  const d = normDate(row?.d);
+  if (!d || rsDayDiff(d, target) > toleranceDays) return null;
+  const c = num(row.c);
+  return c != null && c > 0 ? c : null;
+}
+
+// RS_N = (종목 N일 가격비) / (지수 N일 가격비).
+//
+// 로드맵 원식은 `종목 수익률 / 지수 수익률`이지만 그대로 쓰면 안 된다. 지수 수익률이 0
+// 근처인 날(횡보장)에는 분모가 0에 수렴해 RS가 무한대로 튀고, 지수가 하락한 날에는 분모가
+// 음수라 "덜 빠진 종목"과 "더 빠진 종목"의 대소가 뒤집힌다. 둘 다 한국 시장에서 흔한 국면이다.
+// 가격비(price relative)의 비율은 같은 것을 재면서 이 두 병리가 없다.
+// RS = 1이면 시장과 동일, > 1이면 시장 대비 초과 성과.
+//
+// closes/dates는 같은 길이의 오름차순 배열(마지막이 최신).
+// indexSeries는 [{d:'YYYYMMDD', c:number}] 오름차순.
+export function calcRsRatios(closes, dates, indexSeries, windows = RS_WINDOWS) {
+  const out = { rsScore: null, windowsUsed: [], partial: false };
+  for (const w of windows) out[`rs${w}`] = null;
+  if (!Array.isArray(closes) || !Array.isArray(dates) || closes.length !== dates.length) return out;
+
+  const last = closes.length - 1;
+  let wsum = 0, acc = 0;
+  for (const w of windows) {
+    const past = last - w;
+    if (past < 0) continue;
+    const cNow = num(closes[last]), cPast = num(closes[past]);
+    if (cNow == null || cPast == null || cPast <= 0 || cNow <= 0) continue;
+    const xNow = indexCloseOnOrBefore(indexSeries, dates[last]);
+    const xPast = indexCloseOnOrBefore(indexSeries, dates[past]);
+    if (xNow == null || xPast == null) continue;
+    const rs = (cNow / cPast) / (xNow / xPast);
+    if (!Number.isFinite(rs) || rs <= 0) continue;
+    out[`rs${w}`] = rs;
+    out.windowsUsed.push(w);
+    const weight = RS_WEIGHTS[w] ?? 0;
+    acc += rs * weight;
+    wsum += weight;
+  }
+  // 가중치는 실제로 산출된 창에 대해서만 재정규화한다. 그러지 않으면 상장 6개월짜리 종목이
+  // rs120 결측분(0.25)만큼 낮게 나와 "시장 대비 약하다"로 오독된다.
+  if (wsum > 0) out.rsScore = acc / wsum;
+  out.partial = out.windowsUsed.length > 0 && out.windowsUsed.length < windows.length;
+  return out;
+}
+
+// 횡단면 백분위 기준점 101개(p0..p100). 원표본 3,900개를 그대로 KV에 넣는 대신 분위점만
+// 저장한다 — 조회는 이진탐색 한 번이고 블롭은 1KB 남짓이다.
+export function buildRsBreakpoints(samples) {
+  const s = (Array.isArray(samples) ? samples : []).map(num)
+    .filter(v => v != null && v > 0).sort((a, b) => a - b);
+  if (s.length < 2) return null;
+  const out = [];
+  for (let p = 0; p <= 100; p++) {
+    out.push(Math.round(s[Math.round((s.length - 1) * p / 100)] * 1e4) / 1e4);
+  }
+  return out;
+}
+
+// 기준점 배열에서 값의 백분위(0~100). 기준점 최소보다 작으면 0, 최대보다 크면 100.
+export function rsPercentile(value, breaks) {
+  const v = num(value);
+  if (v == null || !Array.isArray(breaks) || breaks.length !== 101) return null;
+  if (v <= breaks[0]) return 0;
+  if (v >= breaks[100]) return 100;
+  let lo = 0, hi = 100, ans = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (breaks[mid] <= v) { ans = mid; lo = mid + 1; }
+    else hi = mid - 1;
+  }
+  return ans;
+}
+
+// ── 4-2. 수급 추세 ─────────────────────────────────────────────────
+// rows: [{date, foreign, inst, indiv}] — 원천 순서를 믿지 않고 날짜로 정렬한다.
+// 네이버가 오름차순으로 바뀌면 "최근 5일"이 조용히 "가장 오래된 5일"이 되는데, 값이
+// 그럴듯해서 눈으로는 잡히지 않는 종류의 사고다.
+//
+// [확인 필요] 네이버 투자자 API의 순매수 단위(주식 수 / 금액)는 문서화돼 있지 않다.
+// 그래서 단위에 의존하는 지표(시가총액 정규화)는 호출부가 단위를 명시했을 때만 산출한다.
+// 스트릭·가속도는 부호와 차분만 쓰므로 단위와 무관하게 유효하다.
+export function calcSupplyTrend(rows, opts = {}) {
+  const clean = (Array.isArray(rows) ? rows : [])
+    .map(r => ({
+      date: normDate(r?.date),
+      foreign: num(r?.foreign) ?? 0,
+      inst: num(r?.inst) ?? 0,
+      indiv: num(r?.indiv) ?? 0,
+    }))
+    .filter(r => r.date)
+    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));   // 최신 우선
+  if (!clean.length) return null;
+
+  const sum = (key, n) => clean.slice(0, n).reduce((a, r) => a + r[key], 0);
+  // 최신일부터 부호가 같은 연속일수. 양수 = 연속 순매수일, 음수 = 연속 순매도일, 0 = 최신이 0.
+  const streak = (key) => {
+    const sign = Math.sign(clean[0][key]);
+    if (sign === 0) return 0;
+    let n = 0;
+    for (const r of clean) { if (Math.sign(r[key]) !== sign) break; n++; }
+    return n * sign;
+  };
+  // "연속 순매도 종료 후 순매수 3일 이상" — 스트릭만 보면 한 달 내내 사던 종목도 걸린다.
+  // 스트릭 직전 날이 순매도여야 '전환'이다. 스트릭이 데이터 끝에 닿으면 직전 날이 없어
+  // 전환 여부를 알 수 없으므로 false로 둔다(모르는 것을 신호로 만들지 않는다).
+  const turn = (key, minDays = 3) => {
+    const st = streak(key);
+    if (st < minDays) return false;
+    const before = clean[st];
+    return before !== undefined && before[key] < 0;
+  };
+
+  const f5 = sum('foreign', 5), f20 = sum('foreign', 20);
+  const i5 = sum('inst', 5),    i20 = sum('inst', 20);
+  const trend = {
+    days: clean.length,
+    latestDate: clean[0].date,
+    foreign5: f5, foreign20: f20, inst5: i5, inst20: i20,
+    // 가속도는 비율이 아니라 차분이다. 5일합/(20일합/4)은 20일합이 0 근처거나 음수일 때
+    // 부호가 뒤집혀 '가속'과 '감속'이 자리를 바꾼다 — RS 원식과 같은 병리다.
+    accelForeign: f5 - f20 / 4,
+    accelInst:    i5 - i20 / 4,
+    foreignStreak: streak('foreign'),
+    instStreak:    streak('inst'),
+    foreignTurn: turn('foreign'),
+    instTurn:    turn('inst'),
+    netBuyToCapPct: null,
+    unitVerified: false,
+  };
+
+  // 단위를 아는 경우에만 시가총액 정규화(대형주 편향 제거). shares면 금액 환산에 종가가 필요하다.
+  const cap = num(opts.marketCapWon);
+  if (cap != null && cap > 0) {
+    const net = f20 + i20;
+    if (opts.unit === 'won') {
+      trend.netBuyToCapPct = net / cap * 100;
+      trend.unitVerified = true;
+    } else if (opts.unit === 'shares') {
+      const px = num(opts.price);
+      if (px != null && px > 0) {
+        trend.netBuyToCapPct = net * px / cap * 100;
+        trend.unitVerified = true;
+      }
+    }
+  }
+  return trend;
+}
+
+// ── 4-3. 선점 알림 트리거 ──────────────────────────────────────────
+export const SEONJEOM_PARK_MIN  = 60;   // 발굴 게이트 — 박세익 축을 통과 못하면 전환도 의미 없다
+export const SEONJEOM_RS_LOW    = 30;   // '하위권'의 정의(백분위)
+export const SEONJEOM_RS_MID    = 50;   // 상승 전환으로 인정하는 돌파선
+export const SEONJEOM_VOL_RATIO = 2.0;
+export const SEONJEOM_MIN_HITS  = 2;    // 3개 중 2개 이상 동시 발생
+
+// 단일 조건은 노이즈다. RS 반등만으로도, 거래량만으로도 매일 수십 종목이 걸린다.
+// 서로 독립인 축(가격 상대강도 · 수급 주체 · 거래량)에서 둘이 겹치는 날만 신호로 본다.
+// 이것이 "마용성 주식이 움직이기 시작했다"의 시스템적 정의다.
+export function seonjeomTriggers(input = {}) {
+  const parkScore = num(input.parkScore);
+  const out = { fired: false, hits: [], reasons: [] };
+  if (parkScore == null || parkScore < SEONJEOM_PARK_MIN) {
+    out.reasons.push(`박세익 ${parkScore ?? '없음'} — ${SEONJEOM_PARK_MIN} 미만`);
+    return out;
+  }
+
+  const rsPct = num(input.rsPct), rsPrev = num(input.rsPctPrev);
+  if (rsPct != null && rsPrev != null && rsPrev <= SEONJEOM_RS_LOW && rsPct >= SEONJEOM_RS_MID) {
+    out.hits.push('RS_TURN');
+    out.reasons.push(`RS 백분위 ${rsPrev} → ${rsPct}`);
+  }
+
+  const s = input.supply;
+  if (s && (s.foreignTurn || s.instTurn)) {
+    out.hits.push('SUPPLY_TURN');
+    const who = [s.foreignTurn && '외국인', s.instTurn && '기관'].filter(Boolean).join('·');
+    const days = Math.max(s.foreignTurn ? s.foreignStreak : 0, s.instTurn ? s.instStreak : 0);
+    out.reasons.push(`${who} 순매도 종료 후 순매수 ${days}일`);
+  }
+
+  const vr = num(input.volRatio), chg = num(input.changeRate);
+  if (vr != null && vr >= SEONJEOM_VOL_RATIO && chg != null && chg > 0) {
+    out.hits.push('VOLUME_SURGE');
+    out.reasons.push(`거래량 ${vr.toFixed(1)}배 동반 상승 ${chg.toFixed(1)}%`);
+  }
+
+  out.fired = out.hits.length >= SEONJEOM_MIN_HITS;
+  return out;
+}
