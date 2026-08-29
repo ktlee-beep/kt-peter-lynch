@@ -18,6 +18,7 @@ import DCFCalculator from '../components/stock/DCFCalculator';
 import DividendCard from '../components/stock/DividendCard';
 import PeerComparison from '../components/stock/PeerComparison';
 import SupplyChart from '../components/stock/SupplyChart';
+import SeonjeomCard from '../components/stock/SeonjeomCard';
 import NewsPulse from '../components/stock/NewsPulse';
 import QualityScreen from '../components/stock/QualityScreen';
 
@@ -207,6 +208,7 @@ export default function StockPage() {
             <TechIndicatorChart candles={data?.candles} />
             {code && <SupplyChart code={code} />}
             <ScoreCard data={loading ? null : data} />
+            {code && <SeonjeomCard code={code} />}
             {data && <StockNews code={code} />}
             <div className="h-4" />
           </>

@@ -308,5 +308,30 @@ ok('손상 행 → undefined', gcBad.multiYear, undefined);
 await new Promise(r => setTimeout(r, 50));
 ok('배치 경로도 신선도 하향', (await db.listFreshKvCodes('__multiyear__', 100)).has('035420'), false);
 
+// ── 9. getLatestAnalysisJson — 종목 상세 화면이 읽는 저장본 ──
+// 화면이 이 한 행에 의존하므로 "최신 한 건"과 "손상 행"의 처리가 계약이다.
+console.log('\n=== 9. getLatestAnalysisJson ===');
+const day = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+fake.reset();
+fake.cfg.honorOrder = true;
+// 종목코드는 KV 시드와 겹치지 않는 대역을 쓴다 — 두 테이블이 하네스에서 한 배열을 공유한다.
+fake.table.rows.push({ code: '900001', analysis_date: day(3), analysis_json: JSON.stringify({ park: { score: 40 } }) });
+fake.table.rows.push({ code: '900001', analysis_date: day(1), analysis_json: JSON.stringify({ park: { score: 72 }, matrixZone: 'SEONJEOM' }) });
+const la = await db.getLatestAnalysisJson('900001');
+ok('최신 행 선택', [la?.date, la?.json.park.score, la?.json.matrixZone], [day(1), 72, 'SEONJEOM']);
+
+fake.reset();
+fake.table.rows.push({ code: '900002', analysis_date: day(30), analysis_json: JSON.stringify({ park: { score: 90 } }) });
+ok('컷오프(7일) 밖 → null', await db.getLatestAnalysisJson('900002'), null);
+ok('컷오프 확장 시 조회됨', (await db.getLatestAnalysisJson('900002', 60))?.json.park.score, 90);
+
+fake.reset();
+fake.table.rows.push({ code: '900003', analysis_date: day(1), analysis_json: '{깨진' });
+ok('손상 blob → null', await db.getLatestAnalysisJson('900003'), null);
+fake.reset();
+fake.table.rows.push({ code: '900004', analysis_date: day(1), analysis_json: 'null' });
+ok('JSON null → null', await db.getLatestAnalysisJson('900004'), null);
+ok('없는 종목 → null', await db.getLatestAnalysisJson('900005'), null);
+
 console.log(`\n통과 ${pass} / 실패 ${fail}`);
 process.exit(fail ? 1 : 0);

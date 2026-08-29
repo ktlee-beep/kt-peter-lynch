@@ -4,6 +4,7 @@ import { authHeaders } from '../contexts/AuthContext';
 import StockSearchBar from '../components/discover/StockSearchBar';
 import WatchlistSection from '../components/discover/WatchlistSection';
 import ScreenerSection from '../components/discover/ScreenerSection';
+import SeonjeomSection from '../components/discover/SeonjeomSection';
 import New52wSection from '../components/discover/New52wSection';
 import SectorBrowser from '../components/discover/SectorBrowser';
 import SupplyRanking from '../components/discover/SupplyRanking';
@@ -110,7 +111,7 @@ export default function DiscoverPage() {
               <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
             </svg>
             <span className="text-sm font-semibold text-white">새 종목 찾기</span>
-            <span className="text-[10px] text-slate-500">스크리너 · 52주 · 섹터 · 수급</span>
+            <span className="text-[10px] text-slate-500">선점 · 스크리너 · 52주 · 섹터 · 수급</span>
           </div>
           <svg className={`w-4 h-4 text-slate-500 transition-transform ${discoverOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
@@ -120,6 +121,7 @@ export default function DiscoverPage() {
 
       {discoverOpen && (
         <>
+          <SeonjeomSection />
           <ScreenerSection />
           <New52wSection />
           <SectorBrowser />

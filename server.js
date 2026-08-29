@@ -33,7 +33,7 @@ import {
   KRX_INDICES, YAHOO_SYMBOLS, fetchIndex, fetchYahooSymbol, fetchIndexOHLCV, fetchKospiFutures,
   KS_UNIVERSE, KQ_UNIVERSE, hasYearData,
 } from './data.js';
-import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMacroHistory, saveMacroSnapshot, validateAppUser, getAppUsers, createAppUser, deleteAppUser, updateAppUserPassword, getSupabase, getWatchlist, addToWatchlist, removeFromWatchlist, getTrades, getHoldings, addTrade, deleteTrade, getThesis, upsertThesis, listTheses, getLatestMorningBrief, getUsScan, clearDartCache, setAppConfig, getAppConfig, appUserExists, createAppUserWithHash, upsertEmailVerification, getEmailVerification, verifyEmailCode, incrementVerificationAttempts, deleteEmailVerification, loadCorpCodeMap, setMultiYearCache, getGrowthCaches, getSeonjeomAlerts, getSupplyCache, getRsDist } from './db.js';
+import { saveAnalysisToDB, getScanResults, getScanStatus, getStockHistory, getMacroHistory, saveMacroSnapshot, validateAppUser, getAppUsers, createAppUser, deleteAppUser, updateAppUserPassword, getSupabase, getWatchlist, addToWatchlist, removeFromWatchlist, getTrades, getHoldings, addTrade, deleteTrade, getThesis, upsertThesis, listTheses, getLatestMorningBrief, getUsScan, clearDartCache, setAppConfig, getAppConfig, appUserExists, createAppUserWithHash, upsertEmailVerification, getEmailVerification, verifyEmailCode, incrementVerificationAttempts, deleteEmailVerification, loadCorpCodeMap, setMultiYearCache, getGrowthCaches, getSeonjeomAlerts, getSupplyCache, getRsDist, getLatestAnalysisJson } from './db.js';
 import { sendVerificationCode, isMailConfigured } from './mailer.js';
 
 const app = express();
@@ -1410,6 +1410,38 @@ app.get('/api/seonjeom', async (req, res) => {
     res.json({
       date: blob.date ?? null, count: withName.length, items: withName,
       stale: blob.date !== today, at: blob.at ?? null, rsBaseline,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 단일 종목의 선점 상태(박세익·존·낙폭·RS). 야간 스캔이 저장한 blob을 그대로 읽는다.
+// /api/analysis로 대신할 수 없다 — 그쪽은 요청 시점에 다시 계산하는 경로라 3년 실적을
+// 보지 않고, park·matrixZone·rs를 아예 만들지 않는다.
+app.get('/api/seonjeom/:code', async (req, res) => {
+  const code = String(req.params.code || '').trim();
+  if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: '종목코드는 6자리 숫자입니다.' });
+  try {
+    const [row, blob] = await Promise.all([
+      getLatestAnalysisJson(code),
+      getSeonjeomAlerts().catch(() => null),
+    ]);
+    const j = row?.json || {};
+    const park = j.park || null;
+    // 트리거 발동 여부는 오늘자 평가 blob에서 찾는다. 평가일을 함께 내보내야 화면에서
+    // "오늘 미발동"과 "애초에 평가가 안 돌았음"을 구분할 수 있다.
+    const hit = Array.isArray(blob?.items) ? blob.items.find(it => it.code === code) : null;
+    res.json({
+      code, name: krxName(code) || null,
+      date: row?.date ?? null,
+      park,
+      matrixZone: j.matrixZone ?? null,
+      pctFrom52wHigh: typeof j.pctFrom52wHigh === 'number' ? j.pctFrom52wHigh : null,
+      rs: j.rs ?? null,
+      evaluatedAt: blob?.date ?? null,
+      trigger: hit ? { hits: hit.hits ?? [], reasons: hit.reasons ?? [] } : null,
+      ...(park ? {} : { message: '박세익 스코어 미계측 — 야간 전체 스캔 이후 표시됩니다.' }),
     });
   } catch (e) {
     res.status(500).json({ error: e.message });

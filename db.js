@@ -129,6 +129,32 @@ export async function getStockHistory(code, from, to) {
   return data ?? [];
 }
 
+// 단일 종목의 최신 분석 blob(원본 그대로).
+// 화면에서 박세익·RS를 보려면 이 경로가 필요하다 — /api/analysis는 즉석 계산이라 그 둘을
+// 만들지 않고(mergeStoredAnalysis 주석 참조), 스크리너는 유니버스 목록이라 종목 하나를
+// 찍어 볼 수 없다. 컷오프 7일은 /api/screener와 같은 값이다. 여기만 늘리면 스크리너에서
+// 사라진 종목이 상세 화면에는 남아 "왜 목록에 없냐"가 된다.
+export async function getLatestAnalysisJson(code, maxDays = 7) {
+  const sb = getSupabase();
+  const from = new Date(Date.now() - maxDays * 86400000).toISOString().slice(0, 10);
+  const { data, error } = await sb
+    .from('kt_daily_analysis')
+    .select('analysis_date, analysis_json')
+    .eq('code', code)
+    .gte('analysis_date', from)
+    .order('analysis_date', { ascending: false })
+    .limit(1);
+  if (error) throw error;
+  const row = data?.[0];
+  if (!row?.analysis_json) return null;
+  try {
+    const json = JSON.parse(row.analysis_json);
+    return json && typeof json === 'object' ? { date: row.analysis_date, json } : null;
+  } catch {
+    return null;
+  }
+}
+
 // 매크로 스냅샷 저장
 export async function saveMacroSnapshot(data) {
   const sb = getSupabase();

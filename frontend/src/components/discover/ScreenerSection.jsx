@@ -1,8 +1,11 @@
 import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { authHeaders, useAuth } from '../../contexts/AuthContext';
+import { zoneMeta, ZONE_KEYS, parkColor, gradeLetter } from '../../lib/matrix';
 
 const PRESETS = [
+  // '선점'은 서버 preset 키가 'park'다(server.js /api/screener). 라벨만 한국어로 바꾼다.
+  { key: 'park',   label: '선점',      desc: '박세익 60+ · 선점 구간' },
   { key: 'lynch',  label: '피터 린치', desc: 'PER≤20 · ROE≥10 · 부채≤150%' },
   { key: 'value',  label: '가치주',    desc: 'PER≤10 · PBR≤1' },
   { key: 'growth', label: '성장주',    desc: 'ROE≥15 · 린치점수≥60' },
@@ -11,6 +14,9 @@ const PRESETS = [
 const SORTS = [
   { key: 'lynch_score', label: '린치점수' },
   { key: 'combined',    label: '종합점수' },
+  { key: 'park',        label: '박세익 점수' },
+  { key: 'rs',          label: 'RS 높은순' },
+  { key: 'drop',        label: '고점대비 낙폭순' },
   { key: 'per',         label: 'PER 낮은순' },
   { key: 'roe',         label: 'ROE 높은순' },
 ];
@@ -65,10 +71,27 @@ function FilterSliderMin({ label, value, onChange, min, max, step = 1, unit = ''
   );
 }
 
+function FilterSelect({ label, value, onChange, options }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-[11px] text-slate-400">{label}</span>
+      <select
+        value={value ?? ''}
+        onChange={e => onChange(e.target.value || null)}
+        className="bg-surface-900 text-[11px] text-slate-300 rounded-lg px-2 py-1 outline-none border border-slate-800"
+      >
+        <option value="">제한없음</option>
+        {options.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
+      </select>
+    </div>
+  );
+}
+
 function ResultItem({ item }) {
   const navigate = useNavigate();
   const pos = item.changeRate > 0, neg = item.changeRate < 0;
   const fmtPct = (v) => v == null ? '-' : `${v > 0 ? '+' : ''}${v.toFixed(2)}%`;
+  const zm = item.matrixZone ? zoneMeta(item.matrixZone) : null;
   return (
     <button
       onClick={() => navigate(`/stock?code=${item.code}`)}
@@ -84,6 +107,21 @@ function ResultItem({ item }) {
           {item.pbr  != null && <span className="text-[10px] text-slate-500">PBR {item.pbr.toFixed(2)}배</span>}
           {item.roe  != null && <span className="text-[10px] text-slate-500">ROE {item.roe.toFixed(1)}%</span>}
         </div>
+        {/* 박세익 축 — 점수·존·낙폭. 셋 다 없는 종목(구 스캔 행)에서는 줄 자체를 만들지 않는다. */}
+        {(item.parkScore != null || zm || typeof item.pctFrom52wHigh === 'number') && (
+          <div className="flex gap-1.5 mt-1 items-center flex-wrap">
+            {zm && <span className={`text-[9px] px-1.5 py-px rounded ${zm.cls}`}>{zm.label}</span>}
+            {item.parkScore != null && (
+              <span className={`text-[10px] font-medium ${parkColor(item.parkScore)}`}>
+                박세익 {Math.round(item.parkScore)}
+                {item.parkGrade ? ` ${gradeLetter(item.parkGrade)}` : ''}
+              </span>
+            )}
+            {typeof item.pctFrom52wHigh === 'number' && (
+              <span className="text-[10px] text-slate-500">고점대비 {item.pctFrom52wHigh.toFixed(1)}%</span>
+            )}
+          </div>
+        )}
       </div>
       <div className="text-right shrink-0">
         <div className="text-sm font-bold text-white">{item.close?.toLocaleString('ko-KR')}원</div>
@@ -91,6 +129,11 @@ function ResultItem({ item }) {
           {fmtPct(item.changeRate)}
         </div>
         <div className="text-[10px] text-brand-400 mt-0.5">린치 {Math.round(item.lynchScore ?? 0)}</div>
+        {/* RS는 백분위다. partial(일부 창만 산출)은 별표로 구분한다 — 상장 1년 미만 종목의
+            RS를 12개월 종목과 같은 숫자로 읽으면 안 된다. */}
+        {item.rsPct != null && (
+          <div className="text-[10px] text-slate-500">RS {Math.round(item.rsPct)}{item.rsPartial ? '*' : ''}</div>
+        )}
       </div>
     </button>
   );
@@ -107,13 +150,18 @@ export default function ScreenerSection() {
   const [roeMin,  setRoeMin]  = useState(null);
   const [debtMax, setDebtMax] = useState(null);
   const [lynchMin, setLynchMin] = useState(null);
+  const [parkMin, setParkMin] = useState(null);
+  const [zone,    setZone]    = useState(null);
+  const [rsMin,   setRsMin]   = useState(null);
   const [sortBy,  setSortBy]  = useState('lynch_score');
   const [page,    setPage]    = useState(1);
   const [results, setResults] = useState(null);
   const [total,   setTotal]   = useState(0);
   const [loading, setLoading] = useState(false);
   const [error,   setError]   = useState(null);
-  const [noData,  setNoData]  = useState(false);
+  // 서버가 돌려주는 안내문을 그대로 담는다. "스캔 데이터 없음"과 "박세익 미계측"은
+  // 원인도 대응도 다른데, 불리언 하나로 받으면 화면에서 같은 문장이 된다.
+  const [notice,  setNotice]  = useState(null);
   const [scanStatus, setScanStatus] = useState(null);
   const [scanTriggerLoading, setScanTriggerLoading] = useState(false);
 
@@ -148,15 +196,31 @@ export default function ScreenerSection() {
   // 페이지 진입 시 린치 프리셋으로 자동 실행
   useEffect(() => { runScreener(1); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // 슬라이더 값은 프리셋이 켜져 있는 동안 표시용이다(서버가 preset을 받으면 개별 필터를
+  // 무시한다). 그래도 서버 정의와 같은 값을 넣어둔다 — 프리셋을 끄는 순간 화면에 보이던
+  // 조건이 그대로 이어져야 "왜 결과가 바뀌지"가 생기지 않는다.
   const applyPreset = (key) => {
     setPreset(key);
+    setParkMin(null); setZone(null); setRsMin(null);
     if (key === 'lynch')  { setPerMax(20);  setPbrMax(3);   setRoeMin(10);  setDebtMax(150); setLynchMin(50); }
     if (key === 'value')  { setPerMax(10);  setPbrMax(1);   setRoeMin(8);   setDebtMax(200); setLynchMin(null); }
     if (key === 'growth') { setPerMax(40);  setPbrMax(5);   setRoeMin(15);  setDebtMax(100); setLynchMin(60); }
+    // 선점은 밸류에이션 상한을 걸지 않는다(server.js preset 'park' 주석). 박세익 스코어가
+    // 이미 저평가를 채점하므로 PER/PBR을 겹쳐 걸면 실적이 좋아 PER이 오른 종목부터 잘린다.
+    if (key === 'park') {
+      setPerMax(null); setPbrMax(null); setRoeMin(null); setDebtMax(null); setLynchMin(null);
+      setParkMin(60); setZone('SEONJEOM'); setSortBy('park');
+    }
+  };
+
+  const resetFilters = () => {
+    setPreset(null);
+    setPerMax(null); setPbrMax(null); setRoeMin(null); setDebtMax(null); setLynchMin(null);
+    setParkMin(null); setZone(null); setRsMin(null);
   };
 
   const runScreener = useCallback(async (pg = 1) => {
-    setLoading(true); setError(null); setNoData(false);
+    setLoading(true); setError(null); setNotice(null);
     const params = new URLSearchParams({ sort: sortBy, page: pg, limit: 20 });
     if (preset) { params.set('preset', preset); }
     else {
@@ -165,16 +229,21 @@ export default function ScreenerSection() {
       if (roeMin   != null) params.set('roe_min',   roeMin);
       if (debtMax  != null) params.set('debt_max',  debtMax);
       if (lynchMin != null) params.set('lynch_min', lynchMin);
+      if (parkMin  != null) params.set('park_min',  parkMin);
+      if (zone     != null) params.set('zone',      zone);
+      if (rsMin    != null) params.set('rs_min',    rsMin);
     }
     try {
       const r = await fetch(`/api/screener?${params}`, { headers: authHeaders() });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '스크리너 오류');
-      if (d.message) { setNoData(true); setResults([]); }
-      else { setResults(d.items); setTotal(d.total); setPage(pg); }
+      setResults(d.items ?? []);
+      setTotal(d.total ?? 0);
+      setPage(pg);
+      if (d.message) setNotice(d.message);
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
-  }, [preset, perMax, pbrMax, roeMin, debtMax, lynchMin, sortBy]);
+  }, [preset, perMax, pbrMax, roeMin, debtMax, lynchMin, parkMin, zone, rsMin, sortBy]);
 
   const LIMIT = 20;
 
@@ -186,7 +255,7 @@ export default function ScreenerSection() {
       >
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold text-white">가치투자 스크리너</span>
-          {results !== null && !noData && <span className="text-[11px] text-brand-400">{total}개 종목</span>}
+          {results !== null && !notice && <span className="text-[11px] text-brand-400">{total}개 종목</span>}
           {scanStatus?.analysis_date && !open && (
             <span className="text-[10px] text-slate-600">
               {new Date(scanStatus.started_at).toLocaleDateString('ko-KR')} 스캔
@@ -202,24 +271,30 @@ export default function ScreenerSection() {
         <div className="bg-surface-950">
           {/* Presets */}
           <div className="px-4 pt-3 pb-2">
-            <p className="text-[10px] text-slate-600 mb-2">프리셋</p>
-            <div className="flex gap-2">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-[10px] text-slate-600">프리셋</p>
+              {preset && (
+                <button onClick={resetFilters} className="text-[10px] text-slate-500">초기화</button>
+              )}
+            </div>
+            <div className="grid grid-cols-4 gap-2">
               {PRESETS.map(p => (
                 <button
                   key={p.key}
                   onClick={() => applyPreset(p.key)}
-                  className={`flex-1 py-2 rounded-xl text-[11px] font-medium transition-colors ${
+                  className={`py-2 rounded-xl text-[11px] font-medium transition-colors ${
                     preset === p.key ? 'bg-brand-500/20 text-brand-400 border border-brand-500/30' : 'bg-surface-900 text-slate-400'
                   }`}
                 >
                   {p.label}
                 </button>
               ))}
-              {preset && (
-                <button onClick={() => { setPreset(null); setPerMax(null); setPbrMax(null); setRoeMin(null); setDebtMax(null); setLynchMin(null); }}
-                  className="px-2 text-[11px] text-slate-600 bg-surface-900 rounded-xl">초기화</button>
-              )}
             </div>
+            {preset && (
+              <p className="text-[10px] text-slate-600 mt-1.5">
+                {PRESETS.find(p => p.key === preset)?.desc}
+              </p>
+            )}
           </div>
 
           {/* Filters */}
@@ -229,6 +304,25 @@ export default function ScreenerSection() {
             <FilterSliderMin label="ROE 최소"   value={roeMin}   onChange={setRoeMin}   min={0} max={50}  step={1} unit="%" />
             <FilterSlider   label="부채비율 최대" value={debtMax} onChange={setDebtMax} min={0} max={500} step={10} unit="%" />
             <FilterSliderMin label="린치점수 최소" value={lynchMin} onChange={setLynchMin} min={0} max={100} step={5} />
+
+            {/* 저평가 선점 축 — 박세익 스코어·매트릭스 존·RS 백분위 */}
+            <div className="pt-2 border-t border-slate-800/60 space-y-3">
+              <p className="text-[10px] text-slate-600">저평가 선점</p>
+              <FilterSliderMin label="박세익 점수 최소" value={parkMin} onChange={setParkMin} min={0} max={100} step={5} />
+              <FilterSliderMin label="RS 백분위 최소"   value={rsMin}   onChange={setRsMin}   min={0} max={100} step={5} />
+              <FilterSelect
+                label="매트릭스 존"
+                value={zone}
+                onChange={setZone}
+                options={ZONE_KEYS.map(k => ({ key: k, label: zoneMeta(k).label }))}
+              />
+              {zone && <p className="text-[10px] text-slate-600">{zoneMeta(zone).desc}</p>}
+              {preset && (
+                <p className="text-[10px] text-amber-500/80">
+                  프리셋이 켜져 있어 개별 필터는 적용되지 않습니다. 직접 조합하려면 초기화하세요.
+                </p>
+              )}
+            </div>
           </div>
 
           {/* Sort + Run */}
@@ -251,9 +345,9 @@ export default function ScreenerSection() {
 
           {/* Results */}
           {error && <p className="px-4 py-3 text-xs text-red-400">{error}</p>}
-          {noData && (
+          {notice && (
             <div className="px-4 py-6 text-center">
-              <p className="text-sm text-slate-500">스캔 데이터가 없습니다</p>
+              <p className="text-sm text-slate-400 leading-relaxed">{notice}</p>
               <p className="text-xs text-slate-600 mt-1">
                 {scanStatus
                   ? `마지막 스캔: ${new Date(scanStatus.started_at).toLocaleDateString('ko-KR')} (${scanStatus.status})`
@@ -270,7 +364,7 @@ export default function ScreenerSection() {
               )}
             </div>
           )}
-          {results !== null && !noData && (
+          {results !== null && !notice && (
             <>
               {results.length === 0 ? (
                 <div className="px-4 py-6 text-center">
@@ -289,9 +383,16 @@ export default function ScreenerSection() {
                   )}
                 </div>
               ) : (
-                <div className="divide-y divide-slate-800/50">
-                  {results.map(item => <ResultItem key={item.code} item={item} />)}
-                </div>
+                <>
+                  <div className="divide-y divide-slate-800/50">
+                    {results.map(item => <ResultItem key={item.code} item={item} />)}
+                  </div>
+                  {results.some(i => i.rsPartial) && (
+                    <p className="px-4 pt-2 text-[10px] text-slate-600">
+                      * 상장 기간이 짧아 20·60·120일 중 일부 구간만으로 산출한 RS입니다.
+                    </p>
+                  )}
+                </>
               )}
               {/* Pagination */}
               {total > LIMIT && (
