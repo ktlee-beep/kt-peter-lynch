@@ -131,10 +131,37 @@ export function snapshotDartCallStats() {
 }
 const bumpStat = (bucket, key) => { bucket[key] = (bucket[key] || 0) + 1; };
 
+// ── DART 호출 페이싱 ─────────────────────────────────────────────
+// 2026-08-30 전종목 백필이 초당 약 24회로 1,800여 회를 던진 직후부터 DART가 연결을
+// 리셋하기 시작했고(ECONNRESET), 그 뒤 모든 호출이 실패해 예산 14,976회를 태우고
+// 152종목만 적재했다. 종목별 동시성(CHUNK)만 낮추는 것으로는 부족하다 — 백필·일일 스캔·
+// 공시 조회가 각자 병렬로 돌면 합산 속도는 다시 올라간다. 그래서 모든 DART 호출이 지나는
+// 이 지점에서 프로세스 전역으로 간격을 강제한다.
+//
+// 200ms(초당 5회)는 DART가 공식 문서로 밝힌 한도가 아니라 [확인 필요], 차단을 유발한
+// 24회/초에서 크게 낮춰 잡은 보수적 값이다. 이 속도면 예산 15,000회가 약 50분이라
+// 기존 3일 분할 백필 일정과 그대로 맞는다.
+const DART_MIN_INTERVAL_MS = 200;
+let dartGate = Promise.resolve();
+let dartLastAt = 0;
+function dartSlot() {
+  // 직렬 체인으로 순서를 강제한다. 각 호출은 앞 호출이 슬롯을 잡은 시각을 기준으로 최소
+  // 간격만큼 기다리므로, 동시에 몇 개가 몰리든 전역 속도는 1/간격을 넘지 않는다.
+  const mine = dartGate.then(async () => {
+    const gap = DART_MIN_INTERVAL_MS - (Date.now() - dartLastAt);
+    if (gap > 0) await new Promise(r => setTimeout(r, gap));
+    dartLastAt = Date.now();
+  });
+  // 체인이 거부로 끊기면 이후 호출이 전부 막힌다 — 반드시 삼켜서 이어 붙인다.
+  dartGate = mine.catch(() => {});
+  return mine;
+}
+
 // DART JSON 엔드포인트 공통 호출. 실패 시 null을 반환하는 규약은 기존과 동일해서 호출부는
 // 그대로 두고, 원인만 dartCallStats에 남긴다. status '013'(조회된 데이터 없음)은 진짜
 // 무자료이고 '020'(요청 제한 초과)·'012'(접근 불가 IP)·'800'(점검)은 우리 쪽 차단이다.
 async function dartGet(url) {
+  await dartSlot();
   let r;
   try { r = await fetch(url); }
   catch (e) {
@@ -517,10 +544,8 @@ export async function fetchDartFinancials(corpCode, dartKey) {
     try {
       const url = `https://opendart.fss.or.kr/api/fnlttSinglAcnt.json`
         + `?crtfc_key=${dartKey}&corp_code=${corpCode}&bsns_year=${bsnsYear}&reprt_code=11011&fs_div=CFS`;
-      const r = await fetch(url);
-      if (!r.ok) continue;
-      const data = await r.json();
-      if (data.status !== '000' || !Array.isArray(data.list)) continue;
+      const data = await dartGet(url);
+      if (!data || !Array.isArray(data.list)) continue;
       const fsRows = pickFsRows(data.list);
       if (!fsRows) continue;
       const IS = fsRows.filter(i => i.sj_div === 'IS');
@@ -749,10 +774,8 @@ export async function fetchDartDisclosures(corpCode, dartKey) {
   try {
     const url = `https://opendart.fss.or.kr/api/list.json`
       + `?crtfc_key=${dartKey}&corp_code=${corpCode}&bgn_de=${bgnDe}&sort=date&sort_mth=desc&page_count=10`;
-    const r = await fetch(url);
-    if (!r.ok) return [];
-    const data = await r.json();
-    if (data.status !== '000' || !Array.isArray(data.list)) return [];
+    const data = await dartGet(url);
+    if (!data || !Array.isArray(data.list)) return [];
     return data.list.slice(0, 8).map(item => ({
       title: item.report_nm,
       date: `${item.rcept_dt.slice(0,4)}-${item.rcept_dt.slice(4,6)}-${item.rcept_dt.slice(6,8)}`,

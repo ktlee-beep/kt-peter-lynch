@@ -113,6 +113,21 @@ console.log('\n── 6. 스냅샷은 복사본 ──');
   ok('스냅샷 고정', [snap.status['020'], dartCallStats.status['020']], [1, 2]);
 }
 
+console.log('\n── 7. 전역 페이싱 ──');
+{
+  // 차단의 직접 원인은 속도였다. 동시에 몰아넣어도 전역 간격이 지켜지는지가 핵심 —
+  // 청크 동시성만 낮추면 백필·일일 스캔이 각자 돌 때 합산 속도가 다시 올라간다.
+  resetDartCallStats();
+  queue = [asJson({ status: '013' })];
+  const N = 6;
+  const t0 = Date.now();
+  await Promise.all(Array.from({ length: N }, () => fetchDartCompanyInfo('1', 'k')));
+  const elapsed = Date.now() - t0;
+  // 200ms 간격이면 6콜에 최소 1,000ms(첫 콜은 대기 없음). 타이머 오차를 감안해 850ms로 본다.
+  ok('동시 6콜이 직렬 간격을 지킴', elapsed >= 850, true);
+  ok('그래도 6콜 모두 수행됨', dartCallStats.status['013'], N);
+}
+
 globalThis.fetch = realFetch;
 console.log(`\n통과 ${pass} / 실패 ${fail}\n`);
 process.exit(fail ? 1 : 0);

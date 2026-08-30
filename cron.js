@@ -4,7 +4,7 @@
 import cron from 'node-cron';
 import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermoreScore, calcPiotroski, calcGrowthStreak, hasNoLoss, calcTTM, calcParkScore, matrixZone, median, calcRsRatios, rsPercentile, buildRsBreakpoints, calcSupplyTrend, seonjeomTriggers, SEONJEOM_PARK_MIN } from './analysis.js';
 import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief, loadCorpCodeMap, upsertCorpCodes, getDartCache, setDartCache, saveUsScan, getCompanyInfoCache, setCompanyInfoCache, setMultiYearCache, setQuarterlyCache, getGrowthCaches, countKvPrefix, listFreshKvCodes, listAllStocks, upsertStocks, deactivateStocks, saveUniverseMeta, savePerMedian, getPerMedian, getIndexCloses, mergeIndexCloses, saveRsDist, getRsDist, getSupplyCache, setSupplyCache, saveSeonjeomAlerts } from './db.js';
-import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures, CORP_MAP, fetchCorpCodeMap, fetchDartFinancials, US_UNIVERSE, fetchUsStockDaily, fetchDartCompanyInfo, fetchDartMultiYear, fetchDartQuarterly, hasYearData, resetDartCallStats, snapshotDartCallStats, dartBlockedBy, fetchNaverMarketSum, filterUniverse, fetchIndexOHLCV, fetchNaverInvestor, KRX_INDICES } from './data.js';
+import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures, CORP_MAP, fetchCorpCodeMap, fetchDartFinancials, US_UNIVERSE, fetchUsStockDaily, fetchDartCompanyInfo, fetchDartMultiYear, fetchDartQuarterly, hasYearData, dartCallStats, resetDartCallStats, snapshotDartCallStats, dartBlockedBy, fetchNaverMarketSum, filterUniverse, fetchIndexOHLCV, fetchNaverInvestor, KRX_INDICES } from './data.js';
 
 const FUNDAMENTALS_TTL_MS = 24 * 60 * 60 * 1000; // PER/PBR/ROE는 주가 연동 — 1거래일 이상 지나면 재수집
 
@@ -593,8 +593,11 @@ export async function runFundamentalsBackfill({ limit = 0, maxDartCalls = 15000,
   //   2) 연속 전멸이 이어지면 — 네트워크 단에서 끊기면 status조차 없다.
   // 40종목(5청크)이 연달아 전부 무자료일 확률은 정상 상태에서 사실상 없다. 그보다 짧게 잡으면
   // 비상장 폐지 직전 종목이 몰린 구간에서 정상 실행을 오탐으로 끊을 수 있다.
-  const DEAD_CHUNKS = 5;
-  let deadStreak = 0;
+  // 전멸한 청크가 "자료가 없어서"인지 "닿지 못해서"인지는 네트워크 실패 수로 갈린다.
+  // 닿지 못하는 상태는 더 돌아도 결과가 달라지지 않으므로 훨씬 빨리 끊는다. 반대로 한 번의
+  // 일시적 리셋으로 정상 실행을 죽이면 안 되니 연속 2청크는 본다.
+  const DEAD_CHUNKS = 5, UNREACHABLE_CHUNKS = 2;
+  let deadStreak = 0, netStreak = 0;
   resetDartCallStats();
 
   for (let i = 0; i < pending.length; i += CHUNK) {
@@ -603,6 +606,7 @@ export async function runFundamentalsBackfill({ limit = 0, maxDartCalls = 15000,
     if (calls + chunkCost > maxDartCalls) { stoppedBy = 'quota'; break; }
     calls += chunkCost;
 
+    const netBefore = dartCallStats.network;
     const res = await Promise.allSettled(chunk.map(p => backfillOne(p, corpResolver, dartKey)));
     const hit = res.filter(r => r.status === 'fulfilled' && r.value && !r.value.empty).length;
     done += hit;
@@ -614,7 +618,14 @@ export async function runFundamentalsBackfill({ limit = 0, maxDartCalls = 15000,
       console.error(`[Backfill] DART 차단 status ${blocked.join(',')} — 중단 (적재 ${done}, 호출 ${calls})`);
       break;
     }
-    deadStreak = hit ? 0 : deadStreak + 1;
+    const unreachable = dartCallStats.network > netBefore;
+    if (hit) { deadStreak = 0; netStreak = 0; }
+    else { deadStreak++; netStreak = unreachable ? netStreak + 1 : 0; }
+    if (netStreak >= UNREACHABLE_CHUNKS) {
+      stoppedBy = `dart-unreachable:${Object.keys(dartCallStats.netCause).join(',')}`;
+      console.error(`[Backfill] DART 연결 실패 연속 — 중단 (적재 ${done}, 호출 ${calls}, 원인 ${JSON.stringify(dartCallStats.netCause)})`);
+      break;
+    }
     if (deadStreak >= DEAD_CHUNKS) {
       stoppedBy = 'dead-streak';
       console.error(`[Backfill] ${DEAD_CHUNKS * CHUNK}종목 연속 무자료 — 수집 불능으로 보고 중단 (적재 ${done}, 호출 ${calls})`);
@@ -624,7 +635,8 @@ export async function runFundamentalsBackfill({ limit = 0, maxDartCalls = 15000,
     if ((i / CHUNK) % 25 === 0) {
       console.log(`[Backfill] ${i + chunk.length}/${pending.length} — 적재 ${done}, 무자료 ${empty}, 호출 ${calls}/${maxDartCalls}`);
     }
-    await new Promise(r => setTimeout(r, 300)); // DART 과부하 방지
+    // 청크 간 고정 대기는 두지 않는다. 속도 제어는 dartGet의 전역 페이서가 담당하며,
+    // 여기서 또 재우면 같은 목적의 지연이 두 겹으로 쌓여 실행 시간만 늘어난다.
   }
 
   const [nCo, nMy, nQ] = await Promise.all([
