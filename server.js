@@ -1300,7 +1300,11 @@ app.get('/api/screener', async (req, res) => {
     const fRsMin    = pNum(filters.rs_min);   // RS 백분위 하한(0~100)
 
     const results = [];
-    let parkRows = 0;  // park 필드를 실제로 들고 있는 행 수 — 0건과 "미계측"을 구분하기 위함
+    // 필터 축별로 "값을 실제로 들고 있는 행 수"를 센다 — 0건과 "미계측"을 구분하기 위함.
+    // RS를 따로 세는 이유: rs는 야간 스캔이 만드는 값인데다 백분위(pct)는 RS 분포 기준선에
+    // 한 번 더 의존한다. rs 객체는 있는데 pct만 null인 상태가 실제로 존재하므로, 필터가
+    // 보는 값(pct)과 같은 기준으로 세지 않으면 미계측을 미계측으로 못 잡는다.
+    let parkRows = 0, rsRows = 0;
     for (const r of deduped) {
       let fund = {}, park = null, mZone = null, pctHigh = null, rs = null;
       try {
@@ -1312,6 +1316,7 @@ app.get('/api/screener', async (req, res) => {
         rs = j.rs || null;
       } catch {}
       if (park) parkRows++;
+      if (pNum(rs?.pct) !== null) rsRows++;
 
       const per = pNum(fund.per);
       const pbr = pNum(fund.pbr);
@@ -1370,11 +1375,17 @@ app.get('/api/screener', async (req, res) => {
       return ascending ? va - vb : vb - va;
     });
 
-    // 박세익 필터를 걸었는데 park를 가진 행이 하나도 없으면 "후보 0건"이 아니라 "미계측"이다.
-    // 둘 다 빈 배열로 나가면 화면에서 구분할 방법이 없어 백필 누락이 조용히 묻힌다.
-    const parkFiltered = fParkMin !== null || fZone !== null;
-    const message = (parkFiltered && parkRows === 0 && deduped.length > 0)
-      ? '박세익 스코어가 아직 계산되지 않았습니다. 다음 전체 스캔 이후 사용 가능합니다.'
+    // 야간 스캔이 만드는 값으로 필터를 걸었는데 그 값을 가진 행이 하나도 없으면 "후보 0건"이
+    // 아니라 "미계측"이다. 둘 다 빈 배열로 나가면 화면에서 구분할 방법이 없어 백필 누락이
+    // 조용히 묻힌다. 축을 나눠서 판정하는 이유는 박세익과 RS가 서로 다른 시점에 채워지기
+    // 때문이다 — 박세익은 DART 백필에, RS는 지수 시계열과 분포 기준선에 각각 걸린다.
+    // 한쪽만 비어 있는 상태가 정상적으로 존재하므로, 비어 있는 축만 골라 안내한다.
+    const hasRows = deduped.length > 0;
+    const uncomputed = [];
+    if ((fParkMin !== null || fZone !== null) && parkRows === 0 && hasRows) uncomputed.push('박세익 스코어');
+    if (fRsMin !== null && rsRows === 0 && hasRows) uncomputed.push('RS 백분위');
+    const message = uncomputed.length
+      ? `${uncomputed.join(' · ')}가 아직 계산되지 않았습니다. 다음 전체 스캔 이후 사용 가능합니다.`
       : undefined;
     setScreenerCache(cacheKey, { data: results, ts: Date.now(), message });
 
