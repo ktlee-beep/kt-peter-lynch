@@ -107,6 +107,51 @@ function pickFsRows(list) {
   return hasDupe ? null : list;
 }
 
+// ── DART 호출 실패 원인 계측 ─────────────────────────────────────
+// 아래 수집 함수들은 실패를 전부 null로 뭉갠다. 그 자체는 옳다 — 한 종목이 실패해도 전체
+// 스캔은 계속돼야 한다. 문제는 호출부에서 "정말 자료가 없는 종목"과 "키가 막혔다 / 호출원이
+// 차단됐다"가 똑같은 null로 보인다는 점이다. 전종목 백필이 1,096종목을 "무자료"로 기록하고
+// 예산 14,976회를 태운 적이 있는데(2026-08-30), 결과만으로는 시장에 자료가 없는 건지 우리가
+// 막힌 건지 판별할 수 없었다. 원인별로 세어 두면 그 구분이 실행 결과에 남는다.
+//
+// 모듈 전역인 이유: 세 수집 함수는 서로 다른 경로에서 불리는데 호출부마다 컨텍스트를
+// 꿰면 시그니처가 전부 바뀐다. 계수기일 뿐이므로 동시 실행 시 섞여도 손실은 정확도뿐이다.
+export const dartCallStats = { ok: 0, network: 0, http: {}, status: {} };
+export function resetDartCallStats() {
+  dartCallStats.ok = 0;
+  dartCallStats.network = 0;
+  dartCallStats.http = {};
+  dartCallStats.status = {};
+}
+export function snapshotDartCallStats() {
+  return { ok: dartCallStats.ok, network: dartCallStats.network,
+           http: { ...dartCallStats.http }, status: { ...dartCallStats.status } };
+}
+const bumpStat = (bucket, key) => { bucket[key] = (bucket[key] || 0) + 1; };
+
+// DART JSON 엔드포인트 공통 호출. 실패 시 null을 반환하는 규약은 기존과 동일해서 호출부는
+// 그대로 두고, 원인만 dartCallStats에 남긴다. status '013'(조회된 데이터 없음)은 진짜
+// 무자료이고 '020'(요청 제한 초과)·'012'(접근 불가 IP)·'800'(점검)은 우리 쪽 차단이다.
+async function dartGet(url) {
+  let r;
+  try { r = await fetch(url); }
+  catch { dartCallStats.network++; return null; }
+  if (!r.ok) { bumpStat(dartCallStats.http, r.status); return null; }
+  const j = await r.json().catch(() => null);
+  if (!j) { bumpStat(dartCallStats.status, 'parse'); return null; }
+  bumpStat(dartCallStats.status, j.status ?? 'none');
+  if (j.status !== '000') return null;
+  dartCallStats.ok++;
+  return j;
+}
+
+// 자료 부재가 아니라 호출원이 막힌 상태를 뜻하는 status. 이 코드가 한 번이라도 오면
+// 더 돌아봐야 결과는 같고 일일 예산만 탄다.
+export const DART_BLOCKING_STATUS = ['010', '011', '012', '020', '021', '800', '901'];
+export function dartBlockedBy(stats = dartCallStats) {
+  return DART_BLOCKING_STATUS.filter(s => (stats.status?.[s] || 0) > 0);
+}
+
 export async function fetchDartMultiYear(corpCode, dartKey) {
   const curYear = new Date().getFullYear();
   const years = [curYear - 1, curYear - 2, curYear - 3, curYear - 4, curYear - 5];
@@ -119,10 +164,8 @@ export async function fetchDartMultiYear(corpCode, dartKey) {
     try {
       const url = `https://opendart.fss.or.kr/api/fnlttSinglAcnt.json?crtfc_key=${dartKey}`
                 + `&corp_code=${corpCode}&bsns_year=${year}&reprt_code=11011&fs_div=CFS`;
-      const r = await fetch(url).catch(() => null);
-      if (!r?.ok) return null;
-      const j = await r.json().catch(() => null);
-      if (j?.status !== '000') return null;
+      const j = await dartGet(url);
+      if (!j) return null;
       // CFS(연결) 우선, 없으면 OFS(개별) — 재요청이 아니라 행 필터다(pickFsRows 주석 참조)
       const rows = pickFsRows(j.list);
       if (!rows) return null;
@@ -196,10 +239,8 @@ export function hasYearData(y) {
 // acc_mt(결산월)가 12월이 아니면 연간 실적의 기준 시점이 달라 타사와 직접 비교할 수 없다.
 export async function fetchDartCompanyInfo(corpCode, dartKey) {
   try {
-    const r = await fetch(`https://opendart.fss.or.kr/api/company.json?crtfc_key=${dartKey}&corp_code=${corpCode}`);
-    if (!r.ok) return null;
-    const j = await r.json().catch(() => null);
-    if (j?.status !== '000') return null;
+    const j = await dartGet(`https://opendart.fss.or.kr/api/company.json?crtfc_key=${dartKey}&corp_code=${corpCode}`);
+    if (!j) return null;
     const s = (v) => (typeof v === 'string' && v.trim()) ? v.trim() : null;
     return {
       corpName:   s(j.corp_name),
@@ -253,10 +294,8 @@ export async function fetchDartQuarterly(corpCode, dartKey, accMonth = 12) {
   const pull = async (year, code) => {
     const url = `https://opendart.fss.or.kr/api/fnlttSinglAcnt.json?crtfc_key=${dartKey}`
               + `&corp_code=${corpCode}&bsns_year=${year}&reprt_code=${code}&fs_div=CFS`;
-    const r = await fetch(url).catch(() => null);
-    if (!r?.ok) return null;
-    const j = await r.json().catch(() => null);
-    return j?.status === '000' ? pickFsRows(j.list) : null;
+    const j = await dartGet(url);
+    return j ? pickFsRows(j.list) : null;
   };
 
   const now = new Date();

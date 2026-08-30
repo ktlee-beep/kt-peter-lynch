@@ -4,7 +4,7 @@
 import cron from 'node-cron';
 import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermoreScore, calcPiotroski, calcGrowthStreak, hasNoLoss, calcTTM, calcParkScore, matrixZone, median, calcRsRatios, rsPercentile, buildRsBreakpoints, calcSupplyTrend, seonjeomTriggers, SEONJEOM_PARK_MIN } from './analysis.js';
 import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief, loadCorpCodeMap, upsertCorpCodes, getDartCache, setDartCache, saveUsScan, getCompanyInfoCache, setCompanyInfoCache, setMultiYearCache, setQuarterlyCache, getGrowthCaches, countKvPrefix, listFreshKvCodes, listAllStocks, upsertStocks, deactivateStocks, saveUniverseMeta, savePerMedian, getPerMedian, getIndexCloses, mergeIndexCloses, saveRsDist, getRsDist, getSupplyCache, setSupplyCache, saveSeonjeomAlerts } from './db.js';
-import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures, CORP_MAP, fetchCorpCodeMap, fetchDartFinancials, US_UNIVERSE, fetchUsStockDaily, fetchDartCompanyInfo, fetchDartMultiYear, fetchDartQuarterly, hasYearData, fetchNaverMarketSum, filterUniverse, fetchIndexOHLCV, fetchNaverInvestor, KRX_INDICES } from './data.js';
+import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures, CORP_MAP, fetchCorpCodeMap, fetchDartFinancials, US_UNIVERSE, fetchUsStockDaily, fetchDartCompanyInfo, fetchDartMultiYear, fetchDartQuarterly, hasYearData, resetDartCallStats, snapshotDartCallStats, dartBlockedBy, fetchNaverMarketSum, filterUniverse, fetchIndexOHLCV, fetchNaverInvestor, KRX_INDICES } from './data.js';
 
 const FUNDAMENTALS_TTL_MS = 24 * 60 * 60 * 1000; // PER/PBR/ROE는 주가 연동 — 1거래일 이상 지나면 재수집
 
@@ -585,6 +585,18 @@ export async function runFundamentalsBackfill({ limit = 0, maxDartCalls = 15000,
   const CHUNK = 8;
   let calls = 0, done = 0, empty = 0, stoppedBy = truncatedByLimit ? 'limit' : null;
 
+  // DART가 호출원을 막으면 모든 종목이 동시에 실패하는데, 예전 루프는 그걸 종목별 "무자료"로
+  // 세면서 예산을 끝까지 태웠다 — 2026-08-30 실행이 14,976회를 쓰고 152종목만 적재했다.
+  // 예산은 일일 쿼터에서 차감되므로, 아무것도 못 받는 상태로 계속 도는 것은 그날 남은 DART
+  // 작업(일일 스캔의 재무·공시)까지 함께 죽인다. 그래서 두 가지로 멈춘다.
+  //   1) 차단을 뜻하는 status가 오면 즉시 — 더 돌아도 결과는 같다.
+  //   2) 연속 전멸이 이어지면 — 네트워크 단에서 끊기면 status조차 없다.
+  // 40종목(5청크)이 연달아 전부 무자료일 확률은 정상 상태에서 사실상 없다. 그보다 짧게 잡으면
+  // 비상장 폐지 직전 종목이 몰린 구간에서 정상 실행을 오탐으로 끊을 수 있다.
+  const DEAD_CHUNKS = 5;
+  let deadStreak = 0;
+  resetDartCallStats();
+
   for (let i = 0; i < pending.length; i += CHUNK) {
     const chunk = pending.slice(i, i + CHUNK);
     const chunkCost = chunk.reduce((s, p) => s + p.cost, 0);
@@ -592,9 +604,21 @@ export async function runFundamentalsBackfill({ limit = 0, maxDartCalls = 15000,
     calls += chunkCost;
 
     const res = await Promise.allSettled(chunk.map(p => backfillOne(p, corpResolver, dartKey)));
-    for (const r of res) {
-      if (r.status === 'fulfilled' && r.value && !r.value.empty) done++;
-      else empty++;
+    const hit = res.filter(r => r.status === 'fulfilled' && r.value && !r.value.empty).length;
+    done += hit;
+    empty += chunk.length - hit;
+
+    const blocked = dartBlockedBy();
+    if (blocked.length) {
+      stoppedBy = `dart-blocked:${blocked.join(',')}`;
+      console.error(`[Backfill] DART 차단 status ${blocked.join(',')} — 중단 (적재 ${done}, 호출 ${calls})`);
+      break;
+    }
+    deadStreak = hit ? 0 : deadStreak + 1;
+    if (deadStreak >= DEAD_CHUNKS) {
+      stoppedBy = 'dead-streak';
+      console.error(`[Backfill] ${DEAD_CHUNKS * CHUNK}종목 연속 무자료 — 수집 불능으로 보고 중단 (적재 ${done}, 호출 ${calls})`);
+      break;
     }
 
     if ((i / CHUNK) % 25 === 0) {
@@ -613,6 +637,9 @@ export async function runFundamentalsBackfill({ limit = 0, maxDartCalls = 15000,
     ok: true, universe: codes.length, targeted: pending.length,
     filled: done, empty, freshSkipped: skipped, noCorpCode: noCorp,
     dartCallsBudgeted: calls, maxDartCalls,
+    // empty가 왜 컸는지 결과만 보고 판별할 수 있게 원인별 계수를 함께 싣는다.
+    // status['013']이 크면 진짜 무자료, '020'·'012' 등이 있으면 우리가 막힌 것이다.
+    dart: snapshotDartCallStats(),
     stoppedBy,                       // 'quota' | 'limit' | null(완주)
     truncatedByLimit,
     // 주의: limit로 자른 경우 pending이 이미 잘려 있어 이 값은 "전체 백로그"가 아니라
