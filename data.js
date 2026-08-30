@@ -116,15 +116,17 @@ function pickFsRows(list) {
 //
 // 모듈 전역인 이유: 세 수집 함수는 서로 다른 경로에서 불리는데 호출부마다 컨텍스트를
 // 꿰면 시그니처가 전부 바뀐다. 계수기일 뿐이므로 동시 실행 시 섞여도 손실은 정확도뿐이다.
-export const dartCallStats = { ok: 0, network: 0, http: {}, status: {} };
+export const dartCallStats = { ok: 0, network: 0, netCause: {}, http: {}, status: {} };
 export function resetDartCallStats() {
   dartCallStats.ok = 0;
   dartCallStats.network = 0;
+  dartCallStats.netCause = {};
   dartCallStats.http = {};
   dartCallStats.status = {};
 }
 export function snapshotDartCallStats() {
   return { ok: dartCallStats.ok, network: dartCallStats.network,
+           netCause: { ...dartCallStats.netCause },
            http: { ...dartCallStats.http }, status: { ...dartCallStats.status } };
 }
 const bumpStat = (bucket, key) => { bucket[key] = (bucket[key] || 0) + 1; };
@@ -135,7 +137,14 @@ const bumpStat = (bucket, key) => { bucket[key] = (bucket[key] || 0) + 1; };
 async function dartGet(url) {
   let r;
   try { r = await fetch(url); }
-  catch { dartCallStats.network++; return null; }
+  catch (e) {
+    // 건수만으로는 대응이 갈리지 않는다. undici는 실제 원인을 e.cause에 넣고 겉은 전부
+    // "fetch failed"로 통일하는데, ENOTFOUND(DNS)·ECONNREFUSED(거부)·ETIMEDOUT(방화벽
+    // 드롭)은 취해야 할 조치가 완전히 다르다. 원인 코드까지 남겨야 결과만 보고 판단할 수 있다.
+    dartCallStats.network++;
+    bumpStat(dartCallStats.netCause, e?.cause?.code || e?.code || e?.cause?.message || e?.name || 'unknown');
+    return null;
+  }
   if (!r.ok) { bumpStat(dartCallStats.http, r.status); return null; }
   const j = await r.json().catch(() => null);
   if (!j) { bumpStat(dartCallStats.status, 'parse'); return null; }

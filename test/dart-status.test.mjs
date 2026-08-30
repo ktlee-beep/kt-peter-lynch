@@ -66,6 +66,21 @@ console.log('\n── 4. status 이전 단계의 실패 ──');
   ok('네트워크 예외 → network 계수', [out, stats.network, stats.ok], [null, 1, 0]);
 }
 {
+  // undici는 겉을 전부 "fetch failed"로 통일하고 실제 원인을 cause에 넣는다.
+  // cause를 안 보면 DNS 실패와 방화벽 드롭이 같은 숫자로 보인다.
+  const wrapped = () => {
+    const e = new TypeError('fetch failed');
+    e.cause = Object.assign(new Error('connect ETIMEDOUT'), { code: 'ETIMEDOUT' });
+    throw e;
+  };
+  const { stats } = await run(wrapped);
+  ok('undici cause 코드 추출', stats.netCause, { ETIMEDOUT: 1 });
+}
+{
+  const { stats } = await run(() => { throw Object.assign(new Error('x'), { code: 'ENOTFOUND' }); });
+  ok('cause 없으면 e.code 사용', stats.netCause, { ENOTFOUND: 1 });
+}
+{
   const { out, stats } = await run({ ok: false, status: 503, json: async () => ({}) });
   ok('HTTP 503 → http 계수', [out, stats.http['503']], [null, 1]);
 }
@@ -83,7 +98,7 @@ console.log('\n── 5. 누적과 초기화 ──');
   ok('같은 원인 누적', dartCallStats.status['013'], 2);
   // 실행별 계수여야 한다 — 초기화가 안 되면 이전 실행의 차단이 다음 실행을 즉시 끊는다.
   resetDartCallStats();
-  ok('reset 후 비워짐', [dartCallStats.ok, dartCallStats.network, dartCallStats.status], [0, 0, {}]);
+  ok('reset 후 비워짐', [dartCallStats.ok, dartCallStats.network, dartCallStats.status, dartCallStats.netCause], [0, 0, {}, {}]);
   ok('reset 후 차단 없음', dartBlockedBy(), []);
 }
 
