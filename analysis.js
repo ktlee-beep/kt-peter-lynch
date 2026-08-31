@@ -752,13 +752,18 @@ export function calcParkScore(growth, priceCtx = {}, fund = {}, opts = {}) {
   else if (pct <= PARK_DROP_DEEP)    { score += PARK_WEIGHTS.dropDeep; reasons.push(`고점 대비 ${pct.toFixed(0)}%`); }
   else if (pct <= PARK_DROP_MILD)    { score += PARK_WEIGHTS.dropMild; reasons.push(`고점 대비 ${pct.toFixed(0)}%`); }
 
-  // PER 저평가 — 기준은 유니버스 중앙값(섹터 중앙값은 kt_stocks.sector 충전 후 v2).
+  // PER 저평가 — 기준은 동종업계(섹터) 중앙값이고, 섹터 표본이 얇으면 유니버스 중앙값이다.
+  // 어느 쪽을 썼는지는 opts.perBasis로 넘어온다(cron.js resolvePerMedian이 결정).
+  // 기준을 호출부에서 고르게 둔 이유: 무엇과 비교했는지가 이 가점의 의미 전부다.
+  // "PER 15"는 그 자체로 싸지도 비싸지도 않다 — 반도체 15와 유틸리티 15는 정반대다
+  // (data.js fetchDartCompanyInfo 주석). 그래서 사유 문자열에 기준 이름을 반드시 남긴다.
   // 기준이 없으면 가점을 건너뛴다. 없는 기준으로 10점을 주는 것보다 전 종목이 똑같이
   // 10점을 못 받는 편이 낫다 — 종목 간 상대 순위가 보존된다.
   const per = toNum(fund?.per), med = toNum(opts?.perMedian);
+  const basis = typeof opts?.perBasis === 'string' && opts.perBasis.trim() ? opts.perBasis.trim() : '중앙값';
   if (med === null || med <= 0)      reasons.push('PER 중앙값 없음 — 저평가 가점 제외');
   else if (per === null || per <= 0) reasons.push('PER 없음');
-  else if (per < med) { score += PARK_WEIGHTS.cheapPer; reasons.push(`PER ${per.toFixed(1)} < 중앙값 ${med.toFixed(1)}`); }
+  else if (per < med) { score += PARK_WEIGHTS.cheapPer; reasons.push(`PER ${per.toFixed(1)} < ${basis} ${med.toFixed(1)}`); }
 
   score = Math.max(0, Math.min(100, score));
   const grade = score >= 80 ? 'A (선점 유력)' : score >= 60 ? 'B (후보)' : score >= 40 ? 'C (관망)' : 'D (제외)';

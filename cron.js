@@ -4,6 +4,7 @@
 import cron from 'node-cron';
 import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermoreScore, calcPiotroski, calcGrowthStreak, hasNoLoss, calcTTM, calcParkScore, matrixZone, median, calcRsRatios, rsPercentile, buildRsBreakpoints, calcSupplyTrend, seonjeomTriggers, SEONJEOM_PARK_MIN } from './analysis.js';
 import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief, loadCorpCodeMap, upsertCorpCodes, getDartCache, setDartCache, saveUsScan, getCompanyInfoCache, setCompanyInfoCache, setMultiYearCache, setQuarterlyCache, getGrowthCaches, countKvPrefix, listFreshKvCodes, listAllStocks, upsertStocks, deactivateStocks, saveUniverseMeta, savePerMedian, getPerMedian, getIndexCloses, mergeIndexCloses, saveRsDist, getRsDist, getSupplyCache, setSupplyCache, saveSeonjeomAlerts } from './db.js';
+import { SECTOR_MAP } from './sector_map.js';
 import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures, CORP_MAP, fetchCorpCodeMap, fetchDartFinancials, US_UNIVERSE, fetchUsStockDaily, fetchDartCompanyInfo, fetchDartMultiYear, fetchDartQuarterly, hasYearData, dartCallStats, resetDartCallStats, snapshotDartCallStats, dartBlockedBy, fetchNaverMarketSum, filterUniverse, fetchIndexOHLCV, fetchNaverInvestor, KRX_INDICES } from './data.js';
 
 const FUNDAMENTALS_TTL_MS = 24 * 60 * 60 * 1000; // PER/PBR/ROE는 주가 연동 — 1거래일 이상 지나면 재수집
@@ -209,6 +210,29 @@ const PER_MEDIAN_MIN_SAMPLE = 100;   // 표본이 이보다 적으면 그건 "�
 const PER_MEDIAN_MAX_AGE_DAYS = 14;  // 그 이상 묵은 값은 다른 국면의 숫자다 — 없느니만 못하다
 const PER_SANE_MAX = 1000;           // 적자 직전 기업의 PER 수천 배를 표본에서 제외
 
+// 섹터 중앙값의 최소 표본. 유니버스 기준(100)을 그대로 쓰면 섹터는 영원히 성립하지 않는다 —
+// 1,150종목 유니버스에서도 16개 섹터로 나누면 섹터당 평균 70종목이다. 5로 잡은 근거는
+// 통계적 최적이 아니라 "중앙값이 한두 종목의 개별 사정으로 결정되지 않는 최소선"이다
+// [확인 필요 — 백테스트로 조정할 것]. 실측(2026-08-30, 83종목 유니버스)에서 2차전지는
+// 표본 4건에 중앙값 139.6이 나왔다. 이런 값을 기준으로 삼으면 같은 섹터 전 종목이
+// 무조건 "저평가" 가점을 받는다 — 얇은 표본은 가점을 주는 게 아니라 거르는 게 맞다.
+const PER_SECTOR_MIN_SAMPLE = 5;
+
+// 종목 하나가 무엇과 비교돼야 하는지 고른다. 섹터 우선, 없으면 유니버스, 둘 다 없으면 미적용.
+// 섹터를 앞에 두는 이유는 절대 PER로는 저평가를 판정할 수 없기 때문이다 — 반도체 PER 15와
+// 유틸리티 PER 15는 의미가 정반대다(data.js fetchDartCompanyInfo 주석). 유니버스 중앙값은
+// 그 둘을 한 자로 재므로, 저PER 업종 전체가 저평가로, 고PER 업종 전체가 고평가로 쏠린다.
+// 순수 함수로 분리해 스캔을 돌리지 않고도 검증할 수 있게 둔다.
+export function resolvePerMedian(meds, sector) {
+  const sec = sector ? meds?.sectors?.[sector] : null;
+  if (sec && Number.isFinite(sec.median) && sec.median > 0 && Number(sec.n) >= PER_SECTOR_MIN_SAMPLE) {
+    return { median: sec.median, basis: `${sector} 중앙값`, n: sec.n };
+  }
+  const u = meds?.universe;
+  if (Number.isFinite(u) && u > 0) return { median: u, basis: '유니버스 중앙값', n: meds?.n ?? null };
+  return { median: null, basis: null, n: null };
+}
+
 // ── Phase 4-1: RS 컨텍스트 ────────────────────────────────────────
 // 종목은 자기 시장 지수와 비교한다. KOSDAQ 종목을 KOSPI로 재면 2026년처럼 두 지수가
 // 갈라진 국면에서 코스닥 전체가 통째로 "시장 대비 약함"으로 찍힌다 — 종목 고유의
@@ -241,14 +265,36 @@ async function loadRsContext() {
   return { series, breaks };
 }
 
-// 저장된 중앙값을 쓸 수 있는지 판정. 못 쓰면 null — 호출부는 저평가 가점을 건너뛴다.
+// 저장값이 너무 묵었는지. 유니버스든 섹터든 같은 스캔에서 나온 한 벌이라 판정 기준도 하나다.
+function perMedianFresh(meta, nowMs) {
+  const ts = Date.parse(meta?.at ?? '');
+  return Number.isFinite(ts) && nowMs - ts <= PER_MEDIAN_MAX_AGE_DAYS * 86400000;
+}
+
+// 저장된 유니버스 중앙값을 쓸 수 있는지 판정. 못 쓰면 null — 호출부는 유니버스 기준을 건너뛴다.
 export function pickPerMedian(meta, nowMs = Date.now()) {
   if (!meta || !Number.isFinite(meta.median) || meta.median <= 0) return null;
   if (!Number.isFinite(meta.n) || meta.n < PER_MEDIAN_MIN_SAMPLE) return null;
-  const ts = Date.parse(meta.at ?? '');
-  if (!Number.isFinite(ts)) return null;
-  if (nowMs - ts > PER_MEDIAN_MAX_AGE_DAYS * 86400000) return null;
+  // 폴백 유니버스(대형주 하드코딩) 스캔이 남긴 시장 전체 중앙값은 거절한다. 예전에는
+  // 저장 자체를 막아 이 상황을 만들지 않았지만, 이제는 같은 스캔이 섹터 중앙값도 함께
+  // 남겨야 해서 저장을 막을 수 없다 — 판정을 읽는 쪽으로 옮겼다. 섹터 중앙값은 대형주끼리
+  // 비교하므로 편향이 상쇄되지만, 시장 전체 중앙값은 대형주 편향이 그대로 기준이 된다.
+  if (meta.fallback === true) return null;
+  if (!perMedianFresh(meta, nowMs)) return null;
   return meta.median;
+}
+
+// 스캔이 종목별로 쓸 기준 한 벌. 유니버스는 pickPerMedian의 엄격한 판정을 그대로 통과해야
+// 하고, 섹터는 표본 수만 resolvePerMedian이 종목별로 본다(섹터마다 표본이 다르므로 여기서
+// 일괄 거를 수 없다). 나이 판정은 공통 — 한 스캔의 산출물이라 부분적으로만 신선할 수 없다.
+export function pickPerMedians(meta, nowMs = Date.now()) {
+  if (!meta || !perMedianFresh(meta, nowMs)) return { universe: null, n: null, sectors: {}, at: null };
+  const sectors = {};
+  for (const [name, v] of Object.entries(meta.sectors ?? {})) {
+    if (v && Number.isFinite(v.median) && v.median > 0 && Number.isFinite(v.n)) sectors[name] = { median: v.median, n: v.n };
+  }
+  const universe = pickPerMedian(meta, nowMs);
+  return { universe, n: universe === null ? null : meta.n, sectors, at: meta.at ?? null };
 }
 
 // ── 경량 종목 분석 (Naver 일봉 기반) ────────────────────────────
@@ -364,7 +410,12 @@ async function analyzeStockLean(code, corpResolver = null, dartKey = '', ctx = {
     );
 
     // 박세익 축 스코어와 2축 매트릭스. 리버모어 점수가 나온 뒤라야 존을 판정할 수 있다.
-    const park = calcParkScore(growth, { pctFrom52wHigh, w52Partial }, fundamentals, { perMedian: ctx?.perMedian ?? null });
+    // 저평가 가점 기준은 종목마다 다르다 — 같은 PER 15라도 반도체에서는 싸고 유틸리티에서는
+    // 비싸다. ctx.perMedians에 유니버스·섹터 기준이 함께 들어오고 여기서 종목의 섹터로 고른다.
+    const sector = SECTOR_MAP[code] || null;
+    const perRef = resolvePerMedian(ctx?.perMedians, sector);
+    const park = calcParkScore(growth, { pctFrom52wHigh, w52Partial }, fundamentals,
+      { perMedian: perRef.median, perBasis: perRef.basis });
     const zone = matrixZone(park.score, lScore, park.gated);
 
     // RS(시장 대비 상대강도) — Phase 4-1. 지수 시계열은 스캔 시작 시 한 번 읽어 ctx로 넘어온다.
@@ -395,6 +446,10 @@ async function analyzeStockLean(code, corpResolver = null, dartKey = '', ctx = {
       rs,           // 시장 대비 상대강도 { rs20, rs60, rs120, score, pct, partial }
       quarterly,    // 최근 분기 원본 (누적·YoY)
       induty: company?.indutyCode ?? null,  // 표준산업분류 — 업종 상대비교/섹터 필터용
+      sector,                               // SECTOR_MAP 분류 — 저평가 가점의 비교 대상이 된 섹터
+      // 이 종목의 저평가 가점이 무엇과 비교됐는지. park.reasons에도 문장으로 남지만,
+      // 기준이 없어 가점이 빠진 경우를 화면에서 집계하려면 구조화된 값이 있어야 한다.
+      perBasis: perRef.basis, perBasisMedian: perRef.median,
       market: company?.market ?? null,
     };
   } catch {
@@ -694,8 +749,19 @@ export async function runDailyScan() {
   console.log(`[Cron] corp_code 매핑 ${Object.keys(corpMap).length}개, DART키 ${dartKey ? '있음' : '없음'}`);
 
   // 박세익 저평가 가점 기준 — 직전 스캔이 남긴 값(없으면 null → 해당 항목 미반영)
-  const perMedian = pickPerMedian(await getPerMedian().catch(() => null));
-  console.log(`[Cron] PER 중앙값 기준: ${perMedian ?? '없음 (저평가 가점 제외)'}`);
+  // 원본을 따로 들고 있는다 — 스캔 끝에서 "지금 저장하는 게 기존 값보다 나은가"를 판정해야
+  // 하는데, pickPerMedians를 통과한 뷰만으로는 기존 값이 폴백 스캔 산출인지 알 수 없다.
+  const perMedianMeta = await getPerMedian().catch(() => null);
+  const perMedians = pickPerMedians(perMedianMeta);
+  const secList = Object.entries(perMedians.sectors)
+    .filter(([, v]) => v.n >= PER_SECTOR_MIN_SAMPLE)
+    .map(([k, v]) => `${k} ${v.median.toFixed(1)}(${v.n})`);
+  console.log(`[Cron] PER 기준 — 유니버스 ${perMedians.universe ?? '없음'} / 섹터 ${secList.length ? secList.join(', ') : '없음'}`);
+  if (perMedians.universe === null && !secList.length) {
+    // 조용히 지나가면 "저평가 선점" 스크리너가 저평가를 채점하지 않은 채로 돌고, 결과만
+    // 보고는 그걸 알 수 없다. 원인 축(섹터·유니버스)을 함께 남겨 다음 스캔에서 판별 가능하게.
+    console.warn('[Cron] 저평가 가점 전면 제외 — 유니버스·섹터 기준이 모두 없음 (직전 스캔의 표본 부족 또는 14일 초과)');
+  }
 
   // RS 지수 시계열 + 직전 스캔 백분위 기준. 실패해도 스캔은 계속한다 — RS는 부가 지표라
   // 여기서 던지면 그날 전 종목 분석이 통째로 날아간다.
@@ -712,6 +778,7 @@ export async function runDailyScan() {
   const CHUNK_SIZE = 30;
   let totalProcessed = 0, totalFailed = 0, totalBuy = 0;
   const perSample = [];
+  const perBySector = {};   // 섹터명 → PER 표본. 내일 스캔의 동종업계 비교 기준이 된다.
   const rsSample = [];
   const zoneTally = { SEONJEOM: 0, BREAKOUT: 0, STORY_WARN: 0, NEUTRAL: 0, EXCLUDED: 0, NO_DATA: 0 };
   const gateTally = { NO_DATA: 0, SHORT_HISTORY: 0, LOSS_3Y: 0 };
@@ -719,7 +786,7 @@ export async function runDailyScan() {
   for (let i = 0; i < stocks.length; i += CHUNK_SIZE) {
     const chunk = stocks.slice(i, i + CHUNK_SIZE);
     const results = await Promise.allSettled(chunk.map((s) => analyzeStockLean(s.code, corpResolver, dartKey, {
-      perMedian,
+      perMedians,
       // 지수 시계열이 없으면 undefined가 넘어가고 calcRsRatios가 전부 null을 돌려준다 —
       // 알 수 없는 지수로 대신 재느니 RS를 비우는 쪽이 맞다.
       indexSeries: rsCtx.series[s.yahoo_suffix],
@@ -739,7 +806,12 @@ export async function runDailyScan() {
       // 내일 쓸 PER 중앙값 표본. 적자 기업의 음수 PER과 적자 직전의 수천 배 PER은 뺀다 —
       // 중앙값이 극단값에 강하다고 해서 의미 없는 값을 표본에 넣을 이유는 없다.
       const perVal = Number(a.fundamentals?.per);
-      if (Number.isFinite(perVal) && perVal > 0 && perVal < PER_SANE_MAX) perSample.push(perVal);
+      if (Number.isFinite(perVal) && perVal > 0 && perVal < PER_SANE_MAX) {
+        perSample.push(perVal);
+        // 섹터 표본도 같은 위생 기준으로 모은다. 유니버스와 다른 기준을 쓰면 어느 종목이
+        // 어느 표본에 들어갔는지가 갈려서, 두 중앙값의 차이를 해석할 수 없게 된다.
+        if (a.sector) (perBySector[a.sector] ||= []).push(perVal);
+      }
       // 내일 쓸 RS 분포 표본. partial(상장 6개월 미만 등)은 rs20만으로 계산된 값이라
       // 120일까지 다 채운 종목과 같은 분포에 넣으면 기준선이 단기 변동에 끌린다.
       if (Number.isFinite(a.rs?.score) && !a.rs.partial) rsSample.push(a.rs.score);
@@ -790,14 +862,33 @@ export async function runDailyScan() {
   // 최소치를 넘기지만 구성이 대형주 편향이라, DB 일시 장애 하루가 이후 최대 14일간
   // 전 종목의 저평가 가점 기준을 대형주 중앙값으로 오염시킨다. 표본 "수"가 아니라
   // 표본 "대표성"이 깨지는 경우라 개수 게이트로는 걸러지지 않는다.
+  // 섹터 중앙값은 폴백 유니버스에서도 남긴다. 위 경고가 겨냥한 편향은 "대형주 중앙값을
+  // 시장 전체 기준으로 쓰는 것"인데, 섹터 기준은 대형주를 같은 섹터 대형주와 비교하므로
+  // 편향이 양쪽에 같이 걸려 상쇄된다. 유니버스 중앙값만 fallback 표시로 읽는 쪽에서 거른다
+  // (pickPerMedian). 이렇게 나누지 않으면 유니버스가 1,150종목으로 커질 때까지 저평가
+  // 가점이 통째로 꺼져 있게 되고, 그건 "저평가 선점" 스크리너로서 반쪽이다.
   const perMed = median(perSample);
-  if (fallbackUniverse) {
-    console.warn(`[Cron] 폴백 유니버스 스캔 — PER 중앙값 갱신 생략 (표본 ${perSample.length}건, 대형주 편향)`);
-  } else if (perMed != null && perSample.length >= PER_MEDIAN_MIN_SAMPLE) {
-    await savePerMedian({ median: perMed, n: perSample.length, at: new Date().toISOString() })
-      .catch(e => console.error('[Cron] PER 중앙값 저장 실패:', e.message));
+  const sectorMeds = {};
+  for (const [name, vals] of Object.entries(perBySector)) {
+    const m = median(vals);
+    if (m != null && m > 0) sectorMeds[name] = { median: m, n: vals.length };
+  }
+  const usableSectors = Object.values(sectorMeds).filter(v => v.n >= PER_SECTOR_MIN_SAMPLE).length;
+  const universeOk = perMed != null && perSample.length >= PER_MEDIAN_MIN_SAMPLE && !fallbackUniverse;
+  // 기존 값을 지우면 안 되는 경우: 이번이 폴백 스캔인데 저장된 값은 정상 유니버스 산출이고
+  // 아직 신선하다. 덮어쓰면 그 값의 유니버스 기준이 fallback 표시에 걸려 죽는다.
+  const wouldDowngrade = fallbackUniverse && perMedianMeta?.fallback !== true
+    && pickPerMedian(perMedianMeta) !== null;
+  if (wouldDowngrade) {
+    console.warn(`[Cron] 폴백 유니버스 스캔 — 정상 유니버스 기준이 살아 있어 갱신 생략 (표본 ${perSample.length}건)`);
+  } else if (universeOk || usableSectors > 0) {
+    await savePerMedian({
+      median: perMed, n: perSample.length, at: new Date().toISOString(),
+      sectors: sectorMeds, fallback: fallbackUniverse === true,
+    }).catch(e => console.error('[Cron] PER 중앙값 저장 실패:', e.message));
+    console.log(`[Cron] PER 기준 저장 — 유니버스 ${universeOk ? perMed.toFixed(1) : '미달'}(${perSample.length}), 섹터 ${usableSectors}개 사용 가능/${Object.keys(sectorMeds).length}개 산출`);
   } else {
-    console.warn(`[Cron] PER 표본 ${perSample.length}건 — 중앙값 갱신 생략 (최소 ${PER_MEDIAN_MIN_SAMPLE})`);
+    console.warn(`[Cron] PER 표본 ${perSample.length}건, 사용 가능 섹터 0개 — 갱신 생략 (유니버스 최소 ${PER_MEDIAN_MIN_SAMPLE}, 섹터 최소 ${PER_SECTOR_MIN_SAMPLE})`);
   }
 
   // 다음 스캔이 쓸 RS 백분위 기준. 생략 조건은 PER 중앙값과 같은 이유다 — 폴백 유니버스의

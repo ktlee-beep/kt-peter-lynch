@@ -102,10 +102,18 @@ function ResultItem({ item }) {
           <span className="text-sm font-semibold text-white truncate">{item.name}</span>
           <span className="text-[10px] text-slate-600 shrink-0">{item.code}</span>
         </div>
-        <div className="flex gap-2 mt-0.5 flex-wrap">
+        <div className="flex gap-2 mt-0.5 flex-wrap items-center">
+          {item.sector && (
+            <span className="text-[9px] px-1.5 py-px rounded bg-slate-800 text-slate-400">{item.sector}</span>
+          )}
           {item.per  != null && <span className="text-[10px] text-slate-500">PER {item.per.toFixed(1)}배</span>}
           {item.pbr  != null && <span className="text-[10px] text-slate-500">PBR {item.pbr.toFixed(2)}배</span>}
           {item.roe  != null && <span className="text-[10px] text-slate-500">ROE {item.roe.toFixed(1)}%</span>}
+          {/* 저평가 가점의 비교 대상. 이게 없으면 박세익 점수에서 저평가 축이 빠진 것이라
+              같은 점수라도 의미가 다르다 — 화면에서 구분되지 않으면 오독한다. */}
+          {item.perBasisMedian != null
+            ? <span className="text-[10px] text-slate-600">기준 {item.perBasis} {item.perBasisMedian.toFixed(1)}</span>
+            : item.parkScore != null && <span className="text-[10px] text-amber-600/70">저평가 기준 없음</span>}
         </div>
         {/* 박세익 축 — 점수·존·낙폭. 셋 다 없는 종목(구 스캔 행)에서는 줄 자체를 만들지 않는다. */}
         {(item.parkScore != null || zm || typeof item.pctFrom52wHigh === 'number') && (
@@ -153,6 +161,11 @@ export default function ScreenerSection() {
   const [parkMin, setParkMin] = useState(null);
   const [zone,    setZone]    = useState(null);
   const [rsMin,   setRsMin]   = useState(null);
+  const [sector,  setSector]  = useState(null);
+  // 허용 목록은 서버가 응답에 실어 보낸다(server.js sectorOptions) — 클라이언트가 복제하면
+  // 서버의 400 검증과 어긋나는 날 "고를 수는 있는데 400"이 된다.
+  const [sectorOptions, setSectorOptions] = useState([]);
+  const [sectorSummary, setSectorSummary] = useState([]);
   const [sortBy,  setSortBy]  = useState('lynch_score');
   const [page,    setPage]    = useState(1);
   const [results, setResults] = useState(null);
@@ -216,12 +229,14 @@ export default function ScreenerSection() {
   const resetFilters = () => {
     setPreset(null);
     setPerMax(null); setPbrMax(null); setRoeMin(null); setDebtMax(null); setLynchMin(null);
-    setParkMin(null); setZone(null); setRsMin(null);
+    setParkMin(null); setZone(null); setRsMin(null); setSector(null);
   };
 
   const runScreener = useCallback(async (pg = 1) => {
     setLoading(true); setError(null); setNotice(null);
     const params = new URLSearchParams({ sort: sortBy, page: pg, limit: 20 });
+    // 섹터는 프리셋과 함께 걸린다(server.js — 프리셋은 점수 기준, 섹터는 모집단).
+    if (sector != null) params.set('sector', sector);
     if (preset) { params.set('preset', preset); }
     else {
       if (perMax   != null) params.set('per_max',   perMax);
@@ -240,10 +255,12 @@ export default function ScreenerSection() {
       setResults(d.items ?? []);
       setTotal(d.total ?? 0);
       setPage(pg);
+      setSectorSummary(d.sectorSummary ?? []);
+      if (Array.isArray(d.sectorOptions) && d.sectorOptions.length) setSectorOptions(d.sectorOptions);
       if (d.message) setNotice(d.message);
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
-  }, [preset, perMax, pbrMax, roeMin, debtMax, lynchMin, parkMin, zone, rsMin, sortBy]);
+  }, [preset, perMax, pbrMax, roeMin, debtMax, lynchMin, parkMin, zone, rsMin, sector, sortBy]);
 
   const LIMIT = 20;
 
@@ -317,9 +334,17 @@ export default function ScreenerSection() {
                 options={ZONE_KEYS.map(k => ({ key: k, label: zoneMeta(k).label }))}
               />
               {zone && <p className="text-[10px] text-slate-600">{zoneMeta(zone).desc}</p>}
+              {/* 섹터는 프리셋과 무관하게 걸린다 — 아래 안내문의 예외라 바로 옆에 둔다. */}
+              <FilterSelect
+                label="섹터"
+                value={sector}
+                onChange={setSector}
+                options={sectorOptions.map(s => ({ key: s, label: s }))}
+              />
               {preset && (
                 <p className="text-[10px] text-amber-500/80">
-                  프리셋이 켜져 있어 개별 필터는 적용되지 않습니다. 직접 조합하려면 초기화하세요.
+                  프리셋이 켜져 있어 개별 필터는 적용되지 않습니다(섹터는 예외 — 함께 적용됩니다).
+                  직접 조합하려면 초기화하세요.
                 </p>
               )}
             </div>
@@ -384,6 +409,30 @@ export default function ScreenerSection() {
                 </div>
               ) : (
                 <>
+                  {/* "어느 섹터가 저평가인가"는 종목을 20개씩 넘겨보며 답할 질문이 아니다.
+                      필터가 걸린 전체 결과 기준이라 현재 페이지에 안 보이는 종목도 포함된다. */}
+                  {sectorSummary.length > 0 && (
+                    <div className="px-4 pb-3 border-b border-slate-800/50">
+                      <p className="text-[10px] text-slate-500 mb-1.5">섹터별 분포 — 선점 종목 순</p>
+                      <div className="space-y-1">
+                        {sectorSummary.slice(0, 6).map(s => (
+                          <div key={s.sector} className="flex items-center gap-2 text-[10px]">
+                            <span className="w-20 shrink-0 truncate text-slate-300">{s.sector}</span>
+                            <span className="text-slate-500 shrink-0">{s.count}종목</span>
+                            {s.seonjeom > 0 && <span className="text-brand-400 shrink-0">선점 {s.seonjeom}</span>}
+                            {/* 채점된 종목이 전체보다 적으면 중앙값의 모수를 함께 밝힌다 —
+                                적자·이력부족 게이트로 빠진 종목은 점수 자체가 없다. */}
+                            {s.medPark != null && (
+                              <span className="text-slate-500 shrink-0">
+                                중앙 {s.medPark.toFixed(0)}점{s.scored < s.count ? ` (${s.scored}/${s.count})` : ''}
+                              </span>
+                            )}
+                            {s.medPer != null && <span className="text-slate-600 shrink-0">PER {s.medPer.toFixed(1)}</span>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   <div className="divide-y divide-slate-800/50">
                     {results.map(item => <ResultItem key={item.code} item={item} />)}
                   </div>

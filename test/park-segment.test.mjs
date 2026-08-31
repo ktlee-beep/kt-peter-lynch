@@ -235,5 +235,59 @@ ok('타입 불량도 산출 불가로 기록', rBadType.some(s => s.includes('�
 // matrixZone은 문자열에 fail-closed다 — 여기서 관대해지면 필터 임계값이 무의미해진다.
 ok('matrixZone 문자열 점수 → NO_DATA', z('70', 40), 'NO_DATA');
 
+// ── 12. 저평가 비교 기준 선택 (섹터 우선) ─────────────────────────
+// 절대 PER로는 저평가를 판정할 수 없다 — 반도체 15와 유틸리티 15는 의미가 정반대다.
+// 여기가 무너지면 저PER 업종 전체가 저평가로, 고PER 업종 전체가 고평가로 쏠린다.
+console.log('\n=== 12. resolvePerMedian ===');
+const meds = (o = {}) => ({ universe: 12.5, n: 900, sectors: { 반도체: { median: 18, n: 30 } }, ...o });
+const rp = (m, s) => { const r = cron.resolvePerMedian(m, s); return [r.median, r.basis]; };
+
+ok('섹터 표본 충분 → 섹터 기준', rp(meds(), '반도체'), [18, '반도체 중앙값']);
+ok('섹터 미지정 → 유니버스',      rp(meds(), null), [12.5, '유니버스 중앙값']);
+ok('모르는 섹터 → 유니버스',      rp(meds(), '없는섹터'), [12.5, '유니버스 중앙값']);
+ok('표본 5 경계 → 섹터 사용',     rp(meds({ sectors: { 반도체: { median: 18, n: 5 } } }), '반도체'), [18, '반도체 중앙값']);
+// 실측 회귀(2026-08-30): 83종목 유니버스에서 2차전지 표본 4건에 중앙값 139.6이 나왔다.
+// 이런 값을 기준으로 삼으면 같은 섹터 전 종목이 무조건 저평가 가점을 받는다.
+ok('표본 4 → 유니버스로 폴백',    rp(meds({ sectors: { 이차전지: { median: 139.6, n: 4 } } }), '이차전지'), [12.5, '유니버스 중앙값']);
+ok('섹터 중앙값 0 → 유니버스',    rp(meds({ sectors: { 반도체: { median: 0, n: 30 } } }), '반도체'), [12.5, '유니버스 중앙값']);
+ok('섹터만 있고 유니버스 없음',   rp(meds({ universe: null }), '반도체'), [18, '반도체 중앙값']);
+ok('둘 다 없음 → 미적용',         rp(meds({ universe: null, sectors: {} }), '반도체'), [null, null]);
+ok('meds null → 미적용',          rp(null, '반도체'), [null, null]);
+
+console.log('\n=== 12-1. pickPerMedians ===');
+const stored = (o = {}) => ({ median: 12.5, n: 900, at: '2026-08-27T11:00:00Z',
+  sectors: { 반도체: { median: 18, n: 30 } }, ...o });
+// 핵심 설계: 폴백(대형주 하드코딩) 스캔 산출물은 유니버스 기준만 죽이고 섹터는 살린다.
+// 대형주를 같은 섹터 대형주와 비교하는 것은 편향이 상쇄되지만, 시장 전체 중앙값은 아니다.
+const pm = cron.pickPerMedians(stored({ fallback: true }), NOW);
+ok('폴백 스캔 → 유니버스만 무효', [pm.universe, pm.sectors.반도체?.median], [null, 18]);
+ok('폴백 스캔에서도 섹터 기준 채택', cron.resolvePerMedian(pm, '반도체').basis, '반도체 중앙값');
+ok('폴백 + 섹터 미지정 → 미적용',   cron.resolvePerMedian(pm, null).median, null);
+const pmOld = cron.pickPerMedians(stored({ at: '2026-08-13T11:00:00Z' }), NOW);
+ok('15일 경과 → 섹터까지 전부 무효', [pmOld.universe, Object.keys(pmOld.sectors)], [null, []]);
+ok('정상 저장값 → 둘 다 유효', (() => {
+  const p = cron.pickPerMedians(stored(), NOW);
+  return [p.universe, p.sectors.반도체?.n];
+})(), [12.5, 30]);
+ok('불량 섹터 항목 제외', Object.keys(cron.pickPerMedians(
+  stored({ sectors: { 반도체: { median: 18, n: 30 }, 잡음: { median: 0, n: 9 }, 무표본: { median: 5 } } }), NOW).sectors), ['반도체']);
+ok('저장값 null → 빈 기준', (() => {
+  const p = cron.pickPerMedians(null, NOW);
+  return [p.universe, p.sectors];
+})(), [null, {}]);
+// 폴백 표시는 pickPerMedian 단독 호출에서도 걸러야 한다 — 나머지 조건이 다 정상이어도.
+ok('pickPerMedian 폴백 표시 → null', cron.pickPerMedian(meta({ fallback: true }), NOW), null);
+ok('pickPerMedian fallback:false → 정상', cron.pickPerMedian(meta({ fallback: false }), NOW), 12.5);
+
+console.log('\n=== 12-2. 사유 문자열에 기준 표기 ===');
+// 같은 80점이라도 무엇과 비교해 저평가였는지가 사유에 남지 않으면 점수를 읽을 수 없다.
+const rSec = an.calcParkScore(g(), {}, { per: 8 }, { perMedian: 15, perBasis: '반도체 중앙값' }).reasons;
+ok('섹터 기준이 사유에 표기', rSec.some(s => s.includes('PER 8.0 < 반도체 중앙값 15.0')), true);
+ok('기준 표기해도 배점 동일', score(g(), {}, { per: 8 }, { perMedian: 15, perBasis: '반도체 중앙값' }), 80);
+const rDef = an.calcParkScore(g(), {}, { per: 8 }, { perMedian: 15 }).reasons;
+ok('basis 없으면 중앙값으로 표기', rDef.some(s => s.includes('PER 8.0 < 중앙값 15.0')), true);
+const rBlank = an.calcParkScore(g(), {}, { per: 8 }, { perMedian: 15, perBasis: '  ' }).reasons;
+ok('공백 basis → 기본 표기로 대체', rBlank.some(s => s.includes('< 중앙값 15.0')), true);
+
 console.log(`\n통과 ${pass} / 실패 ${fail}`);
 process.exit(fail ? 1 : 0);

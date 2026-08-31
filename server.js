@@ -1229,7 +1229,7 @@ function setScreenerCache(key, value) {
 app.get('/api/screener', async (req, res) => {
   const {
     per_max, pbr_max, roe_min, debt_max,
-    lynch_min, piotroski_min, park_min, zone, rs_min,
+    lynch_min, piotroski_min, park_min, zone, rs_min, sector,
     sort = 'lynch_score', page = '1', limit = '20',
     preset,
   } = req.query;
@@ -1257,6 +1257,16 @@ app.get('/api/screener', async (req, res) => {
     return res.status(400).json({ error: `zone 값이 올바르지 않습니다. 허용: ${ZONES.join(', ')}` });
   }
 
+  // 섹터는 프리셋이 덮어쓰지 않는다. 프리셋은 "어떤 점수 기준으로 거를지"를 정하고 섹터는
+  // "어느 모집단에서 거를지"를 정하는 축이라 서로 대체 관계가 아니다. 덮어쓰면 "선점 후보 중
+  // 반도체만" 같은 조합이 불가능해지는데, 섹터 필드를 만든 목적 자체가 그 질문이다.
+  // 검증은 zone과 같은 이유로 엄격하다 — 오타가 조용히 무시되면 섹터 필터가 통째로 사라져
+  // 전 유니버스가 그 섹터인 것처럼 보인다. 좁히기만 하는 필터라 결과가 넓어지는 쪽이 위험하다.
+  if (sector !== undefined && !SECTOR_NAMES.includes(sector)) {
+    return res.status(400).json({ error: `sector 값이 올바르지 않습니다. 허용: ${SECTOR_NAMES.join(', ')}` });
+  }
+  filters.sector = sector;
+
   const cacheKey = JSON.stringify(filters) + sort;
   const cached = screenerCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < SCREENER_TTL) {
@@ -1264,6 +1274,7 @@ app.get('/api/screener', async (req, res) => {
     const slice = cached.data.slice((pg - 1) * lm, pg * lm);
     // 미계측 안내는 캐시에도 함께 실린다 — 안 그러면 첫 응답 이후 1시간 동안 "후보 0건"으로 보인다.
     return res.json({ items: slice, total: cached.data.length, page: pg, fromCache: true,
+      sectorSummary: cached.sectorSummary ?? [], sectorOptions: SECTOR_NAMES,
       ...(cached.message ? { message: cached.message } : {}) });
   }
 
@@ -1298,6 +1309,7 @@ app.get('/api/screener', async (req, res) => {
     const fParkMin  = pNum(filters.park_min);
     const fZone     = ZONES.includes(filters.zone) ? filters.zone : null;  // 검증은 위에서 끝났다
     const fRsMin    = pNum(filters.rs_min);   // RS 백분위 하한(0~100)
+    const fSector   = SECTOR_NAMES.includes(filters.sector) ? filters.sector : null;
 
     const results = [];
     // 필터 축별로 "값을 실제로 들고 있는 행 수"를 센다 — 0건과 "미계측"을 구분하기 위함.
@@ -1307,6 +1319,7 @@ app.get('/api/screener', async (req, res) => {
     let parkRows = 0, rsRows = 0;
     for (const r of deduped) {
       let fund = {}, park = null, mZone = null, pctHigh = null, rs = null;
+      let jSector = null, jPerBasis = null, jPerBasisMedian = null;
       try {
         const j = JSON.parse(r.analysis_json || '{}');
         fund = j.fundamentals || {};
@@ -1314,6 +1327,9 @@ app.get('/api/screener', async (req, res) => {
         mZone = j.matrixZone || null;
         pctHigh = pNum(j.pctFrom52wHigh);
         rs = j.rs || null;
+        jSector = j.sector || null;
+        jPerBasis = j.perBasis || null;
+        jPerBasisMedian = pNum(j.perBasisMedian);
       } catch {}
       if (park) parkRows++;
       if (pNum(rs?.pct) !== null) rsRows++;
@@ -1342,10 +1358,18 @@ app.get('/api/screener', async (req, res) => {
       const rsPct = pNum(rs?.pct);
       if (fRsMin !== null && !(rsPct !== null && rsPct >= fRsMin)) continue;
 
+      // 섹터는 스캔이 analysis_json에 남긴 값을 우선한다 — 그 값이 저평가 가점의 실제 비교
+      // 대상이었으므로, 화면의 섹터와 채점에 쓰인 섹터가 어긋나면 사유를 읽을 수 없게 된다.
+      // 구 스캔 행에는 없으므로 SECTOR_MAP으로 보충한다(server.js /api/sectors와 같은 원천).
+      const sec = jSector || SECTOR_MAP[r.code] || null;
+      if (fSector !== null && sec !== fSector) continue;
+
       const name = r.kt_stocks?.name || krxName(r.code) || r.code;
 
       results.push({
-        code: r.code, name,
+        code: r.code, name, sector: sec,
+        // 저평가 가점이 무엇과 비교됐는지. null이면 기준이 없어 가점에서 빠진 종목이다.
+        perBasis: jPerBasis, perBasisMedian: jPerBasisMedian,
         per, pbr, roe, debtRatio: debt, marketCap: mktCap,
         close: r.close_price, changeRate: r.change_rate, rsi: r.rsi,
         lynchScore: r.lynch_score, piotroskiScore: r.piotroski_score,
@@ -1387,11 +1411,39 @@ app.get('/api/screener', async (req, res) => {
     const message = uncomputed.length
       ? `${uncomputed.join(' · ')}가 아직 계산되지 않았습니다. 다음 전체 스캔 이후 사용 가능합니다.`
       : undefined;
-    setScreenerCache(cacheKey, { data: results, ts: Date.now(), message });
+    // 섹터 집계. "어느 섹터가 저평가인가"는 종목 목록을 20개씩 넘겨보며 답할 질문이 아니라
+    // 집계로 답할 질문인데, 지금까지는 그 집계를 낼 자리가 없었다. 필터가 걸린 결과 집합에
+    // 대해 내므로 "선점 프리셋에서 섹터별 분포"가 그대로 나온다. 페이지가 아니라 전체 기준이다.
+    const secAgg = new Map();
+    for (const it of results) {
+      const k = it.sector || '미분류';
+      if (!secAgg.has(k)) secAgg.set(k, { sector: k, count: 0, parkScores: [], pers: [], seonjeom: 0 });
+      const a = secAgg.get(k);
+      a.count++;
+      if (it.parkScore != null) a.parkScores.push(it.parkScore);
+      if (it.per != null && it.per > 0) a.pers.push(it.per);
+      if (it.matrixZone === 'SEONJEOM') a.seonjeom++;
+    }
+    const med = (arr) => {
+      if (!arr.length) return null;
+      const v = [...arr].sort((x, y) => x - y), m = v.length >> 1;
+      return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+    };
+    const sectorSummary = [...secAgg.values()].map(a => ({
+      sector: a.sector, count: a.count, seonjeom: a.seonjeom,
+      // 평균이 아니라 중앙값이다 — 섹터당 표본이 한 자릿수라 0점(적자 게이트) 한 종목이
+      // 평균을 끌어내리면 섹터 전체가 나빠 보인다.
+      medPark: med(a.parkScores), scored: a.parkScores.length, medPer: med(a.pers),
+    })).sort((x, y) => y.seonjeom - x.seonjeom || (y.medPark ?? -1) - (x.medPark ?? -1) || y.count - x.count);
+
+    setScreenerCache(cacheKey, { data: results, ts: Date.now(), message, sectorSummary });
 
     const pg = parseInt(page), lm = parseInt(limit);
     const slice = results.slice((pg - 1) * lm, pg * lm);
-    res.json({ items: slice, total: results.length, page: pg, ...(message ? { message } : {}) });
+    // 허용 섹터 목록을 응답에 싣는다. 클라이언트가 상수를 복제하면 서버의 400 검증과
+    // 드롭다운이 언젠가 어긋나고, 그 어긋남은 "필터를 골랐는데 400"으로만 드러난다.
+    res.json({ items: slice, total: results.length, page: pg, sectorSummary, sectorOptions: SECTOR_NAMES,
+      ...(message ? { message } : {}) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
