@@ -128,14 +128,26 @@ export function detectFreshSignals(closes, ma5arr, ma20arr, ma60arr, volumes) {
   const m20 = v => ma20arr.at(v) ?? null;
   const m60 = v => ma60arr.at(v) ?? null;
   const c   = v => closes.at(v)  ?? null;
-  const curAligned = m5(-1) > m20(-1) && m20(-1) > m60(-1);
-  const oldAligned = m5(-8) != null && m5(-8) > m20(-8) && m20(-8) > m60(-8);
+  // JS의 `숫자 > null`은 null을 0으로 강제변환해 항상 true가 된다. ma60이 아직 없는
+  // 상장 20~59봉 종목에서 `m20 > m60(null)`이 true가 되어, 60일선이 존재하지도 않는데
+  // "정배열 신규 전환"으로 잡히고 freshnessScore에 +3이 붙었다. 이 프로젝트의 null 보존
+  // 원칙(데이터 없음을 0으로 뭉개지 않는다)이 언어 차원의 암묵 형변환으로 뚫린 지점이다.
+  // aboveMa*now도 같은 이유로 가드한다. belowMa*prev의 `!= null`이 대개 앞을 막아주지만
+  // calcMA(:207)는 구간에 null 종가가 섞이면 그 윈도우만 null로 비우므로 이평 배열 중간에
+  // 구멍이 날 수 있다. 그때 `m60(-6)`은 값이 있는데 `m60(-1)`이 null인 조합이 성립해
+  // `종가 > null`이 다시 `> 0`으로 뚫린다. 과거시점만 막는 기존 방식으로는 불충분하다.
+  const aligned = (v) => {
+    const a = m5(v), b = m20(v), c60 = m60(v);
+    return a != null && b != null && c60 != null && a > b && b > c60;
+  };
+  const curAligned = aligned(-1);
+  const oldAligned = aligned(-8);
   const freshAlignment = curAligned && !oldAligned;
-  const aboveMa60now  = c(-1) > m60(-1);
-  const belowMa60prev = m60(-6) != null && c(-6) < m60(-6);
+  const aboveMa60now  = c(-1) != null && m60(-1) != null && c(-1) > m60(-1);
+  const belowMa60prev = m60(-6) != null && c(-6) != null && c(-6) < m60(-6);
   const freshMa60Break = aboveMa60now && belowMa60prev;
-  const aboveMa20now  = c(-1) > m20(-1);
-  const belowMa20prev = m20(-4) != null && c(-4) < m20(-4);
+  const aboveMa20now  = c(-1) != null && m20(-1) != null && c(-1) > m20(-1);
+  const belowMa20prev = m20(-4) != null && c(-4) != null && c(-4) < m20(-4);
   const freshMa20Break = aboveMa20now && belowMa20prev;
   const lastVols = volumes.slice(-21, -1);
   const avgVol   = lastVols.reduce((s, v) => s + v, 0) / (lastVols.length || 1);
@@ -341,7 +353,10 @@ export function calcCandlePatterns(opens, highs, lows, closes) {
     const p5 = closes.slice(i - 5, i).reduce((s, v) => s + v, 0) / 5;
     if (closes[i] < p5 * 1.03) patterns.push({ name:'망치형', nameEn:'Hammer', signal:'bullish', desc:'강한 반등 신호 — 매수세가 하락 시도를 완전 흡수.' });
   }
-  if (n >= 2 && !isGrn(i - 1) && u >= b * 1.8 && l <= b * 0.3) {
+  // r > 0 가드: 점상한가(시가=고가=저가=종가)면 b·u·l이 전부 0이라 `0>=0 && 0<=0`이
+  // 통과해 역망치(bullish)가 오발화했다. 같은 파일의 도지는 `r > 0`, 망치형은 5일 이평
+  // 가격 필터, 유성형은 `!isGrn`에 각각 막히고 역망치만 무방비였다.
+  if (n >= 2 && range(i) > 0 && !isGrn(i - 1) && u >= b * 1.8 && l <= b * 0.3) {
     patterns.push({ name:'역망치', nameEn:'Inverted Hammer', signal:'bullish', desc:'반등 가능성 — 위꼬리 길어 매수 시도 확인.' });
   }
   if (n >= 6 && !isGrn(i) && l >= b * 1.8 && u <= b * 0.3) {
