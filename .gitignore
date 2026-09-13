@@ -45,3 +45,6 @@ kt-*.png
 gh-pages-temp/
 .claude/
 새 폴더/
+
+# 백테스트 일봉 캐시 (네이버에서 재수집 가능, 수십 MB)
+scripts/backtest/cache/

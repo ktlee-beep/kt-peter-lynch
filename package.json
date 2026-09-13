@@ -6,7 +6,10 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "test": "node scripts/run-tests.mjs",
+    "backtest:fetch": "node scripts/backtest/fetch-ohlcv.mjs",
+    "backtest": "node scripts/backtest/harness.mjs"
   },
   "engines": {
     "node": ">=20.19.0"
