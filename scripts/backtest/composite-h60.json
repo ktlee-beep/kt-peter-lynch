@@ -1,0 +1,1044 @@
+{
+  "generatedAt": "2026-09-13T15:57:05.947Z",
+  "horizon": 60,
+  "cutoffs": [
+    8.43,
+    14.99,
+    18.5,
+    21.49
+  ],
+  "picks": [
+    {
+      "key": "B_저항_박스상단돌파",
+      "axis": "지지저항",
+      "weight": 4.955,
+      "n": 1344,
+      "eIn": 2.1,
+      "eOut": 7.81,
+      "rate": 1.99
+    },
+    {
+      "key": "B_저항_52주신고가권",
+      "axis": "지지저항",
+      "weight": 4.64,
+      "n": 5860,
+      "eIn": 1.46,
+      "eOut": 7.82,
+      "rate": 9.15
+    },
+    {
+      "key": "B_되돌림_얕음38",
+      "axis": "지지저항",
+      "weight": 3.265,
+      "n": 15348,
+      "eIn": 2.6,
+      "eOut": 3.93,
+      "rate": 23.29
+    },
+    {
+      "key": "A_추세_정배열",
+      "axis": "추세",
+      "weight": 2.965,
+      "n": 15387,
+      "eIn": 2.09,
+      "eOut": 3.84,
+      "rate": 23.12
+    },
+    {
+      "key": "E_캔들_상승_고점권",
+      "axis": "캔들",
+      "weight": 2.575,
+      "n": 2803,
+      "eIn": 2.75,
+      "eOut": 2.4,
+      "rate": 4.22
+    },
+    {
+      "key": "A_추세_60일선위",
+      "axis": "추세",
+      "weight": 2.12,
+      "n": 26318,
+      "eIn": 1.84,
+      "eOut": 2.4,
+      "rate": 39.98
+    },
+    {
+      "key": "C_이평_일목구름위",
+      "axis": "이동평균",
+      "weight": 2.05,
+      "n": 16801,
+      "eIn": 1.64,
+      "eOut": 2.46,
+      "rate": 27.19
+    },
+    {
+      "key": "A_추세_ADX강세",
+      "axis": "추세",
+      "weight": 1.885,
+      "n": 18229,
+      "eIn": 1.33,
+      "eOut": 2.44,
+      "rate": 27.31
+    },
+    {
+      "key": "A_추세_상승구조",
+      "axis": "추세",
+      "weight": 1.745,
+      "n": 15844,
+      "eIn": 1.24,
+      "eOut": 2.25,
+      "rate": 24.45
+    },
+    {
+      "key": "C_이평_MACD당일골든",
+      "axis": "이동평균",
+      "weight": 1.52,
+      "n": 2473,
+      "eIn": 1.11,
+      "eOut": 1.93,
+      "rate": 3.9
+    },
+    {
+      "key": "A_추세_고점갱신",
+      "axis": "추세",
+      "weight": 1.245,
+      "n": 27555,
+      "eIn": 1.1,
+      "eOut": 1.39,
+      "rate": 42.59
+    },
+    {
+      "key": "F_BB_상단80",
+      "axis": "오실레이터",
+      "weight": 0.85,
+      "n": 10820,
+      "eIn": 0.6,
+      "eOut": 1.1,
+      "rate": 16.87
+    },
+    {
+      "key": "F_RSI_과매도30",
+      "axis": "오실레이터",
+      "weight": 0.765,
+      "n": 3447,
+      "eIn": 1.06,
+      "eOut": 0.47,
+      "rate": 5.69
+    },
+    {
+      "key": "A_추세_저점갱신",
+      "axis": "추세",
+      "weight": 0.72,
+      "n": 30078,
+      "eIn": 0.23,
+      "eOut": 1.21,
+      "rate": 46.86
+    },
+    {
+      "key": "F_스토캐_과매도",
+      "axis": "오실레이터",
+      "weight": -0.58,
+      "n": 9989,
+      "eIn": -0.07,
+      "eOut": -1.09,
+      "rate": 15.62
+    },
+    {
+      "key": "D_거래_급증양봉",
+      "axis": "거래량",
+      "weight": -1.065,
+      "n": 3457,
+      "eIn": -0.17,
+      "eOut": -1.96,
+      "rate": 5.34
+    },
+    {
+      "key": "C_이평_MACD골든",
+      "axis": "이동평균",
+      "weight": -1.44,
+      "n": 31256,
+      "eIn": -1.21,
+      "eOut": -1.67,
+      "rate": 52.15
+    },
+    {
+      "key": "D_거래_감소0.7",
+      "axis": "거래량",
+      "weight": -1.55,
+      "n": 30097,
+      "eIn": -0.43,
+      "eOut": -2.67,
+      "rate": 47.91
+    },
+    {
+      "key": "B_되돌림_깊음62",
+      "axis": "지지저항",
+      "weight": -2.01,
+      "n": 32034,
+      "eIn": -1.3,
+      "eOut": -2.72,
+      "rate": 52.5
+    },
+    {
+      "key": "E_캔들_상승_저점권",
+      "axis": "캔들",
+      "weight": -2.04,
+      "n": 3890,
+      "eIn": -1.31,
+      "eOut": -2.77,
+      "rate": 6.53
+    }
+  ],
+  "params": {
+    "MIN_N": 1000,
+    "MIN_EDGE": 0.4
+  },
+  "design": null,
+  "holdout": {
+    "window": 348,
+    "endOffset": 600,
+    "evaluated": 36838,
+    "strategies": {
+      "combined_v1": {
+        "label": "현행 combinedSignal (12조건 flat, BUY>=4)",
+        "signals": 3739,
+        "sells": 1238,
+        "undecided": 0,
+        "excluded": {
+          "bad_entry_price": 6
+        },
+        "horizons": {
+          "5": {
+            "all": {
+              "count": 3737,
+              "winRate": 47,
+              "avgReturn": 0.21,
+              "medReturn": -0.37,
+              "profitFactor": 1.07,
+              "maxWin": 143.13,
+              "maxLoss": -53.26,
+              "avgMAE": -5.5,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 2611,
+              "winRate": 46,
+              "avgReturn": -0.05,
+              "medReturn": -0.61,
+              "profitFactor": 0.98,
+              "maxWin": 143.13,
+              "maxLoss": -53.26,
+              "avgMAE": -5.58,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 1126,
+              "winRate": 50,
+              "avgReturn": 0.81,
+              "medReturn": -0.01,
+              "profitFactor": 1.32,
+              "maxWin": 90.11,
+              "maxLoss": -50.43,
+              "avgMAE": -5.33,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 0.33
+          },
+          "20": {
+            "all": {
+              "count": 3737,
+              "winRate": 46,
+              "avgReturn": 0.7,
+              "medReturn": -1.06,
+              "profitFactor": 1.13,
+              "maxWin": 273.31,
+              "maxLoss": -72.33,
+              "avgMAE": -10.63,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 2611,
+              "winRate": 44,
+              "avgReturn": 0.02,
+              "medReturn": -1.79,
+              "profitFactor": 1,
+              "maxWin": 273.31,
+              "maxLoss": -72.33,
+              "avgMAE": -11.06,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 1126,
+              "winRate": 52,
+              "avgReturn": 2.27,
+              "medReturn": 0.42,
+              "profitFactor": 1.48,
+              "maxWin": 137.22,
+              "maxLoss": -62.01,
+              "avgMAE": -9.65,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 0.84
+          },
+          "60": {
+            "all": {
+              "count": 3737,
+              "winRate": 47,
+              "avgReturn": 2.34,
+              "medReturn": -1.52,
+              "profitFactor": 1.28,
+              "maxWin": 457.93,
+              "maxLoss": -74.22,
+              "avgMAE": -17.48,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 2611,
+              "winRate": 47,
+              "avgReturn": 2.87,
+              "medReturn": -1.44,
+              "profitFactor": 1.33,
+              "maxWin": 457.93,
+              "maxLoss": -71.43,
+              "avgMAE": -18.15,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 1126,
+              "winRate": 46,
+              "avgReturn": 1.13,
+              "medReturn": -1.58,
+              "profitFactor": 1.14,
+              "maxWin": 188.38,
+              "maxLoss": -74.22,
+              "avgMAE": -15.93,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 2.48
+          }
+        },
+        "signalRate": 10.1
+      },
+      "cron_scan_v1": {
+        "label": "현행 크론 스캔 재현 (7조건, BUY>=3)",
+        "signals": 15947,
+        "sells": 14280,
+        "undecided": 0,
+        "excluded": {
+          "bad_entry_price": 114
+        },
+        "horizons": {
+          "5": {
+            "all": {
+              "count": 15909,
+              "winRate": 44,
+              "avgReturn": 0.03,
+              "medReturn": -0.55,
+              "profitFactor": 1.01,
+              "maxWin": 176.98,
+              "maxLoss": -70.21,
+              "avgMAE": -5.15,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 11119,
+              "winRate": 44,
+              "avgReturn": 0.04,
+              "medReturn": -0.53,
+              "profitFactor": 1.01,
+              "maxWin": 168.69,
+              "maxLoss": -70.21,
+              "avgMAE": -5.18,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 4790,
+              "winRate": 42,
+              "avgReturn": 0.01,
+              "medReturn": -0.61,
+              "profitFactor": 1,
+              "maxWin": 176.98,
+              "maxLoss": -50.43,
+              "avgMAE": -5.09,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 0.19
+          },
+          "20": {
+            "all": {
+              "count": 15909,
+              "winRate": 42,
+              "avgReturn": 0.38,
+              "medReturn": -1.51,
+              "profitFactor": 1.07,
+              "maxWin": 483.08,
+              "maxLoss": -73.91,
+              "avgMAE": -9.96,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 11119,
+              "winRate": 43,
+              "avgReturn": 0.39,
+              "medReturn": -1.52,
+              "profitFactor": 1.07,
+              "maxWin": 295.77,
+              "maxLoss": -73.91,
+              "avgMAE": -10.1,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 4790,
+              "winRate": 42,
+              "avgReturn": 0.34,
+              "medReturn": -1.48,
+              "profitFactor": 1.07,
+              "maxWin": 483.08,
+              "maxLoss": -71.36,
+              "avgMAE": -9.63,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 0.53
+          },
+          "60": {
+            "all": {
+              "count": 15909,
+              "winRate": 45,
+              "avgReturn": 2.36,
+              "medReturn": -1.36,
+              "profitFactor": 1.29,
+              "maxWin": 561.61,
+              "maxLoss": -77.61,
+              "avgMAE": -16.4,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 11119,
+              "winRate": 45,
+              "avgReturn": 2.73,
+              "medReturn": -1.42,
+              "profitFactor": 1.33,
+              "maxWin": 561.61,
+              "maxLoss": -77.61,
+              "avgMAE": -16.8,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 4790,
+              "winRate": 44,
+              "avgReturn": 1.49,
+              "medReturn": -1.22,
+              "profitFactor": 1.2,
+              "maxWin": 505.12,
+              "maxLoss": -72.91,
+              "avgMAE": -15.46,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 2.52
+          }
+        },
+        "signalRate": 43.3
+      },
+      "always_buy": {
+        "label": "대조군 — 무조건 매수 (신호 없음)",
+        "signals": 36838,
+        "sells": 0,
+        "undecided": 0,
+        "excluded": {
+          "bad_entry_price": 1986
+        },
+        "horizons": {
+          "5": {
+            "all": {
+              "count": 36176,
+              "winRate": 45,
+              "avgReturn": 0.07,
+              "medReturn": -0.44,
+              "profitFactor": 1.03,
+              "maxWin": 236.55,
+              "maxLoss": -70.21,
+              "avgMAE": -4.75,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 25276,
+              "winRate": 44,
+              "avgReturn": -0.09,
+              "medReturn": -0.55,
+              "profitFactor": 0.97,
+              "maxWin": 179.66,
+              "maxLoss": -70.21,
+              "avgMAE": -4.88,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 10900,
+              "winRate": 47,
+              "avgReturn": 0.43,
+              "medReturn": -0.21,
+              "profitFactor": 1.19,
+              "maxWin": 236.55,
+              "maxLoss": -50.43,
+              "avgMAE": -4.43,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 0.18
+          },
+          "20": {
+            "all": {
+              "count": 36176,
+              "winRate": 45,
+              "avgReturn": 0.88,
+              "medReturn": -0.95,
+              "profitFactor": 1.18,
+              "maxWin": 508.61,
+              "maxLoss": -73.91,
+              "avgMAE": -9.47,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 25276,
+              "winRate": 44,
+              "avgReturn": 0.57,
+              "medReturn": -1.22,
+              "profitFactor": 1.11,
+              "maxWin": 295.77,
+              "maxLoss": -73.91,
+              "avgMAE": -9.84,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 10900,
+              "winRate": 47,
+              "avgReturn": 1.61,
+              "medReturn": -0.48,
+              "profitFactor": 1.38,
+              "maxWin": 508.61,
+              "maxLoss": -71.36,
+              "avgMAE": -8.61,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 0.99
+          },
+          "60": {
+            "all": {
+              "count": 36176,
+              "winRate": 46,
+              "avgReturn": 3.14,
+              "medReturn": -1.22,
+              "profitFactor": 1.4,
+              "maxWin": 606.9,
+              "maxLoss": -77.61,
+              "avgMAE": -16.06,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 25276,
+              "winRate": 46,
+              "avgReturn": 3.08,
+              "medReturn": -1.51,
+              "profitFactor": 1.38,
+              "maxWin": 561.61,
+              "maxLoss": -77.61,
+              "avgMAE": -16.73,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 10900,
+              "winRate": 47,
+              "avgReturn": 3.28,
+              "medReturn": -0.72,
+              "profitFactor": 1.47,
+              "maxWin": 606.9,
+              "maxLoss": -74.22,
+              "avgMAE": -14.49,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 3.25
+          }
+        },
+        "signalRate": 100
+      },
+      "v2_score_8_43": {
+        "label": "합성 점수 >= 8.43",
+        "signals": 9103,
+        "sells": 0,
+        "undecided": 0,
+        "excluded": {
+          "bad_entry_price": 384
+        },
+        "horizons": {
+          "5": {
+            "all": {
+              "count": 8975,
+              "winRate": 43,
+              "avgReturn": -0.13,
+              "medReturn": -0.84,
+              "profitFactor": 0.96,
+              "maxWin": 168.69,
+              "maxLoss": -53.26,
+              "avgMAE": -5.74,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 6452,
+              "winRate": 44,
+              "avgReturn": -0.04,
+              "medReturn": -0.79,
+              "profitFactor": 0.99,
+              "maxWin": 168.69,
+              "maxLoss": -53.26,
+              "avgMAE": -5.73,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 2523,
+              "winRate": 41,
+              "avgReturn": -0.38,
+              "medReturn": -0.93,
+              "profitFactor": 0.87,
+              "maxWin": 113.04,
+              "maxLoss": -36.35,
+              "avgMAE": -5.76,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 0.06
+          },
+          "20": {
+            "all": {
+              "count": 8975,
+              "winRate": 42,
+              "avgReturn": 0.17,
+              "medReturn": -1.95,
+              "profitFactor": 1.03,
+              "maxWin": 295.77,
+              "maxLoss": -72.33,
+              "avgMAE": -10.92,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 6452,
+              "winRate": 44,
+              "avgReturn": 0.76,
+              "medReturn": -1.72,
+              "profitFactor": 1.13,
+              "maxWin": 295.77,
+              "maxLoss": -72.33,
+              "avgMAE": -10.99,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 2523,
+              "winRate": 39,
+              "avgReturn": -1.33,
+              "medReturn": -2.34,
+              "profitFactor": 0.76,
+              "maxWin": 193.78,
+              "maxLoss": -71.36,
+              "avgMAE": -10.74,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 0.36
+          },
+          "60": {
+            "all": {
+              "count": 8975,
+              "winRate": 45,
+              "avgReturn": 2.06,
+              "medReturn": -2.14,
+              "profitFactor": 1.24,
+              "maxWin": 458.08,
+              "maxLoss": -72.91,
+              "avgMAE": -16.97,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 6452,
+              "winRate": 46,
+              "avgReturn": 2.34,
+              "medReturn": -1.78,
+              "profitFactor": 1.27,
+              "maxWin": 458.08,
+              "maxLoss": -64.68,
+              "avgMAE": -17.07,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 2523,
+              "winRate": 43,
+              "avgReturn": 1.35,
+              "medReturn": -2.83,
+              "profitFactor": 1.17,
+              "maxWin": 235.99,
+              "maxLoss": -72.91,
+              "avgMAE": -16.71,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 2.25
+          }
+        },
+        "signalRate": 24.7
+      },
+      "v2_score_14_99": {
+        "label": "합성 점수 >= 14.99",
+        "signals": 2936,
+        "sells": 0,
+        "undecided": 0,
+        "excluded": {
+          "bad_entry_price": 180
+        },
+        "horizons": {
+          "5": {
+            "all": {
+              "count": 2876,
+              "winRate": 42,
+              "avgReturn": -0.21,
+              "medReturn": -1.08,
+              "profitFactor": 0.94,
+              "maxWin": 168.69,
+              "maxLoss": -53.26,
+              "avgMAE": -6.76,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 2128,
+              "winRate": 42,
+              "avgReturn": -0.15,
+              "medReturn": -1.08,
+              "profitFactor": 0.96,
+              "maxWin": 168.69,
+              "maxLoss": -53.26,
+              "avgMAE": -6.73,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 748,
+              "winRate": 40,
+              "avgReturn": -0.36,
+              "medReturn": -1.13,
+              "profitFactor": 0.89,
+              "maxWin": 113.04,
+              "maxLoss": -36.35,
+              "avgMAE": -6.83,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 0.12
+          },
+          "20": {
+            "all": {
+              "count": 2876,
+              "winRate": 42,
+              "avgReturn": -0.04,
+              "medReturn": -2.42,
+              "profitFactor": 0.99,
+              "maxWin": 273.31,
+              "maxLoss": -72.33,
+              "avgMAE": -12.12,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 2128,
+              "winRate": 43,
+              "avgReturn": 0.41,
+              "medReturn": -2.22,
+              "profitFactor": 1.06,
+              "maxWin": 273.31,
+              "maxLoss": -72.33,
+              "avgMAE": -12.11,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 748,
+              "winRate": 38,
+              "avgReturn": -1.33,
+              "medReturn": -3.18,
+              "profitFactor": 0.79,
+              "maxWin": 193.78,
+              "maxLoss": -71.36,
+              "avgMAE": -12.16,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 0.3
+          },
+          "60": {
+            "all": {
+              "count": 2876,
+              "winRate": 46,
+              "avgReturn": 2.71,
+              "medReturn": -1.67,
+              "profitFactor": 1.3,
+              "maxWin": 395.68,
+              "maxLoss": -72.91,
+              "avgMAE": -17.4,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 2128,
+              "winRate": 45,
+              "avgReturn": 2.57,
+              "medReturn": -2.5,
+              "profitFactor": 1.27,
+              "maxWin": 395.68,
+              "maxLoss": -64.68,
+              "avgMAE": -17.67,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 748,
+              "winRate": 51,
+              "avgReturn": 3.12,
+              "medReturn": 0.23,
+              "profitFactor": 1.39,
+              "maxWin": 235.99,
+              "maxLoss": -72.91,
+              "avgMAE": -16.61,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 3.05
+          }
+        },
+        "signalRate": 8
+      },
+      "v2_score_18_5": {
+        "label": "합성 점수 >= 18.5",
+        "signals": 1207,
+        "sells": 0,
+        "undecided": 0,
+        "excluded": {
+          "bad_entry_price": 12
+        },
+        "horizons": {
+          "5": {
+            "all": {
+              "count": 1203,
+              "winRate": 42,
+              "avgReturn": -0.21,
+              "medReturn": -1.11,
+              "profitFactor": 0.94,
+              "maxWin": 143.13,
+              "maxLoss": -53.26,
+              "avgMAE": -7.53,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 919,
+              "winRate": 43,
+              "avgReturn": 0.08,
+              "medReturn": -1.15,
+              "profitFactor": 1.02,
+              "maxWin": 143.13,
+              "maxLoss": -53.26,
+              "avgMAE": -7.48,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 284,
+              "winRate": 38,
+              "avgReturn": -1.14,
+              "medReturn": -0.99,
+              "profitFactor": 0.67,
+              "maxWin": 64.82,
+              "maxLoss": -36.35,
+              "avgMAE": -7.71,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 0.19
+          },
+          "20": {
+            "all": {
+              "count": 1203,
+              "winRate": 41,
+              "avgReturn": 0.14,
+              "medReturn": -2.51,
+              "profitFactor": 1.02,
+              "maxWin": 245.96,
+              "maxLoss": -72.33,
+              "avgMAE": -13,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 919,
+              "winRate": 43,
+              "avgReturn": 0.56,
+              "medReturn": -2.28,
+              "profitFactor": 1.08,
+              "maxWin": 245.96,
+              "maxLoss": -72.33,
+              "avgMAE": -12.95,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 284,
+              "winRate": 37,
+              "avgReturn": -1.23,
+              "medReturn": -3.69,
+              "profitFactor": 0.81,
+              "maxWin": 137.22,
+              "maxLoss": -34.59,
+              "avgMAE": -13.14,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 0.56
+          },
+          "60": {
+            "all": {
+              "count": 1203,
+              "winRate": 44,
+              "avgReturn": 3.22,
+              "medReturn": -2.8,
+              "profitFactor": 1.33,
+              "maxWin": 354.28,
+              "maxLoss": -64.68,
+              "avgMAE": -18.39,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 919,
+              "winRate": 40,
+              "avgReturn": 2.97,
+              "medReturn": -4.34,
+              "profitFactor": 1.28,
+              "maxWin": 354.28,
+              "maxLoss": -64.68,
+              "avgMAE": -18.82,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 284,
+              "winRate": 57,
+              "avgReturn": 4.02,
+              "medReturn": 1.7,
+              "profitFactor": 1.56,
+              "maxWin": 141.76,
+              "maxLoss": -53.12,
+              "avgMAE": -16.98,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 3.63
+          }
+        },
+        "signalRate": 3.3
+      },
+      "v2_score_21_49": {
+        "label": "합성 점수 >= 21.49",
+        "signals": 410,
+        "sells": 0,
+        "undecided": 0,
+        "excluded": {
+          "bad_entry_price": 6
+        },
+        "horizons": {
+          "5": {
+            "all": {
+              "count": 408,
+              "winRate": 42,
+              "avgReturn": 0,
+              "medReturn": -1.27,
+              "profitFactor": 1,
+              "maxWin": 123.14,
+              "maxLoss": -53.26,
+              "avgMAE": -9.47,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 306,
+              "winRate": 44,
+              "avgReturn": 0.25,
+              "medReturn": -1.52,
+              "profitFactor": 1.06,
+              "maxWin": 123.14,
+              "maxLoss": -53.26,
+              "avgMAE": -9.38,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 102,
+              "winRate": 38,
+              "avgReturn": -0.77,
+              "medReturn": -0.53,
+              "profitFactor": 0.77,
+              "maxWin": 34.14,
+              "maxLoss": -36.35,
+              "avgMAE": -9.74,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 0.55
+          },
+          "20": {
+            "all": {
+              "count": 408,
+              "winRate": 40,
+              "avgReturn": 0.23,
+              "medReturn": -2.99,
+              "profitFactor": 1.03,
+              "maxWin": 195.25,
+              "maxLoss": -72.33,
+              "avgMAE": -15.07,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 306,
+              "winRate": 40,
+              "avgReturn": 0.08,
+              "medReturn": -3.13,
+              "profitFactor": 1.01,
+              "maxWin": 195.25,
+              "maxLoss": -72.33,
+              "avgMAE": -15.12,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 102,
+              "winRate": 42,
+              "avgReturn": 0.68,
+              "medReturn": -2.39,
+              "profitFactor": 1.12,
+              "maxWin": 131.08,
+              "maxLoss": -25.17,
+              "avgMAE": -14.94,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 0.88
+          },
+          "60": {
+            "all": {
+              "count": 408,
+              "winRate": 44,
+              "avgReturn": 3.62,
+              "medReturn": -3.24,
+              "profitFactor": 1.33,
+              "maxWin": 354.28,
+              "maxLoss": -64.68,
+              "avgMAE": -20.8,
+              "worstMAE": -100
+            },
+            "inSample": {
+              "count": 306,
+              "winRate": 40,
+              "avgReturn": 3.29,
+              "medReturn": -6.06,
+              "profitFactor": 1.27,
+              "maxWin": 354.28,
+              "maxLoss": -64.68,
+              "avgMAE": -21.32,
+              "worstMAE": -100
+            },
+            "outSample": {
+              "count": 102,
+              "winRate": 58,
+              "avgReturn": 4.63,
+              "medReturn": 2.15,
+              "profitFactor": 1.7,
+              "maxWin": 116.56,
+              "maxLoss": -53.12,
+              "avgMAE": -19.24,
+              "worstMAE": -100
+            },
+            "avgReturnCloseEntry": 4.22
+          }
+        },
+        "signalRate": 1.1
+      }
+    }
+  }
+}

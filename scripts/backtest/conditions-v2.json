@@ -1,0 +1,1553 @@
+{
+  "generatedAt": "2026-09-13T15:41:13.256Z",
+  "params": {
+    "window": 600,
+    "horizons": [
+      5,
+      20,
+      60
+    ],
+    "stocks": 122,
+    "evaluated": 70442,
+    "rankHorizon": 20
+  },
+  "control": {
+    "5": {
+      "all": -0.19128965459992953,
+      "in": -0.08706761976255925,
+      "out": -0.4457742890565441
+    },
+    "20": {
+      "all": 0.3525467116854904,
+      "in": 0.7987465659457614,
+      "out": -0.8418703791341394
+    },
+    "60": {
+      "all": 1.2728751119789041,
+      "in": 3.829626223039079,
+      "out": -7.923698298194336
+    }
+  },
+  "conditions": [
+    {
+      "key": "B_저항_박스상단돌파",
+      "axis": "지지저항",
+      "signals": 1399,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 1386,
+          "nOut": 409,
+          "excessAll": 0.79,
+          "excessIn": 0.7,
+          "excessOut": 0.99,
+          "winRate": 47,
+          "avgMAE": -8.65,
+          "t": 2.01
+        },
+        "20": {
+          "n": 1366,
+          "nOut": 389,
+          "excessAll": 2.52,
+          "excessIn": 2.15,
+          "excessOut": 3.54,
+          "winRate": 46,
+          "avgMAE": -15.18,
+          "t": 3.5
+        },
+        "60": {
+          "n": 1344,
+          "nOut": 367,
+          "excessAll": 3.01,
+          "excessIn": 2.1,
+          "excessOut": 7.81,
+          "winRate": 46,
+          "avgMAE": -22.97,
+          "t": 2.78
+        }
+      },
+      "rate": 1.99,
+      "consistent": true
+    },
+    {
+      "key": "B_저항_52주신고가권",
+      "axis": "지지저항",
+      "signals": 6445,
+      "undecided": 2389,
+      "h": {
+        "5": {
+          "n": 6121,
+          "nOut": 2097,
+          "excessAll": 0.44,
+          "excessIn": 0.29,
+          "excessOut": 0.79,
+          "winRate": 42,
+          "avgMAE": -5.55,
+          "t": 3.44
+        },
+        "20": {
+          "n": 6056,
+          "nOut": 2032,
+          "excessAll": 1.17,
+          "excessIn": 0.5,
+          "excessOut": 2.8,
+          "winRate": 41,
+          "avgMAE": -10.79,
+          "t": 4.49
+        },
+        "60": {
+          "n": 5860,
+          "nOut": 1836,
+          "excessAll": 2.33,
+          "excessIn": 1.46,
+          "excessOut": 7.82,
+          "winRate": 44,
+          "avgMAE": -18.54,
+          "t": 4.58
+        }
+      },
+      "rate": 9.15,
+      "consistent": true
+    },
+    {
+      "key": "F_RSI다이버전스",
+      "axis": "오실레이터",
+      "signals": 1981,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 1981,
+          "nOut": 894,
+          "excessAll": 0.76,
+          "excessIn": 0.34,
+          "excessOut": 1.4,
+          "winRate": 46,
+          "avgMAE": -6.8,
+          "t": 2.95
+        },
+        "20": {
+          "n": 1971,
+          "nOut": 884,
+          "excessAll": 1.7,
+          "excessIn": 2.06,
+          "excessOut": 1.91,
+          "winRate": 46,
+          "avgMAE": -14.35,
+          "t": 2.79
+        },
+        "60": {
+          "n": 1317,
+          "nOut": 230,
+          "excessAll": 1.67,
+          "excessIn": 1.73,
+          "excessOut": -1.53,
+          "winRate": 44,
+          "avgMAE": -21.22,
+          "t": 1.52
+        }
+      },
+      "rate": 2.81,
+      "consistent": true
+    },
+    {
+      "key": "B_저항_박스하단이탈",
+      "axis": "지지저항",
+      "signals": 2449,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 2446,
+          "nOut": 819,
+          "excessAll": 2.35,
+          "excessIn": 1.93,
+          "excessOut": 3.25,
+          "winRate": 54,
+          "avgMAE": -5.86,
+          "t": 10.3
+        },
+        "20": {
+          "n": 2439,
+          "nOut": 812,
+          "excessAll": 2.61,
+          "excessIn": 3.13,
+          "excessOut": 1.86,
+          "winRate": 52,
+          "avgMAE": -12.07,
+          "t": 5.72
+        },
+        "60": {
+          "n": 2095,
+          "nOut": 473,
+          "excessAll": 1.24,
+          "excessIn": 1.81,
+          "excessOut": -0.29,
+          "winRate": 44,
+          "avgMAE": -20.04,
+          "t": 1.68
+        }
+      },
+      "rate": 3.48,
+      "consistent": true
+    },
+    {
+      "key": "D_거래_급증저점권",
+      "axis": "거래량",
+      "signals": 2139,
+      "undecided": 1759,
+      "h": {
+        "5": {
+          "n": 2124,
+          "nOut": 656,
+          "excessAll": 1.07,
+          "excessIn": 0.97,
+          "excessOut": 1.32,
+          "winRate": 45,
+          "avgMAE": -6.37,
+          "t": 3.99
+        },
+        "20": {
+          "n": 2076,
+          "nOut": 608,
+          "excessAll": 1.03,
+          "excessIn": 0.87,
+          "excessOut": 1.53,
+          "winRate": 45,
+          "avgMAE": -11.77,
+          "t": 2.16
+        },
+        "60": {
+          "n": 1824,
+          "nOut": 356,
+          "excessAll": -0.14,
+          "excessIn": 0.54,
+          "excessOut": -4.3,
+          "winRate": 44,
+          "avgMAE": -20.44,
+          "t": -0.17
+        }
+      },
+      "rate": 3.04,
+      "consistent": true
+    },
+    {
+      "key": "B_되돌림_얕음38",
+      "axis": "지지저항",
+      "signals": 16403,
+      "undecided": 1373,
+      "h": {
+        "5": {
+          "n": 15996,
+          "nOut": 4110,
+          "excessAll": 0.07,
+          "excessIn": 0.04,
+          "excessOut": 0.12,
+          "winRate": 43,
+          "avgMAE": -6.35,
+          "t": 0.92
+        },
+        "20": {
+          "n": 15633,
+          "nOut": 3747,
+          "excessAll": 0.83,
+          "excessIn": 0.58,
+          "excessOut": 1.42,
+          "winRate": 43,
+          "avgMAE": -12.34,
+          "t": 4.75
+        },
+        "60": {
+          "n": 15348,
+          "nOut": 3462,
+          "excessAll": 2.8,
+          "excessIn": 2.6,
+          "excessOut": 3.93,
+          "winRate": 45,
+          "avgMAE": -19.74,
+          "t": 8.75
+        }
+      },
+      "rate": 23.29,
+      "consistent": true
+    },
+    {
+      "key": "C_이평_MACD골든",
+      "axis": "이동평균",
+      "signals": 36738,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 35548,
+          "nOut": 10557,
+          "excessAll": -0.06,
+          "excessIn": -0.16,
+          "excessOut": 0.19,
+          "winRate": 41,
+          "avgMAE": -5.76,
+          "t": -1.13
+        },
+        "20": {
+          "n": 34428,
+          "nOut": 9437,
+          "excessAll": 0.22,
+          "excessIn": -0.16,
+          "excessOut": 1.25,
+          "winRate": 41,
+          "avgMAE": -11.62,
+          "t": 2
+        },
+        "60": {
+          "n": 31256,
+          "nOut": 6288,
+          "excessAll": -1.11,
+          "excessIn": -1.21,
+          "excessOut": -1.67,
+          "winRate": 39,
+          "avgMAE": -19.95,
+          "t": -5.64
+        }
+      },
+      "rate": 52.15,
+      "consistent": false
+    },
+    {
+      "key": "C_이평_전환기준골든",
+      "axis": "이동평균",
+      "signals": 1760,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 1756,
+          "nOut": 512,
+          "excessAll": -0.17,
+          "excessIn": -0.04,
+          "excessOut": -0.48,
+          "winRate": 41,
+          "avgMAE": -5.71,
+          "t": -0.79
+        },
+        "20": {
+          "n": 1721,
+          "nOut": 477,
+          "excessAll": -0.25,
+          "excessIn": -0.69,
+          "excessOut": 0.94,
+          "winRate": 41,
+          "avgMAE": -11.11,
+          "t": -0.58
+        },
+        "60": {
+          "n": 1573,
+          "nOut": 330,
+          "excessAll": -1.26,
+          "excessIn": -1.87,
+          "excessOut": 0.57,
+          "winRate": 41,
+          "avgMAE": -19.34,
+          "t": -1.46
+        }
+      },
+      "rate": 2.5,
+      "consistent": false
+    },
+    {
+      "key": "C_이평_MACD당일골든",
+      "axis": "이동평균",
+      "signals": 2750,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 2722,
+          "nOut": 789,
+          "excessAll": -0.06,
+          "excessIn": 0.24,
+          "excessOut": -0.79,
+          "winRate": 43,
+          "avgMAE": -5.75,
+          "t": -0.31
+        },
+        "20": {
+          "n": 2680,
+          "nOut": 747,
+          "excessAll": 0.25,
+          "excessIn": 0,
+          "excessOut": 0.93,
+          "winRate": 43,
+          "avgMAE": -11.21,
+          "t": 0.65
+        },
+        "60": {
+          "n": 2473,
+          "nOut": 542,
+          "excessAll": 1.27,
+          "excessIn": 1.11,
+          "excessOut": 1.93,
+          "winRate": 42,
+          "avgMAE": -18.83,
+          "t": 1.7
+        }
+      },
+      "rate": 3.9,
+      "consistent": false
+    },
+    {
+      "key": "C_이평_일목구름위",
+      "axis": "이동평균",
+      "signals": 19152,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 18009,
+          "nOut": 5095,
+          "excessAll": 0.01,
+          "excessIn": 0,
+          "excessOut": 0.02,
+          "winRate": 43,
+          "avgMAE": -6.26,
+          "t": 0.13
+        },
+        "20": {
+          "n": 17344,
+          "nOut": 4430,
+          "excessAll": 0.59,
+          "excessIn": 0.48,
+          "excessOut": 0.79,
+          "winRate": 43,
+          "avgMAE": -12.12,
+          "t": 3.65
+        },
+        "60": {
+          "n": 16801,
+          "nOut": 3887,
+          "excessAll": 1.67,
+          "excessIn": 1.64,
+          "excessOut": 2.46,
+          "winRate": 44,
+          "avgMAE": -19.5,
+          "t": 5.77
+        }
+      },
+      "rate": 27.19,
+      "consistent": true
+    },
+    {
+      "key": "F_BB_상단80",
+      "axis": "오실레이터",
+      "signals": 11883,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 11776,
+          "nOut": 3477,
+          "excessAll": 0.08,
+          "excessIn": 0.07,
+          "excessOut": 0.11,
+          "winRate": 43,
+          "avgMAE": -6.52,
+          "t": 0.79
+        },
+        "20": {
+          "n": 11524,
+          "nOut": 3225,
+          "excessAll": 0.41,
+          "excessIn": 0.35,
+          "excessOut": 0.63,
+          "winRate": 42,
+          "avgMAE": -12.45,
+          "t": 2.05
+        },
+        "60": {
+          "n": 10820,
+          "nOut": 2522,
+          "excessAll": 0.53,
+          "excessIn": 0.6,
+          "excessOut": 1.1,
+          "winRate": 42,
+          "avgMAE": -20.32,
+          "t": 1.51
+        }
+      },
+      "rate": 16.87,
+      "consistent": true
+    },
+    {
+      "key": "D_거래_급증음봉",
+      "axis": "거래량",
+      "signals": 2270,
+      "undecided": 1759,
+      "h": {
+        "5": {
+          "n": 2249,
+          "nOut": 657,
+          "excessAll": 0.61,
+          "excessIn": 0.41,
+          "excessOut": 1.1,
+          "winRate": 44,
+          "avgMAE": -6.67,
+          "t": 2.41
+        },
+        "20": {
+          "n": 2202,
+          "nOut": 610,
+          "excessAll": 0.69,
+          "excessIn": 0.73,
+          "excessOut": 0.6,
+          "winRate": 44,
+          "avgMAE": -12.13,
+          "t": 1.5
+        },
+        "60": {
+          "n": 2042,
+          "nOut": 450,
+          "excessAll": -0.93,
+          "excessIn": 0.27,
+          "excessOut": -5.03,
+          "winRate": 44,
+          "avgMAE": -20.44,
+          "t": -1.24
+        }
+      },
+      "rate": 3.22,
+      "consistent": true
+    },
+    {
+      "key": "E_캔들_상승_고점권",
+      "axis": "캔들",
+      "signals": 2972,
+      "undecided": 1373,
+      "h": {
+        "5": {
+          "n": 2940,
+          "nOut": 867,
+          "excessAll": 0.38,
+          "excessIn": 0.37,
+          "excessOut": 0.41,
+          "winRate": 43,
+          "avgMAE": -6.66,
+          "t": 1.75
+        },
+        "20": {
+          "n": 2868,
+          "nOut": 795,
+          "excessAll": 0.81,
+          "excessIn": 0.95,
+          "excessOut": 0.5,
+          "winRate": 43,
+          "avgMAE": -13.01,
+          "t": 1.89
+        },
+        "60": {
+          "n": 2803,
+          "nOut": 730,
+          "excessAll": 2.15,
+          "excessIn": 2.75,
+          "excessOut": 2.4,
+          "winRate": 45,
+          "avgMAE": -20.76,
+          "t": 2.92
+        }
+      },
+      "rate": 4.22,
+      "consistent": true
+    },
+    {
+      "key": "A_추세_정배열",
+      "axis": "추세",
+      "signals": 16286,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 16072,
+          "nOut": 4415,
+          "excessAll": 0.03,
+          "excessIn": -0.02,
+          "excessOut": 0.15,
+          "winRate": 43,
+          "avgMAE": -6.4,
+          "t": 0.39
+        },
+        "20": {
+          "n": 15633,
+          "nOut": 3976,
+          "excessAll": 0.41,
+          "excessIn": 0.37,
+          "excessOut": 0.43,
+          "winRate": 42,
+          "avgMAE": -12.56,
+          "t": 2.37
+        },
+        "60": {
+          "n": 15387,
+          "nOut": 3730,
+          "excessAll": 2.22,
+          "excessIn": 2.09,
+          "excessOut": 3.84,
+          "winRate": 43,
+          "avgMAE": -19.93,
+          "t": 6.99
+        }
+      },
+      "rate": 23.12,
+      "consistent": true
+    },
+    {
+      "key": "B_지지_지지선근접",
+      "axis": "지지저항",
+      "signals": 45681,
+      "undecided": 4903,
+      "h": {
+        "5": {
+          "n": 44998,
+          "nOut": 12589,
+          "excessAll": -0.06,
+          "excessIn": -0.1,
+          "excessOut": 0.03,
+          "winRate": 42,
+          "avgMAE": -5.05,
+          "t": -1.61
+        },
+        "20": {
+          "n": 43892,
+          "nOut": 11483,
+          "excessAll": -0.07,
+          "excessIn": -0.21,
+          "excessOut": 0.27,
+          "winRate": 42,
+          "avgMAE": -10.26,
+          "t": -0.83
+        },
+        "60": {
+          "n": 41220,
+          "nOut": 8819,
+          "excessAll": -0.31,
+          "excessIn": -0.63,
+          "excessOut": 0.67,
+          "winRate": 41,
+          "avgMAE": -17.57,
+          "t": -1.98
+        }
+      },
+      "rate": 64.85,
+      "consistent": false
+    },
+    {
+      "key": "B_저항_저항선돌파",
+      "axis": "지지저항",
+      "signals": 9492,
+      "undecided": 3358,
+      "h": {
+        "5": {
+          "n": 9394,
+          "nOut": 3340,
+          "excessAll": 0.1,
+          "excessIn": 0.21,
+          "excessOut": -0.02,
+          "winRate": 44,
+          "avgMAE": -6.87,
+          "t": 0.92
+        },
+        "20": {
+          "n": 9138,
+          "nOut": 3084,
+          "excessAll": 0.27,
+          "excessIn": 0.54,
+          "excessOut": 0.06,
+          "winRate": 43,
+          "avgMAE": -12.89,
+          "t": 1.22
+        },
+        "60": {
+          "n": 8351,
+          "nOut": 2298,
+          "excessAll": -0.02,
+          "excessIn": 1.15,
+          "excessOut": -0.64,
+          "winRate": 41,
+          "avgMAE": -21.4,
+          "t": -0.05
+        }
+      },
+      "rate": 13.47,
+      "consistent": true
+    },
+    {
+      "key": "C_이평_20일선위",
+      "axis": "이동평균",
+      "signals": 29967,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 29660,
+          "nOut": 8628,
+          "excessAll": -0.09,
+          "excessIn": -0.16,
+          "excessOut": 0.1,
+          "winRate": 42,
+          "avgMAE": -5.91,
+          "t": -1.55
+        },
+        "20": {
+          "n": 28648,
+          "nOut": 7616,
+          "excessAll": -0.03,
+          "excessIn": -0.07,
+          "excessOut": 0.04,
+          "winRate": 41,
+          "avgMAE": -11.75,
+          "t": -0.28
+        },
+        "60": {
+          "n": 26942,
+          "nOut": 5918,
+          "excessAll": 0.11,
+          "excessIn": 0.15,
+          "excessOut": 0.08,
+          "winRate": 41,
+          "avgMAE": -19.67,
+          "t": 0.51
+        }
+      },
+      "rate": 42.54,
+      "consistent": false
+    },
+    {
+      "key": "F_RSI_중립45_65",
+      "axis": "오실레이터",
+      "signals": 34119,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 33706,
+          "nOut": 9939,
+          "excessAll": -0.13,
+          "excessIn": -0.19,
+          "excessOut": 0.04,
+          "winRate": 41,
+          "avgMAE": -5.38,
+          "t": -2.75
+        },
+        "20": {
+          "n": 32498,
+          "nOut": 8731,
+          "excessAll": -0.17,
+          "excessIn": -0.25,
+          "excessOut": 0.03,
+          "winRate": 42,
+          "avgMAE": -10.89,
+          "t": -1.66
+        },
+        "60": {
+          "n": 30594,
+          "nOut": 6835,
+          "excessAll": 0.31,
+          "excessIn": 0.42,
+          "excessOut": 0.25,
+          "winRate": 42,
+          "avgMAE": -18.62,
+          "t": 1.54
+        }
+      },
+      "rate": 48.44,
+      "consistent": false
+    },
+    {
+      "key": "F_BB_하단20",
+      "axis": "오실레이터",
+      "signals": 16071,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 15971,
+          "nOut": 4631,
+          "excessAll": 0.64,
+          "excessIn": 0.46,
+          "excessOut": 1.06,
+          "winRate": 47,
+          "avgMAE": -5.46,
+          "t": 8.94
+        },
+        "20": {
+          "n": 15797,
+          "nOut": 4457,
+          "excessAll": 0.59,
+          "excessIn": 0.84,
+          "excessOut": 0.01,
+          "winRate": 46,
+          "avgMAE": -11.21,
+          "t": 3.9
+        },
+        "60": {
+          "n": 14565,
+          "nOut": 3237,
+          "excessAll": 0.16,
+          "excessIn": 0.21,
+          "excessOut": 0.21,
+          "winRate": 42,
+          "avgMAE": -19.04,
+          "t": 0.6
+        }
+      },
+      "rate": 22.81,
+      "consistent": true
+    },
+    {
+      "key": "C_이평_5선20선상회",
+      "axis": "이동평균",
+      "signals": 30012,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 29733,
+          "nOut": 8585,
+          "excessAll": -0.1,
+          "excessIn": -0.19,
+          "excessOut": 0.11,
+          "winRate": 42,
+          "avgMAE": -5.93,
+          "t": -1.85
+        },
+        "20": {
+          "n": 28633,
+          "nOut": 7485,
+          "excessAll": -0.05,
+          "excessIn": -0.09,
+          "excessOut": -0.03,
+          "winRate": 41,
+          "avgMAE": -11.81,
+          "t": -0.44
+        },
+        "60": {
+          "n": 27085,
+          "nOut": 5947,
+          "excessAll": 0.12,
+          "excessIn": 0.08,
+          "excessOut": 0.36,
+          "winRate": 41,
+          "avgMAE": -19.72,
+          "t": 0.53
+        }
+      },
+      "rate": 42.61,
+      "consistent": true
+    },
+    {
+      "key": "B_되돌림_깊음62",
+      "axis": "지지저항",
+      "signals": 36982,
+      "undecided": 1373,
+      "h": {
+        "5": {
+          "n": 36695,
+          "nOut": 11365,
+          "excessAll": 0.02,
+          "excessIn": 0.02,
+          "excessOut": 0.05,
+          "winRate": 43,
+          "avgMAE": -5.48,
+          "t": 0.46
+        },
+        "20": {
+          "n": 35880,
+          "nOut": 10550,
+          "excessAll": -0.06,
+          "excessIn": 0,
+          "excessOut": -0.08,
+          "winRate": 43,
+          "avgMAE": -11.36,
+          "t": -0.61
+        },
+        "60": {
+          "n": 32034,
+          "nOut": 6747,
+          "excessAll": -1.52,
+          "excessIn": -1.3,
+          "excessOut": -2.72,
+          "winRate": 39,
+          "avgMAE": -19.76,
+          "t": -8.31
+        }
+      },
+      "rate": 52.5,
+      "consistent": false
+    },
+    {
+      "key": "D_거래_급증2배",
+      "axis": "거래량",
+      "signals": 6032,
+      "undecided": 1759,
+      "h": {
+        "5": {
+          "n": 5972,
+          "nOut": 1700,
+          "excessAll": 0.32,
+          "excessIn": 0.39,
+          "excessOut": 0.12,
+          "winRate": 42,
+          "avgMAE": -7.25,
+          "t": 1.94
+        },
+        "20": {
+          "n": 5854,
+          "nOut": 1582,
+          "excessAll": 0.35,
+          "excessIn": 0.57,
+          "excessOut": -0.24,
+          "winRate": 42,
+          "avgMAE": -13.16,
+          "t": 1.18
+        },
+        "60": {
+          "n": 5499,
+          "nOut": 1227,
+          "excessAll": -0.76,
+          "excessIn": 0,
+          "excessOut": -3.08,
+          "winRate": 42,
+          "avgMAE": -21.57,
+          "t": -1.53
+        }
+      },
+      "rate": 8.56,
+      "consistent": false
+    },
+    {
+      "key": "A_추세_60일선위",
+      "axis": "추세",
+      "signals": 28163,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 27815,
+          "nOut": 7705,
+          "excessAll": -0.08,
+          "excessIn": -0.01,
+          "excessOut": -0.28,
+          "winRate": 42,
+          "avgMAE": -6.09,
+          "t": -1.44
+        },
+        "20": {
+          "n": 27006,
+          "nOut": 6896,
+          "excessAll": 0.04,
+          "excessIn": 0.19,
+          "excessOut": -0.49,
+          "winRate": 42,
+          "avgMAE": -11.98,
+          "t": 0.35
+        },
+        "60": {
+          "n": 26318,
+          "nOut": 6208,
+          "excessAll": 1.76,
+          "excessIn": 1.84,
+          "excessOut": 2.4,
+          "winRate": 44,
+          "avgMAE": -19.34,
+          "t": 7.58
+        }
+      },
+      "rate": 39.98,
+      "consistent": false
+    },
+    {
+      "key": "D_거래_OBV매집",
+      "axis": "거래량",
+      "signals": 30525,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 29844,
+          "nOut": 8713,
+          "excessAll": 0,
+          "excessIn": -0.06,
+          "excessOut": 0.17,
+          "winRate": 43,
+          "avgMAE": -5.91,
+          "t": 0.05
+        },
+        "20": {
+          "n": 28721,
+          "nOut": 7590,
+          "excessAll": -0.05,
+          "excessIn": 0.1,
+          "excessOut": -0.52,
+          "winRate": 42,
+          "avgMAE": -11.89,
+          "t": -0.45
+        },
+        "60": {
+          "n": 27146,
+          "nOut": 6023,
+          "excessAll": -0.33,
+          "excessIn": 0,
+          "excessOut": -1.26,
+          "winRate": 42,
+          "avgMAE": -19.69,
+          "t": -1.62
+        }
+      },
+      "rate": 43.33,
+      "consistent": false
+    },
+    {
+      "key": "F_스토캐_상향교차",
+      "axis": "오실레이터",
+      "signals": 6097,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 6064,
+          "nOut": 1755,
+          "excessAll": 0.09,
+          "excessIn": 0.19,
+          "excessOut": -0.15,
+          "winRate": 45,
+          "avgMAE": -5.65,
+          "t": 0.84
+        },
+        "20": {
+          "n": 5947,
+          "nOut": 1638,
+          "excessAll": 0.35,
+          "excessIn": 0.75,
+          "excessOut": -0.71,
+          "winRate": 45,
+          "avgMAE": -11.55,
+          "t": 1.35
+        },
+        "60": {
+          "n": 5514,
+          "nOut": 1209,
+          "excessAll": 0.41,
+          "excessIn": 0.88,
+          "excessOut": -1.17,
+          "winRate": 42,
+          "avgMAE": -19.67,
+          "t": 0.89
+        }
+      },
+      "rate": 8.66,
+      "consistent": false
+    },
+    {
+      "key": "F_윌리엄스_과매도",
+      "axis": "오실레이터",
+      "signals": 18645,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 18532,
+          "nOut": 5373,
+          "excessAll": 0.1,
+          "excessIn": 0.12,
+          "excessOut": 0.07,
+          "winRate": 44,
+          "avgMAE": -5.8,
+          "t": 1.59
+        },
+        "20": {
+          "n": 18204,
+          "nOut": 5045,
+          "excessAll": 0.16,
+          "excessIn": 0.5,
+          "excessOut": -0.72,
+          "winRate": 44,
+          "avgMAE": -11.87,
+          "t": 1.08
+        },
+        "60": {
+          "n": 16867,
+          "nOut": 3728,
+          "excessAll": -0.04,
+          "excessIn": 0.13,
+          "excessOut": -0.46,
+          "winRate": 41,
+          "avgMAE": -20,
+          "t": -0.16
+        }
+      },
+      "rate": 26.47,
+      "consistent": false
+    },
+    {
+      "key": "D_거래_급증양봉",
+      "axis": "거래량",
+      "signals": 3762,
+      "undecided": 1759,
+      "h": {
+        "5": {
+          "n": 3723,
+          "nOut": 1043,
+          "excessAll": 0.14,
+          "excessIn": 0.38,
+          "excessOut": -0.49,
+          "winRate": 41,
+          "avgMAE": -7.59,
+          "t": 0.66
+        },
+        "20": {
+          "n": 3652,
+          "nOut": 972,
+          "excessAll": 0.15,
+          "excessIn": 0.47,
+          "excessOut": -0.77,
+          "winRate": 42,
+          "avgMAE": -13.78,
+          "t": 0.39
+        },
+        "60": {
+          "n": 3457,
+          "nOut": 777,
+          "excessAll": -0.65,
+          "excessIn": -0.17,
+          "excessOut": -1.96,
+          "winRate": 41,
+          "avgMAE": -22.24,
+          "t": -1.01
+        }
+      },
+      "rate": 5.34,
+      "consistent": false
+    },
+    {
+      "key": "E_캔들_상승_저점권",
+      "axis": "캔들",
+      "signals": 4600,
+      "undecided": 1373,
+      "h": {
+        "5": {
+          "n": 4577,
+          "nOut": 1440,
+          "excessAll": 0.22,
+          "excessIn": 0.25,
+          "excessOut": 0.19,
+          "winRate": 43,
+          "avgMAE": -5.29,
+          "t": 1.66
+        },
+        "20": {
+          "n": 4475,
+          "nOut": 1338,
+          "excessAll": -0.09,
+          "excessIn": 0.27,
+          "excessOut": -0.79,
+          "winRate": 42,
+          "avgMAE": -11.17,
+          "t": -0.33
+        },
+        "60": {
+          "n": 3890,
+          "nOut": 759,
+          "excessAll": -1.33,
+          "excessIn": -1.31,
+          "excessOut": -2.77,
+          "winRate": 38,
+          "avgMAE": -19.09,
+          "t": -2.63
+        }
+      },
+      "rate": 6.53,
+      "consistent": false
+    },
+    {
+      "key": "F_RSI_과매도30",
+      "axis": "오실레이터",
+      "signals": 4008,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 3898,
+          "nOut": 1249,
+          "excessAll": 1.07,
+          "excessIn": 1.09,
+          "excessOut": 1.06,
+          "winRate": 50,
+          "avgMAE": -6.18,
+          "t": 6.21
+        },
+        "20": {
+          "n": 3879,
+          "nOut": 1230,
+          "excessAll": 1.43,
+          "excessIn": 2.58,
+          "excessOut": -0.82,
+          "winRate": 45,
+          "avgMAE": -13.11,
+          "t": 3.21
+        },
+        "60": {
+          "n": 3447,
+          "nOut": 799,
+          "excessAll": 0.76,
+          "excessIn": 1.06,
+          "excessOut": 0.47,
+          "winRate": 41,
+          "avgMAE": -21.69,
+          "t": 1.17
+        }
+      },
+      "rate": 5.69,
+      "consistent": false
+    },
+    {
+      "key": "E_캔들_상승패턴",
+      "axis": "캔들",
+      "signals": 11590,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 11497,
+          "nOut": 3413,
+          "excessAll": 0.09,
+          "excessIn": 0.15,
+          "excessOut": -0.03,
+          "winRate": 39,
+          "avgMAE": -5.35,
+          "t": 1.03
+        },
+        "20": {
+          "n": 11192,
+          "nOut": 3108,
+          "excessAll": -0.15,
+          "excessIn": 0.17,
+          "excessOut": -0.95,
+          "winRate": 40,
+          "avgMAE": -11.1,
+          "t": -0.84
+        },
+        "60": {
+          "n": 10341,
+          "nOut": 2263,
+          "excessAll": -0.39,
+          "excessIn": -0.53,
+          "excessOut": 0.19,
+          "winRate": 38,
+          "avgMAE": -18.9,
+          "t": -1.17
+        }
+      },
+      "rate": 16.45,
+      "consistent": false
+    },
+    {
+      "key": "A_추세_ADX강세",
+      "axis": "추세",
+      "signals": 19241,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 19089,
+          "nOut": 4937,
+          "excessAll": -0.11,
+          "excessIn": -0.16,
+          "excessOut": -0.01,
+          "winRate": 41,
+          "avgMAE": -6.49,
+          "t": -1.5
+        },
+        "20": {
+          "n": 18773,
+          "nOut": 4621,
+          "excessAll": -0.4,
+          "excessIn": -0.23,
+          "excessOut": -1.07,
+          "winRate": 40,
+          "avgMAE": -12.73,
+          "t": -2.63
+        },
+        "60": {
+          "n": 18229,
+          "nOut": 4079,
+          "excessAll": 1.5,
+          "excessIn": 1.33,
+          "excessOut": 2.44,
+          "winRate": 42,
+          "avgMAE": -20.47,
+          "t": 5.27
+        }
+      },
+      "rate": 27.31,
+      "consistent": true
+    },
+    {
+      "key": "F_RSI_35미만",
+      "axis": "오실레이터",
+      "signals": 9571,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 9063,
+          "nOut": 2776,
+          "excessAll": 0.54,
+          "excessIn": 0.63,
+          "excessOut": 0.34,
+          "winRate": 47,
+          "avgMAE": -6.02,
+          "t": 5
+        },
+        "20": {
+          "n": 9015,
+          "nOut": 2728,
+          "excessAll": 0.62,
+          "excessIn": 1.47,
+          "excessOut": -1.17,
+          "winRate": 46,
+          "avgMAE": -12.65,
+          "t": 2.55
+        },
+        "60": {
+          "n": 7993,
+          "nOut": 1717,
+          "excessAll": -0.1,
+          "excessIn": -0.01,
+          "excessOut": -0.55,
+          "winRate": 41,
+          "avgMAE": -20.46,
+          "t": -0.25
+        }
+      },
+      "rate": 13.59,
+      "consistent": false
+    },
+    {
+      "key": "E_캔들_하락패턴",
+      "axis": "캔들",
+      "signals": 11963,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 11873,
+          "nOut": 3640,
+          "excessAll": 0.01,
+          "excessIn": 0.1,
+          "excessOut": -0.18,
+          "winRate": 42,
+          "avgMAE": -5.77,
+          "t": 0.12
+        },
+        "20": {
+          "n": 11558,
+          "nOut": 3325,
+          "excessAll": -0.1,
+          "excessIn": 0.4,
+          "excessOut": -1.25,
+          "winRate": 42,
+          "avgMAE": -11.9,
+          "t": -0.56
+        },
+        "60": {
+          "n": 10777,
+          "nOut": 2551,
+          "excessAll": 0.06,
+          "excessIn": 0.81,
+          "excessOut": -1.42,
+          "winRate": 41,
+          "avgMAE": -20.26,
+          "t": 0.17
+        }
+      },
+      "rate": 16.98,
+      "consistent": false
+    },
+    {
+      "key": "A_추세_저점갱신",
+      "axis": "추세",
+      "signals": 33010,
+      "undecided": 144,
+      "h": {
+        "5": {
+          "n": 32088,
+          "nOut": 9339,
+          "excessAll": -0.14,
+          "excessIn": -0.16,
+          "excessOut": -0.08,
+          "winRate": 42,
+          "avgMAE": -5.63,
+          "t": -2.81
+        },
+        "20": {
+          "n": 31229,
+          "nOut": 8480,
+          "excessAll": -0.58,
+          "excessIn": -0.32,
+          "excessOut": -1.27,
+          "winRate": 40,
+          "avgMAE": -11.4,
+          "t": -5.59
+        },
+        "60": {
+          "n": 30078,
+          "nOut": 7329,
+          "excessAll": 0.16,
+          "excessIn": 0.23,
+          "excessOut": 1.21,
+          "winRate": 40,
+          "avgMAE": -19.42,
+          "t": 0.8
+        }
+      },
+      "rate": 46.86,
+      "consistent": true
+    },
+    {
+      "key": "D_거래_감소0.7",
+      "axis": "거래량",
+      "signals": 33748,
+      "undecided": 1759,
+      "h": {
+        "5": {
+          "n": 33319,
+          "nOut": 9183,
+          "excessAll": -0.29,
+          "excessIn": -0.15,
+          "excessOut": -0.67,
+          "winRate": 42,
+          "avgMAE": -5.56,
+          "t": -6.16
+        },
+        "20": {
+          "n": 32319,
+          "nOut": 8183,
+          "excessAll": -0.65,
+          "excessIn": -0.44,
+          "excessOut": -1.41,
+          "winRate": 41,
+          "avgMAE": -11.62,
+          "t": -6.23
+        },
+        "60": {
+          "n": 30097,
+          "nOut": 5984,
+          "excessAll": -0.65,
+          "excessIn": -0.43,
+          "excessOut": -2.67,
+          "winRate": 39,
+          "avgMAE": -19.8,
+          "t": -3.23
+        }
+      },
+      "rate": 47.91,
+      "consistent": true
+    },
+    {
+      "key": "F_스토캐_과매도",
+      "axis": "오실레이터",
+      "signals": 11005,
+      "undecided": 0,
+      "h": {
+        "5": {
+          "n": 10934,
+          "nOut": 3100,
+          "excessAll": 0.12,
+          "excessIn": 0.17,
+          "excessOut": -0.02,
+          "winRate": 44,
+          "avgMAE": -5.82,
+          "t": 1.39
+        },
+        "20": {
+          "n": 10768,
+          "nOut": 2934,
+          "excessAll": 0.01,
+          "excessIn": 0.55,
+          "excessOut": -1.43,
+          "winRate": 44,
+          "avgMAE": -12.1,
+          "t": 0.04
+        },
+        "60": {
+          "n": 9989,
+          "nOut": 2169,
+          "excessAll": -0.29,
+          "excessIn": -0.07,
+          "excessOut": -1.09,
+          "winRate": 41,
+          "avgMAE": -20.33,
+          "t": -0.87
+        }
+      },
+      "rate": 15.62,
+      "consistent": false
+    },
+    {
+      "key": "A_추세_고점갱신",
+      "axis": "추세",
+      "signals": 30004,
+      "undecided": 144,
+      "h": {
+        "5": {
+          "n": 29432,
+          "nOut": 8239,
+          "excessAll": -0.09,
+          "excessIn": -0.07,
+          "excessOut": -0.16,
+          "winRate": 43,
+          "avgMAE": -5.81,
+          "t": -1.74
+        },
+        "20": {
+          "n": 28577,
+          "nOut": 7384,
+          "excessAll": -0.45,
+          "excessIn": -0.1,
+          "excessOut": -1.52,
+          "winRate": 42,
+          "avgMAE": -11.61,
+          "t": -4.04
+        },
+        "60": {
+          "n": 27555,
+          "nOut": 6375,
+          "excessAll": 1,
+          "excessIn": 1.1,
+          "excessOut": 1.39,
+          "winRate": 43,
+          "avgMAE": -19.34,
+          "t": 4.64
+        }
+      },
+      "rate": 42.59,
+      "consistent": true
+    },
+    {
+      "key": "A_추세_상승구조",
+      "axis": "추세",
+      "signals": 17225,
+      "undecided": 144,
+      "h": {
+        "5": {
+          "n": 16703,
+          "nOut": 4894,
+          "excessAll": -0.25,
+          "excessIn": -0.22,
+          "excessOut": -0.31,
+          "winRate": 42,
+          "avgMAE": -5.97,
+          "t": -3.57
+        },
+        "20": {
+          "n": 16222,
+          "nOut": 4413,
+          "excessAll": -0.97,
+          "excessIn": -0.42,
+          "excessOut": -2.44,
+          "winRate": 41,
+          "avgMAE": -11.92,
+          "t": -6.81
+        },
+        "60": {
+          "n": 15844,
+          "nOut": 4035,
+          "excessAll": 1.06,
+          "excessIn": 1.24,
+          "excessOut": 2.25,
+          "winRate": 42,
+          "avgMAE": -19.77,
+          "t": 3.65
+        }
+      },
+      "rate": 24.45,
+      "consistent": true
+    }
+  ]
+}
