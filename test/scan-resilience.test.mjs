@@ -122,5 +122,67 @@ ok('사용자 응답을 깨지 않는다 (throw 없음)', thrown, null);
 ok('대신 로그를 남긴다', errLog.some(l => /온디맨드 저장 실패/.test(l)), true);
 ok('로그에 종목코드가 있다', errLog.some(l => /005930/.test(l)), true);
 
+// ── 5. singleFlight — 중복 트리거 가드 ──
+// daily-cron.yml 이 11:00 UTC 에 POST /api/scan/trigger 를 치고 cron.js 의 node-cron 도
+// 같은 11:00 UTC 에 돈다. 가드가 없으면 1116 종목 스캔 두 개가 동시에 돈다.
+console.log('\n=== 5. singleFlight 중복 트리거 가드 ===');
+
+const { singleFlight, withTimeout } = await import('../cron.js');
+
+const origWarn = console.warn;
+console.warn = () => {};
+
+let runs = 0;
+let release;
+const blocker = new Promise(r => { release = r; });
+const gate = singleFlight('테스트 작업');
+const job = async () => { runs++; await blocker; return 'done'; };
+
+const p1 = gate(job);
+const p2 = gate(job);
+const p3 = gate(job);
+ok('동시 호출 3회에 실제 실행은 1회', runs, 1);
+ok('두 번째 호출은 같은 프라미스를 돌려준다', p2 === p1, true);
+ok('세 번째 호출도 같은 프라미스', p3 === p1, true);
+
+release('done');
+ok('합류한 호출도 같은 결과를 받는다', await Promise.all([p1, p2, p3]), ['done', 'done', 'done']);
+
+// 끝난 뒤에는 다시 돌 수 있어야 한다 — 안 그러면 다음 날 스캔이 영영 안 뜬다
+await gate(async () => { runs++; });
+ok('완료 후에는 재실행된다', runs, 2);
+
+// 실패해도 잠기지 않아야 한다
+let boom = null;
+try { await gate(async () => { runs++; throw new Error('실패'); }); } catch (e) { boom = e.message; }
+ok('실패는 호출부로 전달된다', boom, '실패');
+await gate(async () => { runs++; });
+ok('실패 후에도 잠기지 않는다', runs, 4);
+
+console.warn = origWarn;
+
+// ── 6. withTimeout — 청크 경계 동결 차단 ──
+// 종목 하나가 영영 settle 하지 않으면 Promise.allSettled 가 영영 resolve 하지 않는다.
+// batch 2026-09-14-bxg4xo 가 870 = 29 x CHUNK_SIZE 30 에서 멈춘 모양이 바로 이것이다.
+console.log('\n=== 6. withTimeout 청크 동결 차단 ===');
+
+ok('정상 완료는 그대로 통과', await withTimeout(1000, 'x', Promise.resolve('v')), 'v');
+
+let toErr = null;
+try { await withTimeout(30, '005930', new Promise(() => {})); } catch (e) { toErr = e.message; }
+ok('영영 안 끝나는 프라미스를 끊는다', toErr !== null, true);
+ok('타임아웃 메시지에 종목코드', /005930/.test(toErr ?? ''), true);
+
+let rejErr = null;
+try { await withTimeout(1000, 'y', Promise.reject(new Error('원래 오류'))); } catch (e) { rejErr = e.message; }
+ok('원래 거부 사유를 가리지 않는다', rejErr, '원래 오류');
+
+// 행 자체가 멈추지 않는 것이 핵심 — allSettled 가 끝나고 rejected 는 실패로 집계된다
+const settled = await Promise.allSettled([
+  withTimeout(30, 'a', new Promise(() => {})),
+  withTimeout(1000, 'b', Promise.resolve(1)),
+]);
+ok('멈춘 종목이 있어도 청크는 진행된다', settled.map(r => r.status), ['rejected', 'fulfilled']);
+
 console.log(`\n통과 ${pass} / 실패 ${fail}`);
 process.exit(fail === 0 ? 0 : 1);

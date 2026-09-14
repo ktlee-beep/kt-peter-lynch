@@ -494,7 +494,48 @@ async function analyzeUsStock(ticker, name, sector) {
   };
 }
 
+// 종목 1건 분석의 상한. 타임아웃 없는 fetch 가 하나라도 매달리면 그 종목의 프라미스가
+// 영영 settle 하지 않고, Promise.allSettled 는 그걸 기다리느라 청크 경계에서 멈춘다.
+// 값은 실측이 아니라 상한 헤지다 [확인 필요] — 정상 종목이 오판정되지 않을 만큼 넉넉하되,
+// 38청크 전부가 최악이어도 markStaleBatches 의 6시간 한계 아래에 머무르도록 잡았다.
+const STOCK_TIMEOUT_MS = 8 * 60 * 1000;
+
+export function withTimeout(ms, label, promise) {
+  let timer;
+  const limit = new Promise((_, reject) => {
+    // unref 하지 않는다. 워치독이 "프로세스를 붙잡는 유일한 핸들"일 때 그냥 건너뛰어지면
+    // 정확히 필요한 순간에 안 터진다. 어느 쪽이 이기든 finally 에서 즉시 정리하므로
+    // 종료를 지연시키지도 않는다.
+    timer = setTimeout(() => reject(new Error(`분석 시간 초과 (${ms}ms) — ${label}`)), ms);
+  });
+  return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
+}
+
+// 같은 작업의 동시 실행을 막는다. 진행 중이면 새로 시작하지 않고 기존 프라미스에 합류시켜,
+// 호출부가 "끝날 때까지 기다린다"는 의미를 그대로 유지한다. 성공·실패 어느 쪽이든 해제한다.
+export function singleFlight(label) {
+  let inFlight = null;
+  return (fn) => {
+    if (inFlight) {
+      console.warn(`[Cron] ${label} 이미 진행 중 — 중복 트리거를 무시하고 기존 실행에 합류`);
+      return inFlight;
+    }
+    // fn 을 즉시 호출한다 (마이크로태스크로 미루지 않는다). async IIFE 로 감싸 두면
+    // fn 이 동기적으로 던져도 프라미스 거부로 바뀌어 게이트가 잠긴 채 남지 않는다.
+    inFlight = (async () => fn())().finally(() => { inFlight = null; });
+    return inFlight;
+  };
+}
+
+// 국내 스캔과 같은 이유로 진입점에서 감싼다 (POST /api/scan/us/trigger 경로 포함).
+// 미국 스캔도 22:00 UTC 에 크론과 daily-cron.yml 이 겹친다 — 같은 가드를 건다.
+const usScanGate = singleFlight('미국 스캔');
+
 export async function runUsScan() {
+  return usScanGate(() => withKeepAlive('us-scan', runUsScanInner));
+}
+
+async function runUsScanInner() {
   console.log('[Cron] 미국 스캔 시작');
   const out = [];
   const CHUNK = 15;
@@ -719,7 +760,22 @@ export async function runFundamentalsBackfill({ limit = 0, maxDartCalls = 15000,
 }
 
 // ── 전체 스캔 (청크 단위 처리) ───────────────────────────────────
+// 킵얼라이브는 크론 콜백이 아니라 이 진입점에 붙인다. 스캔은 크론 말고도
+// POST /api/scan/trigger (GitHub Actions·외부 CI) 와 POST /api/scan/trigger-admin
+// (어드민 UI) 에서도 들어오는데, 그 경로들이야말로 보호가 없으면 그대로 잠든다.
+// 중첩(야간 크론이 이미 감싼 경우)은 startKeepAlive 의 참조 카운트가 흡수한다.
+//
+// 중복 트리거도 여기서 막는다. .github/workflows/daily-cron.yml 이 11:00 UTC 에
+// POST /api/scan/trigger 를 치는데 이 파일의 node-cron 도 같은 11:00 UTC 에 돈다.
+// 가드가 없으면 1116 종목 스캔 두 개가 512MB 무료 인스턴스에서 동시에 돌고,
+// 배치 행도 두 개가 생겨 진행률이 서로를 덮어쓴다.
+const dailyScanGate = singleFlight('일일 스캔');
+
 export async function runDailyScan() {
+  return dailyScanGate(() => withKeepAlive('daily-scan', runDailyScanInner));
+}
+
+async function runDailyScanInner() {
   console.log('[Cron] 전체 종목 스캔 시작');
   const today = new Date().toISOString().slice(0, 10);
 
@@ -788,13 +844,20 @@ export async function runDailyScan() {
 
   for (let i = 0; i < stocks.length; i += CHUNK_SIZE) {
     const chunk = stocks.slice(i, i + CHUNK_SIZE);
-    const results = await Promise.allSettled(chunk.map((s) => analyzeStockLean(s.code, corpResolver, dartKey, {
-      perMedians,
-      // 지수 시계열이 없으면 undefined가 넘어가고 calcRsRatios가 전부 null을 돌려준다 —
-      // 알 수 없는 지수로 대신 재느니 RS를 비우는 쪽이 맞다.
-      indexSeries: rsCtx.series[s.yahoo_suffix],
-      rsBreaks: rsCtx.breaks,
-    })));
+    // 종목 하나가 영영 settle 하지 않으면 allSettled 가 영영 resolve 하지 않고 루프가
+    // 정확히 청크 경계에서 멈춘다 — 2026-09-14 batch bxg4xo 가 870 = 29 x 30 에서
+    // 동결한 모양과 일치한다. 타임아웃을 걸면 rejected 로 떨어져 실패 1건으로 집계되고
+    // 스캔은 나머지 청크를 계속한다.
+    const results = await Promise.allSettled(chunk.map((s) => withTimeout(
+      STOCK_TIMEOUT_MS, s.code,
+      analyzeStockLean(s.code, corpResolver, dartKey, {
+        perMedians,
+        // 지수 시계열이 없으면 undefined가 넘어가고 calcRsRatios가 전부 null을 돌려준다 —
+        // 알 수 없는 지수로 대신 재느니 RS를 비우는 쪽이 맞다.
+        indexSeries: rsCtx.series[s.yahoo_suffix],
+        rsBreaks: rsCtx.breaks,
+      })
+    )));
 
     const rows = [];
     let chunkBuy = 0, chunkFail = 0;
@@ -1215,6 +1278,14 @@ export async function evaluateSeonjeomTriggers() {
 // 22:24~22:40 사이 5분 간격 4회 표본 전부 무변동, completed_at 영구 null.
 // 유니버스의 약 22%(246종목)가 매일 분석되지 않고 있었다.
 //
+// .github/workflows/keepalive.yml 이 이미 있지만 믿을 수 없다. 선언은 '*/14 * * * *'
+// (14분)인데 gh run list 실측(2026-09-14)으로는 실제 실행이
+//   09-13 01:12Z, 06:10Z, 11:48Z, 15:06Z, 18:09Z, 20:46Z, 22:41Z, 09-14 00:26Z, 05:16Z, 10:48Z
+// 로 간격이 3~5시간이었다. GitHub 은 스케줄 워크플로를 심하게 지연·생략한다. 직전 핑이
+// 10:48Z 였고 스캔은 11:00Z 에 시작했으니, 15분 유휴 창은 스캔 도중에 만료됐다.
+// 즉 외부 스케줄러에 스핀다운 방지를 맡기는 구조 자체가 성립하지 않는다 — 프로세스
+// 안에서 스스로 핑을 내야 한다.
+//
 // 스캔이 도는 동안 자기 공개 URL 을 주기적으로 호출해 인바운드 트래픽을 만든다.
 // 프로세스가 살아 있는 동안만 동작하므로 "이미 잠든 인스턴스를 깨우는" 용도가 아니라
 // "도는 중에 잠들지 않게 하는" 용도다.
@@ -1226,26 +1297,46 @@ function publicBaseUrl() {
   return /^https?:\/\//.test(url) ? url : null;
 }
 
+// 타이머는 프로세스 전체에서 하나만 둔다. 야간 크론이 스캔을 감싸고 스캔이 다시 자기를
+// 감싸는 식으로 중첩되므로, 참조 카운트로 합쳐야 안쪽 작업이 끝날 때 바깥 작업의 보호까지
+// 같이 꺼지는 사고를 막는다.
+let kaTimer = null;
+let kaRefs  = 0;
+let kaPings = 0;
+
 function startKeepAlive(tag) {
   const base = publicBaseUrl();
   if (!base) {
-    console.warn(`[KeepAlive] ${tag}: RENDER_EXTERNAL_URL 미설정 — 스핀다운 방지 없이 진행`);
-    return () => {};
+    if (kaRefs === 0) console.warn(`[KeepAlive] ${tag}: RENDER_EXTERNAL_URL 미설정 — 스핀다운 방지 없이 진행`);
+    kaRefs++;
+    let done = false;
+    return () => { if (!done) { done = true; kaRefs--; } };
   }
-  let n = 0;
-  const timer = setInterval(async () => {
-    n++;
-    try {
-      const r = await fetch(`${base}/healthz`, { method: 'GET' });
-      if (!r.ok) console.warn(`[KeepAlive] ${tag} #${n} HTTP ${r.status}`);
-    } catch (e) {
-      console.warn(`[KeepAlive] ${tag} #${n} 실패: ${e.message}`);
-    }
-  }, KEEPALIVE_INTERVAL_MS);
-  if (typeof timer.unref === 'function') timer.unref();   // 종료를 막지 않는다
+  kaRefs++;
+  if (!kaTimer) {
+    kaPings = 0;
+    kaTimer = setInterval(async () => {
+      kaPings++;
+      try {
+        const r = await fetch(`${base}/healthz`, { method: 'GET' });
+        if (!r.ok) console.warn(`[KeepAlive] #${kaPings} HTTP ${r.status}`);
+      } catch (e) {
+        console.warn(`[KeepAlive] #${kaPings} 실패: ${e.message}`);
+      }
+    }, KEEPALIVE_INTERVAL_MS);
+    if (typeof kaTimer.unref === 'function') kaTimer.unref();   // 종료를 막지 않는다
+    console.log(`[KeepAlive] 시작 — ${tag}`);
+  }
+  let done = false;
   return () => {
-    clearInterval(timer);
-    console.log(`[KeepAlive] ${tag} 종료 (핑 ${n}회)`);
+    if (done) return;
+    done = true;
+    kaRefs--;
+    if (kaRefs <= 0 && kaTimer) {
+      clearInterval(kaTimer);
+      kaTimer = null;
+      console.log(`[KeepAlive] 종료 — ${tag} (핑 ${kaPings}회)`);
+    }
   };
 }
 
@@ -1284,9 +1375,8 @@ export function startCron() {
 
   // 미국 스캔 — 미 증시 마감(05~06시 KST) 후 07:00 KST = UTC 22:00(전일)
   cron.schedule('0 22 * * 0-4', () => {
-    withKeepAlive('us-scan', () =>
-      runUsScan().catch(e => console.error('[Cron] 미국 스캔 오류:', e))
-    );
+    // 킵얼라이브는 runUsScan 진입점이 직접 건다 — 여기서 또 감싸지 않는다.
+    runUsScan().catch(e => console.error('[Cron] 미국 스캔 오류:', e));
   }, { timezone: 'UTC' });
 
   console.log('[Cron] 스케줄 등록 완료 (KR스캔 20:00 / 아침브리핑 08:00 / 미국스캔 07:00 KST, 매크로 6시간)');
