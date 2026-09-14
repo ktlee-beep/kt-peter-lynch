@@ -49,8 +49,11 @@ export async function saveAnalysisToDB(code, result) {
   const sb = getSupabase();
   const today = new Date().toISOString().slice(0, 10);
   const stored = await mergeStoredAnalysis(sb, code, today, result);
+  // 이중 은폐를 푼다: 빈 catch 는 예외를 먹고, supabase-js 는 애초에 reject 하지 않아
+  // { error } 로 resolve 한다. 둘 다 막혀 있어 온디맨드 저장 실패가 무증상이었다.
+  // 다만 여기서 throw 하지는 않는다 — 저장 실패로 사용자의 조회 응답까지 깨뜨릴 이유는 없다.
   try {
-    await sb.from('kt_daily_analysis').upsert({
+    const { error } = await sb.from('kt_daily_analysis').upsert({
       code,
       analysis_date:    today,
       signal:           result.combinedSignal?.signal   ?? 'HOLD',
@@ -67,7 +70,12 @@ export async function saveAnalysisToDB(code, result) {
       analysis_json:    JSON.stringify(stored),
       data_source:      'on-demand',
     }, { onConflict: 'code,analysis_date' });
-  } catch {}
+    if (error) {
+      console.error(`[DB] 온디맨드 저장 실패 (${code}, ${error.code || 'no-code'}): ${error.message}`);
+    }
+  } catch (e) {
+    console.error(`[DB] 온디맨드 저장 예외 (${code}):`, e.message);
+  }
 }
 
 // 스캔 결과 조회
@@ -447,15 +455,44 @@ export async function deactivateStocks(codes) {
   return n;
 }
 
+// 죽은 배치 자가치유.
+// 스캔은 하루 한 번이므로 6시간 넘게 running 인 배치는 정의상 끝난 적이 없는 배치다.
+// 2026-09-14 실측: 20:00:25 KST 시작분이 processed 870/1116(=29 x CHUNK_SIZE 30)에서
+// 동결, 15분간 4회 표본 무변동, completed_at 영구 null. 프로세스가 사라지면
+// completeScanBatch 가 실행되지 않아 이 행이 영원히 running 으로 남고,
+// /api/scan/status 는 그걸 "스캔 중"으로 보고한다.
+export async function markStaleBatches() {
+  const sb = getSupabase();
+  const cutoff = new Date(Date.now() - 6 * 3600 * 1000).toISOString();
+  const { data, error } = await sb.from('kt_scan_batches')
+    .update({ status: 'stale' })
+    .eq('status', 'running')
+    .lt('started_at', cutoff)
+    .select('batch_id');
+  if (error) {
+    console.error('[DB] 스테일 배치 정리 실패:', error.message);
+    return 0;
+  }
+  if (data?.length) {
+    console.warn(`[DB] 미완료 배치 ${data.length}건을 stale 로 표시: ${data.map(r => r.batch_id).join(', ')}`);
+  }
+  return data?.length ?? 0;
+}
+
 // 배치 시작 기록
 export async function createScanBatch(batchId, totalStocks) {
   const sb = getSupabase();
-  await sb.from('kt_scan_batches').insert({
+  // 새 배치를 열기 전에 죽은 배치를 먼저 닫는다. 실패해도 스캔은 진행한다.
+  await markStaleBatches().catch(e => console.error('[DB] 스테일 정리 예외:', e.message));
+  const { error } = await sb.from('kt_scan_batches').insert({
     batch_id:     batchId,
     scan_type:    'daily',
     total_stocks: totalStocks,
     status:       'running',
   });
+  // supabase-js 빌더는 Postgres 오류에 reject 하지 않고 { error } 로 resolve 한다.
+  // 확인하지 않으면 배치 행 없이 스캔이 "성공"하고, 진행률 API 가 영원히 빈다.
+  if (error) throw new Error(`createScanBatch 실패 (${batchId}): ${error.message}`);
 }
 
 // 배치 진행 업데이트
@@ -491,10 +528,17 @@ export async function completeScanBatch(batchId) {
 }
 
 // 분석 결과 배치 저장 (스캔 전용)
+// error 를 확인하지 않으면 그날 스캔 결과가 통째로 사라져도 로그 한 줄 남지 않는다.
+// 특히 신규 컬럼 추가 후 PostgREST 스키마 캐시가 낡아 있으면 PGRST204 로 요청 전체가
+// 실패하는데, 그때도 completeScanBatch 는 status='done' 을 쓴다 — 0행 저장 + 성공 보고.
 export async function batchSaveAnalysis(rows) {
   if (!rows.length) return;
   const sb = getSupabase();
-  await sb.from('kt_daily_analysis').upsert(rows, { onConflict: 'code,analysis_date' });
+  const { error } = await sb.from('kt_daily_analysis')
+    .upsert(rows, { onConflict: 'code,analysis_date' });
+  if (error) {
+    throw new Error(`batchSaveAnalysis 실패 (${rows.length}행, ${error.code || 'no-code'}): ${error.message}`);
+  }
 }
 
 // 관심종목 조회

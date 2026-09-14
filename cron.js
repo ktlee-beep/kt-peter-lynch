@@ -773,7 +773,10 @@ export async function runDailyScan() {
   const batchId = `${today}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     await createScanBatch(batchId, stocks.length);
-  } catch {}
+  } catch (e) {
+    // 배치 행이 없어도 분석·저장은 계속한다. 다만 진행률 API 가 빈다는 사실은 남긴다.
+    console.error('[Cron] 배치 시작 기록 실패 — 진행률 추적 없이 계속:', e.message);
+  }
 
   const CHUNK_SIZE = 30;
   let totalProcessed = 0, totalFailed = 0, totalBuy = 0;
@@ -854,7 +857,8 @@ export async function runDailyScan() {
     await new Promise(r => setTimeout(r, 500));
   }
 
-  try { await completeScanBatch(batchId); } catch {}
+  try { await completeScanBatch(batchId); }
+  catch (e) { console.error('[Cron] 배치 완료 기록 실패:', e.message); }
 
   // 다음 스캔이 쓸 PER 중앙값. 표본이 모자라면 갱신하지 않는다 — 덮어써 버리면
   // 어제의 정상값까지 잃고, 다음 날도 표본이 모자라면 가점이 영구히 죽는다.
@@ -1200,16 +1204,72 @@ export async function evaluateSeonjeomTriggers() {
   }
 }
 
+// ── 스핀다운 방지 킵얼라이브 ──────────────────────────────────────
+// Render 무료 플랜(render.yaml plan: free)은 인바운드 HTTP 가 약 15분 끊기면 인스턴스를
+// 재운다. 야간 스캔은 이 프로세스 안에서 node-cron 으로 도는데, 20:00 KST 이후 한국은
+// 새벽이라 외부 트래픽이 없다. 그래서 스캔이 15분을 넘기면 인스턴스가 잠들고 루프가
+// 통째로 사라진다 — 재기동돼도 이어받지 않는다.
+//
+// 2026-09-14 실측 근거: batch 2026-09-14-bxg4xo 가 20:00:25 KST 시작 후
+// processed 870/1116 에서 동결(870 = 29 x CHUNK_SIZE 30, 정확히 청크 경계),
+// 22:24~22:40 사이 5분 간격 4회 표본 전부 무변동, completed_at 영구 null.
+// 유니버스의 약 22%(246종목)가 매일 분석되지 않고 있었다.
+//
+// 스캔이 도는 동안 자기 공개 URL 을 주기적으로 호출해 인바운드 트래픽을 만든다.
+// 프로세스가 살아 있는 동안만 동작하므로 "이미 잠든 인스턴스를 깨우는" 용도가 아니라
+// "도는 중에 잠들지 않게 하는" 용도다.
+const KEEPALIVE_INTERVAL_MS = 4 * 60 * 1000;   // 15분 유휴 한계보다 충분히 짧게
+
+function publicBaseUrl() {
+  const raw = process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL || '';
+  const url = String(raw).trim().replace(/\/+$/, '');
+  return /^https?:\/\//.test(url) ? url : null;
+}
+
+function startKeepAlive(tag) {
+  const base = publicBaseUrl();
+  if (!base) {
+    console.warn(`[KeepAlive] ${tag}: RENDER_EXTERNAL_URL 미설정 — 스핀다운 방지 없이 진행`);
+    return () => {};
+  }
+  let n = 0;
+  const timer = setInterval(async () => {
+    n++;
+    try {
+      const r = await fetch(`${base}/healthz`, { method: 'GET' });
+      if (!r.ok) console.warn(`[KeepAlive] ${tag} #${n} HTTP ${r.status}`);
+    } catch (e) {
+      console.warn(`[KeepAlive] ${tag} #${n} 실패: ${e.message}`);
+    }
+  }, KEEPALIVE_INTERVAL_MS);
+  if (typeof timer.unref === 'function') timer.unref();   // 종료를 막지 않는다
+  return () => {
+    clearInterval(timer);
+    console.log(`[KeepAlive] ${tag} 종료 (핑 ${n}회)`);
+  };
+}
+
+// 장시간 작업을 킵얼라이브로 감싼다. 작업이 던지든 말든 반드시 해제한다.
+async function withKeepAlive(tag, fn) {
+  const stop = startKeepAlive(tag);
+  try { return await fn(); }
+  finally { stop(); }
+}
+
 // ── cron 등록 ────────────────────────────────────────────────────
 export function startCron() {
   // 매 영업일 20:00 KST = UTC 11:00
   cron.schedule('0 11 * * 1-5', async () => {
-    await runDailyScan().catch(e => console.error('[Cron] 스캔 오류:', e));
-    await evaluateAlertSettings().catch(e => console.error('[Cron] 알림 평가 오류:', e));
-    // 수급 → 선점 순서를 지킨다. 선점 트리거의 수급 조건이 방금 채운 캐시를 읽으므로
-    // 순서가 뒤집히면 첫날은 수급 조건이 통째로 빠진 채 판정된다.
-    await runSupplyCollect().catch(e => console.error('[Cron] 수급 수집 오류:', e));
-    await evaluateSeonjeomTriggers().catch(e => console.error('[Cron] 선점 평가 오류:', e));
+    // 네 작업 전체를 하나의 킵얼라이브로 감싼다. 스캔만 감싸면 이어지는 수급 수집·선점
+    // 평가 구간에서 다시 잠든다.
+    await withKeepAlive('nightly', async () => {
+      await runDailyScan().catch(e => console.error('[Cron] 스캔 오류:', e));
+      await evaluateAlertSettings().catch(e => console.error('[Cron] 알림 평가 오류:', e));
+      // 수급 → 선점 순서를 지킨다. 선점 트리거의 수급 조건이 방금 채운 캐시를 읽으므로
+      // 순서가 뒤집히면 첫날은 수급 조건이 통째로 빠진 채 판정된다.
+      await runSupplyCollect().catch(e => console.error('[Cron] 수급 수집 오류:', e));
+      await evaluateSeonjeomTriggers().catch(e => console.error('[Cron] 선점 평가 오류:', e));
+    });
   }, { timezone: 'UTC' });
 
   // 6시간마다 매크로 갱신
@@ -1224,7 +1284,9 @@ export function startCron() {
 
   // 미국 스캔 — 미 증시 마감(05~06시 KST) 후 07:00 KST = UTC 22:00(전일)
   cron.schedule('0 22 * * 0-4', () => {
-    runUsScan().catch(e => console.error('[Cron] 미국 스캔 오류:', e));
+    withKeepAlive('us-scan', () =>
+      runUsScan().catch(e => console.error('[Cron] 미국 스캔 오류:', e))
+    );
   }, { timezone: 'UTC' });
 
   console.log('[Cron] 스케줄 등록 완료 (KR스캔 20:00 / 아침브리핑 08:00 / 미국스캔 07:00 KST, 매크로 6시간)');
