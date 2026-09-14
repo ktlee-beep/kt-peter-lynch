@@ -41,10 +41,27 @@ cron.js:1013   getScanResults({ signal:'BUY', limit:5 })
                  db.js:87   .eq('signal', signal)        <- 후보 집합을 결정
                  db.js:88   .order('confidence', ...)    <- 그 안의 상위 5개를 결정
 cron.js:1016   generateMorningBrief({ macro, futures, picks })
+gemini.js:208  export async function generateMorningBrief(ctx)
 gemini.js:210  pickLines = 종목명·코드·종가·등락·lynch_score·RSI
-gemini.js:226  프롬프트 본문에 삽입
-gemini.js:202  callGemini(prompt)                      ** 제3자 API 외부 HTTP **
+gemini.js:227  ${pickLines} 프롬프트 본문에 삽입
+gemini.js:239  return await callGemini(prompt)         ** 제3자 API 외부 HTTP **
 ```
+
+> **[rev.2 좌표 정정 — 2026-09-14 직접 실측]** rev.2 초판이 적은 `gemini.js:202`는
+> 이 경로가 아니다. `:202`는 다른 함수의 `callGemini` 호출이고, 조간 브리핑의 실제
+> 발송 지점은 `generateMorningBrief`(:208) 본문 끝의 **`:239`**다. 프롬프트 삽입도
+> `:226`이 아니라 `:227`이다. 체인의 나머지 4개 좌표(`cron.js:1221`·`:1013`·`:1016`,
+> `gemini.js:210`)는 실측과 일치한다.
+>
+> **`GEMINI_API_KEY`가 비어 있어도 호출이 막히지 않는다.** `gemini.js:11`은
+> `if (process.env.GEMINI_API_KEY) return ...` 형태의 **우선순위 분기**이고, 없으면
+> DB 앱설정 KV(`db.js` "앱 설정 (KV) — Render 환경변수 없이 키 등을 DB에 보관")로
+> 넘어간다. 로컬 `.env`의 `GEMINI_API_KEY`가 빈 값인 것을 근거로 "발송이 없다"고
+> 판단해서는 안 된다.
+>
+> **스케줄 해석 검증.** `render.yaml`과 `cron.js` 어디에도 `TZ`/`timeZone` 지정이
+> 없다. 따라서 서버는 UTC로 돌고 `'0 23 * * 0-4'`(UTC 일~목 23:00) = **KST 월~금
+> 08:00**, `'0 11 * * 1-5'`(UTC 11:00) = **KST 20:00**이 맞다.
 
 `signal`과 `confidence`가 **어느 5개 종목의 데이터가 제3자에게 나가는지를 단독 결정한다.**
 그리고 3장 a단계가 바꾸려는 지점이 정확히 `db.js:87`·`:88`이다. rev.1이 a단계를 "화면
@@ -315,7 +332,7 @@ ALTER TABLE kt_daily_analysis ADD COLUMN IF NOT EXISTS ...   1 문에 5 개
   composite_score  DOUBLE PRECISION    ** REAL 금지 ** float4 는 4.72 를 4.7199998 로
                                        저장해 절대 컷 경계 행을 떨어뜨린다
   decided_count    INTEGER
-  reason_tags      TEXT                배열 아님. 기존 reasons 와 이름 충돌 회피
+  reason_tags      TEXT                배열 아님. 충돌 없음 (아래 실측 주)
 
 CREATE INDEX idx_kt_daily_date_engine ON kt_daily_analysis (analysis_date, engine)
                                        ** CONCURRENTLY 금지 ** (autoMigrate 단일 트랜잭션)
@@ -326,6 +343,32 @@ ALTER TABLE kt_scan_batches ADD COLUMN IF NOT EXISTS ...     1 문에 2 개
 
 NOTIFY pgrst, 'reload schema';         kt_scan_batches ALTER 직후에 명시 추가
 ```
+
+> **[DDL 절 실측 검증 — 2026-09-14, schema.sql 244행 전문 대조]**
+>
+> **좌표 4건 전부 일치.** `:41-42` kt_daily_analysis 인덱스 2개, `:58` 첫 NOTIFY,
+> `:61-71` kt_scan_batches 정의, `:131` kt_thesis 종료, `:134` 두 번째 NOTIFY.
+> 파일이 244행으로 커졌지만(커밋 `424eedf`, 신규 테이블 3종 추가) 증분 1이 건드리는
+> 앞부분 좌표는 밀리지 않았다.
+>
+> **`reason_tags` 이름 충돌은 애초에 없다.** `kt_daily_analysis`에 `reasons` 컬럼은
+> 존재하지 않는다(`schema.sql:17-39`). 사유 문자열은 `analysis_json TEXT`(:32) 안에
+> 통 blob으로 들어 있다. rev.2 초판의 "기존 reasons 와 충돌 회피"는 근거 없는 서술이라
+> 삭제했다 — 회피할 대상이 없다.
+>
+> **`composite_score DOUBLE PRECISION`은 이 파일의 기존 관례를 의도적으로 어기는
+> 것이다.** `lynch_score`·`livermore_score`·`combined_score`가 전부 `REAL`이다
+> (`schema.sql:23-26`). 그래서 리뷰어가 "일관성" 명목으로 REAL로 되돌리기 쉽다.
+> 되돌리면 안 된다 — float4는 4.72를 4.71999979…로 저장하고, 이 값이 float8 리터럴
+> 4.72와 비교될 때 작게 판정되어 **절대 컷 경계 행이 조용히 탈락한다.** 홀드아웃
+> 검증이 4.72 절대 컷 위에서 이뤄졌으므로 이 한 컬럼은 기존 관례의 예외다.
+>
+> **`gate_tally` writer 부재는 무해함이 확인됐다.** `completeScanBatch`
+> (`db.js:485-491`)는 `status`·`completed_at` 두 키만 `update()`하므로 새 nullable
+> 컬럼을 건드리지 않는다. 증분 1 기간 동안 전 행 NULL로 남는 것이 정상 동작이다.
+>
+> **"역순 적용"은 필수가 아니다.** Edit는 행 번호가 아니라 문자열 앵커로 치환하므로
+> 두 삽입의 순서는 결과에 영향을 주지 않는다. F-6의 역순 규칙은 권고로 강등한다.
 
 **`gate_tally` 귀속 확정 — 컬럼은 증분 1 에서 만들고 writer 는 증분 3 이다.** 원문이
 `analysis_date`와 한 ALTER 문에 넣은 것은 락 획득 횟수를 줄이려는 의도이며, 문장을
@@ -410,23 +453,46 @@ F-1  autoMigrate 문장별 try/catch. 실패를 코드·메시지·문장 앞 80
      DO $ ... END $; 블록이 3 조각으로 쪼개져 영구 실패한다. F-1 을 그대로 넣으면
      부팅 로그가 이 상시 실패로 뒤덮여 진짜 DDL 실패를 가린다
      -> 이 3 조각을 알려진 무해 실패로 식별해 warn 강등하거나, split 을 고친 뒤 F-1 을 넣는다
+     ** 같은 결함이 두 번째 경로에도 있다 ** POST /api/migrate (server.js:302-330) 는
+     server.js:316 에서 sql.split(';') 로 같은 파일을 쪼갠다. 즉 이 엔드포인트는
+     **오늘도 schema.sql 을 온전히 적용하지 못한다.** 5 장 승인 2(수동 SQL Editor)가
+     옳았다는 독립 근거다. 또한 이 엔드포인트는 전역 인증 가드(server.js:504) 앞에
+     있고 schema.sql 을 통째로 실행하는 쓰기 경로이므로, 조사 목적으로 호출 금지
 F-2  SET lock_timeout = '3s'; 를 schema.sql 의 첫 문장으로 둔다. autoMigrate 안이 아니다
      검증됨 — autoMigrate 는 pg.Client 하나를 공유하므로(server.js:2450 생성,
      :2456-2458 루프, :2459 종료) 세션 스코프 SET 이 이후 문장에 유지된다
      단 수동 SQL Editor 경로에는 이 보호가 없다. 5 장 승인 2 를 택하면 수동으로 넣는다
      F-1 이 F-2 보다 먼저 들어가야 F-2 의 동작을 확인할 수 있다
+     ** F-1·F-2 의 증분 1 귀속 재판정 (2026-09-14) ** DDL 경로는 수동 SQL Editor 로
+     확정됐고 autoMigrate 는 프로덕션에서 돌지 않는다(P1). 따라서 F-1·F-2 는 이번
+     DDL 의 안전에 기여하지 않는다 -> **증분 1 착수 차단 요건에서 제외하고 위생
+     항목으로 강등한다.** 증분 1 이 실제로 필요로 하는 것은 F-3 와 F-6 둘뿐이다
+     수동 실행분의 락 보호는 STEP 2 SQL 블록 첫 줄의 SET lock_timeout 으로 대신한다
+     (SQL Editor 세션에 적용되며, 블록이 한 트랜잭션으로 감싸져도 유효하다)
 F-3  upsert 결과 error 를 확인하고 throw 한다. 행 수를 메시지에 넣는다
-     ** 대상은 1 곳이 아니라 3 곳이다 **
-       db.js:494-498  batchSaveAnalysis    rev.1 이 지목한 유일 대상
-       db.js:451-459  createScanBatch      실패 시 배치 행 없이 스캔이 "성공"한다
+     ** 대상은 1 곳이 아니라 3 곳이다 ** (2026-09-14 실측 확인)
+       db.js:494-498  batchSaveAnalysis    ** error 를 구조분해조차 하지 않는다 **
+                                           `await sb.from(...).upsert(rows, {...});` 한 줄
+       db.js:451-459  createScanBatch      .insert() 반환값 미확인. 실패해도 스캔은 "성공"
        db.js:52-70    saveAnalysisToDB     ** 빈 try/catch {} ** 이중 은폐
-     cron.js:843 의 try/catch 는 영구히 발화하지 않는다 — supabase-js 빌더는 Postgres
+     cron.js:844 의 try/catch 는 영구히 발화하지 않는다 — supabase-js 빌더는 Postgres
      오류에 reject 하지 않고 { error } 로 resolve 한다. 이 catch 를 근거로 삼지 않는다
-F-6  DDL 은 역순 적용(:71 뒤 :42) 또는 텍스트 앵커로 넣는다. 행 번호가 밀린다
+     ** 이것이 증분 1 최대 리스크의 정체다. ** PGRST204 가 20:00 KST 크론에서 터지면
+     batchSaveAnalysis 는 error 를 읽지 않고, cron.js:844 catch 는 발화하지 않으며,
+     completeScanBatch 는 그대로 status='done' 을 쓴다. 즉 **0 행 저장 + 성공 보고**가
+     되어 로그 한 줄조차 남지 않는다. F-3 은 선택 개선이 아니라 F-6 의 전제다
+F-6  DDL 은 텍스트 앵커로 넣는다 (역순 적용은 권고일 뿐 필수 아님 — DDL 절 실측 주)
      ** 캐시 확인은 GET 이 아니라 실제 쓰기로 한다 **
-       1) NOTIFY pgrst, 'reload schema';
-       2) 신규 5 키를 포함한 1 행 upsert 를 실제로 시도한다 (스테이징 또는 폐기용 코드)
-       3) PGRST204 가 나면 캐시가 아직 낡은 것이다. 재시도한다
+       1) DDL 적용 후 SQL Editor 에서 NOTIFY pgrst, 'reload schema';
+       2) 코드 배포 후, 20:00 KST 크론 이전에 **웹에서 아무 종목 1 건을 온디맨드
+          분석한다.** d 단계 이후 이 경로는 v2 를 타고 g 단계가 신규 5 키를
+          db.js:53-69 에 명시 기입하므로, 이 저장 1 회가 곧 신규 컬럼 쓰기 시험이다
+       3) PGRST204 가 나면 캐시가 아직 낡은 것이다. NOTIFY 재발행 후 재시도한다
+     ** 폐기용 합성 행을 만들지 않는다 ** — 온디맨드 분석은 앱의 정상 기능이고
+     그 결과 행은 (code, analysis_date) 로 그날 크론 결과에 자연 병합된다
+     (db.js:25-45 mergeStoredAnalysis). 정리 작업이 필요 없다
+     ** 선행 조건 ** 이 절차는 F-3 이 먼저 들어가야 의미가 있다. 지금은
+     saveAnalysisToDB 가 빈 try/catch 라 PGRST204 가 화면에도 로그에도 안 나온다
      /api/scan/results GET 은 낡은 캐시를 검출하지 못한다 — 평문 컬럼 select 는
      PostgREST 스키마 캐시를 경유하지 않는다. 실패는 20:00 KST 크론의 **쓰기**에서 난다
      information_schema.columns 확인은 Postgres 를 보는 것이지 캐시를 보는 게 아니다
