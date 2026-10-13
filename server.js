@@ -1288,8 +1288,11 @@ app.get('/api/screener', async (req, res) => {
       .gte('analysis_date', cutoff)
       .order('analysis_date', { ascending: false });
 
-    if (error) return res.json({ items: [], total: 0, page: parseInt(page), message: '스캔 데이터 없음. 오늘 오후 8시 스캔 후 사용 가능합니다.' });
-    if (!rows?.length) return res.json({ items: [], total: 0, page: 1, message: '스캔 데이터 없음. 스캔이 실행된 후 사용 가능합니다.' });
+    // 데이터가 없어도 허용 섹터 목록은 실어 보낸다. 화면은 이 목록으로 드롭다운을 만드는데,
+    // 스캔이 7일보다 오래돼 여기로 빠지면 목록이 비어 섹터를 고를 방법 자체가 사라진다 —
+    // 데이터가 돌아온 뒤에도 한 번 더 조회하기 전까지 빈 채로 남는다.
+    if (error) return res.json({ items: [], total: 0, page: parseInt(page), sectorOptions: SECTOR_NAMES, message: '스캔 데이터 없음. 오늘 오후 8시 스캔 후 사용 가능합니다.' });
+    if (!rows?.length) return res.json({ items: [], total: 0, page: 1, sectorOptions: SECTOR_NAMES, message: '스캔 데이터 없음. 스캔이 실행된 후 사용 가능합니다.' });
 
     // Deduplicate — keep latest per code
     const seen = new Set();

@@ -30,6 +30,8 @@
 //   SPEC  : SPEC-신호엔진-v2 4-2 — 20거래일 보유, 진입가 -8% 손절. 저장소 현행 기준.
 //   LUK20 : 셋업봉 저가 손절 + 3R·5R 15% 분할, 나머지 20거래일 종가. 9 EMA 청산을 뺀 대조용.
 //   LUK   : 셋업봉 저가 손절 + 3R·5R 15% 분할, 나머지는 진입 다음 날부터 9 EMA 아래 첫 종가.
+//   LUKADR: LUK과 같되 분할이 진입가+3×ADR 15% 한 번뿐. 출력 "3R%" 열은 이 청산에서 3×ADR 도달률, "5R%"는 해당 없음(-).
+//           LUK과의 차이는 첫 분할 위치와 5R 분할 제거 두 가지가 섞여 있다.
 //
 // 대조군은 청산마다 따로 둔다. 청산 규칙마다 평균 보유일이 4일에서 14일까지 달라서, 20일 고정
 // 보유 대조군과 비교하면 국면(하락장 out 구간 등)에 따라 초과수익의 부호가 바뀐다.
@@ -106,10 +108,19 @@ function tick(p) {
 //   풀백_돌파없음   : + 9 EMA 터치, 다음날 시가 진입 — 돌파 조건의 몫을 가른다
 //   풀백_고가돌파   : + 다음날 t봉 고가 돌파 시 진입 — 진입 규칙까지 포함한 번역
 //   풀백_돌파_손절폭: + 손절폭 ≤ min(5%, ADR×50%) — 룩의 손절폭 규칙까지 포함한 전체 번역
+//   무조건_ADR5     : ADR% >= 5 인 날만의 대조군 — ADR 필터 변형은 유니버스가 달라 이쪽과 비교한다
+//   풀백_고가돌파_ADR5: 풀백_고가돌파 + ADR% >= 5 (발표자료의 ADR>5% 종목 선정, 본인이 "not a hard rule"이라 밝힘)
 const CONTROL = '무조건';
-const VARIANTS = [CONTROL, '추세만', '풀백_돌파없음', '풀백_고가돌파', '풀백_돌파_손절폭'];
-const BREAKOUT = new Set(['풀백_고가돌파', '풀백_돌파_손절폭']);
-const EXITS = ['SPEC', 'LUK20', 'LUK'];
+const CONTROL_ADR = '무조건_ADR5';
+const VARIANTS = [CONTROL, '추세만', '풀백_돌파없음', '풀백_고가돌파', '풀백_돌파_손절폭', CONTROL_ADR, '풀백_고가돌파_ADR5'];
+const BREAKOUT = new Set(['풀백_고가돌파', '풀백_돌파_손절폭', '풀백_고가돌파_ADR5']);
+const ADR5 = new Set([CONTROL_ADR, '풀백_고가돌파_ADR5']);
+const isControl = (v) => v === CONTROL || v === CONTROL_ADR;
+const controlOf = (v) => ADR5.has(v) ? CONTROL_ADR : CONTROL;
+// LUKADR: LUK과 같되 첫 분할을 3R이 아니라 진입가 + 3 x ADR(%) 이동에 둔다 (본인 트윗 R146 1886788327829070119,
+// 2025-02-04 "first partial when the stock moves >3*ADR"). 분할 비율 15%는 LUK과 맞춘 [가정], 5R 분할은 없다.
+const EXITS = ['SPEC', 'LUK20', 'LUK', 'LUKADR'];
+const ADR_MIN = 5, ADR_MULT = 3, ADR_FRAC = 0.15;
 
 // ── 청산 시뮬레이션 ───────────────────────────────────────────────────
 // entryIdx 봉에서 entry에 샀다. 반환: ret(비용 차감 %), rMult(비용 차감 R배수), hold(보유 봉 수).
@@ -126,28 +137,29 @@ function simSpec(st, entryIdx, entry) {
 }
 
 // trail=false: 나머지를 HORIZON 종가에 청산. trail=true: 9 EMA 아래 첫 종가(최대 MAX_HOLD).
-function simLuk(st, ema9, entryIdx, entry, stop, trail) {
+// targets: [{px, frac}] 분할 목표. 생략하면 PARTIALS(R배수)로 만든다.
+function simLuk(st, ema9, entryIdx, entry, stop, trail, targets = null) {
   const { opens, highs, lows, closes } = st;
   const R = entry - stop;
   const last = entryIdx + (trail ? MAX_HOLD : HORIZON) - 1;
 
   let remain = 1, pnl = 0;   // pnl: 진입가 대비 손익(가격 단위) × 비중의 합
-  const taken = PARTIALS.map(() => false);
+  const tg = targets ?? PARTIALS.map(p => ({ px: entry + p.r * R, frac: p.frac }));
+  const taken = tg.map(() => false);
   let k = entryIdx;
   for (; k <= last; k++) {
     // 시가 갭: 진입일 이후 시가가 손절선 아래면 시가에 털린다(손절선보다 나쁜 체결).
     if (k > entryIdx && opens[k] <= stop) { pnl += (opens[k] - entry) * remain; remain = 0; break; }
     // 시가가 이미 목표가 위면 그 목표는 시가에 먼저 체결된 것이다.
     if (k > entryIdx) {
-      PARTIALS.forEach((p, j) => {
-        if (!taken[j] && opens[k] >= entry + p.r * R) { pnl += (opens[k] - entry) * p.frac; remain -= p.frac; taken[j] = true; }
+      tg.forEach((p, j) => {
+        if (!taken[j] && opens[k] >= p.px) { pnl += (opens[k] - entry) * p.frac; remain -= p.frac; taken[j] = true; }
       });
     }
     // 장중: 손절 먼저(보수적).
     if (lows[k] <= stop) { pnl += (stop - entry) * remain; remain = 0; break; }
-    PARTIALS.forEach((p, j) => {
-      const tgt = entry + p.r * R;
-      if (!taken[j] && highs[k] >= tgt) { pnl += (tgt - entry) * p.frac; remain -= p.frac; taken[j] = true; }
+    tg.forEach((p, j) => {
+      if (!taken[j] && highs[k] >= p.px) { pnl += (p.px - entry) * p.frac; remain -= p.frac; taken[j] = true; }
     });
     // 종가: 9 EMA 이탈이면 나머지 전량.
     if (trail && k > entryIdx && ema9[k] != null && closes[k] < ema9[k]) { pnl += (closes[k] - entry) * remain; remain = 0; break; }
@@ -223,8 +235,9 @@ async function main() {
 
       const e = t + 1, stop = lows[t] - tick(lows[t]);
       for (const v of VARIANTS) {
-        if (v !== CONTROL && !trend) continue;
-        if (v !== CONTROL && v !== '추세만' && !pulled) continue;
+        if (ADR5.has(v) && !(adr >= ADR_MIN)) continue;
+        if (!isControl(v) && !trend) continue;
+        if (!isControl(v) && v !== '추세만' && !pulled) continue;
         const a = acc[v];
         a.setups++;
 
@@ -241,6 +254,7 @@ async function main() {
         push(a.SPEC,  simSpec(st, e, entry));
         push(a.LUK20, simLuk(st, ema9, e, entry, stop, false));
         push(a.LUK,   simLuk(st, ema9, e, entry, stop, true));
+        push(a.LUKADR, simLuk(st, ema9, e, entry, stop, true, [{ px: entry * (1 + ADR_MULT * adr / 100), frac: ADR_FRAC }]));
         a.stopPct.push(stopPct);
         a.adr.push(adr);
       }
@@ -266,17 +280,17 @@ async function main() {
       trades: a.SPEC.all.length, stopPctMedian: r2(median(a.stopPct)), adrMedian: r2(median(a.adr)),
     };
     for (const x of EXITS) {
-      const b = a[x], c = acc[CONTROL][x];
+      const b = a[x], c = acc[controlOf(v)][x];
       const rs = b.all.map(o => o.rMult);
       const o = {
         mean: r2(segMean(b, 'all', 'ret')), winRate: pct(b.all, o => o.ret > 0),
         meanR: r2(segMean(b, 'all', 'rMult')), meanRIn: r2(segMean(b, 'in', 'rMult')), meanROut: r2(segMean(b, 'out', 'rMult')),
         trimmedR: r2(trimmed(rs)), medianR: r2(median(rs)),
-        hit3Pct: pct(b.all, o => o.hit3), hit5Pct: pct(b.all, o => o.hit5),
+        hit3Pct: pct(b.all, o => o.hit3), hit5Pct: x === 'LUKADR' ? null : pct(b.all, o => o.hit5),   // LUKADR은 분할 1개 — 5R 도달률 없음
         holdMean: r2(segMean(b, 'all', 'hold')),
       };
       o.rSign = signOf([o.meanR, o.meanRIn, o.meanROut]);
-      if (v !== CONTROL) {
+      if (!isControl(v)) {
         o.excessAll = ex(segMean(b, 'all', 'ret'), segMean(c, 'all', 'ret'));
         o.excessIn  = ex(segMean(b, 'in', 'ret'),  segMean(c, 'in', 'ret'));
         o.excessOut = ex(segMean(b, 'out', 'ret'), segMean(c, 'out', 'ret'));

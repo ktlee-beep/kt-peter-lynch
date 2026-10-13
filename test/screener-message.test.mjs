@@ -8,6 +8,7 @@
 // 다른 테스트와 달리 실제 server.js를 fake PostgREST 위에 띄운다 — 안내문 판정이 라우트
 // 안에 있어서 함수 단위로 떼어낼 수 없다.
 import * as fake from './fake_pgrst.mjs';
+import { exitClean } from './exit_clean.mjs';
 fake.install();
 process.env.SUPABASE_URL = fake.SUPABASE_URL;
 process.env.SUPABASE_SERVICE_ROLE_KEY = 'fake-service-role-key';
@@ -84,4 +85,4 @@ const [total, msg] = await probe('park_min=65');
 ok('행 0건 → 스캔없음 안내', [total, /스캔 데이터 없음/.test(msg ?? '')], [0, true]);
 
 console.log(`\n통과 ${pass} / 실패 ${fail}\n`);
-process.exit(fail ? 1 : 0);
+await exitClean(fail ? 1 : 0);
