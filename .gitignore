@@ -50,6 +50,8 @@ gh-pages-temp/
 scripts/backtest/cache/
 scripts/backtest/cache-min/
 scripts/backtest/ticks/
+# 단타 유니버스 일일 산출물 — 네이버 테마·뉴스 원문이 담겨 공개 저장소에 재배포하지 않는다
+scripts/backtest/universe/
 
 # PC 작업 스케줄러 신호·수집기 실행 기록
 scripts/pc/*.log
