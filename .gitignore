@@ -48,3 +48,8 @@ gh-pages-temp/
 
 # 백테스트 일봉 캐시 (네이버에서 재수집 가능, 수십 MB)
 scripts/backtest/cache/
+scripts/backtest/cache-min/
+scripts/backtest/ticks/
+
+# PC 작업 스케줄러 신호·수집기 실행 기록
+scripts/pc/*.log

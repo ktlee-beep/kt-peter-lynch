@@ -8,7 +8,17 @@ on:
     - cron: '0 22 * * 0-4'
     # KR 일일 스캔 — 20:00 KST = UTC 11:00 (월~금)
     - cron: '0 11 * * 1-5'
-  workflow_dispatch:  # 수동 실행 허용
+  # 수동·PC 신호 실행. GitHub schedule 은 수 시간씩 밀린다(2026-10-12 KR 스캔 11:00Z 예정 →
+  # 20:04Z 실행, 9시간 지연). 그래서 PC 작업 스케줄러가 정시에 `gh workflow run -f job=kr` 로
+  # 이 워크플로를 직접 부르고, 위 schedule 은 PC가 꺼져 있을 때의 예비로 남긴다.
+  # job=wake 는 서버만 깨운다(동작 확인용, 스캔·브리핑 없음).
+  workflow_dispatch:
+    inputs:
+      job:
+        description: '실행할 작업'
+        type: choice
+        options: [all, kr, us, brief, wake]
+        default: all
 
 jobs:
   trigger:
@@ -21,7 +31,7 @@ jobs:
           sleep 40
 
       - name: Morning Brief (08:00 KST)
-        if: github.event.schedule == '0 23 * * 0-4' || github.event_name == 'workflow_dispatch'
+        if: github.event.schedule == '0 23 * * 0-4' || (github.event_name == 'workflow_dispatch' && (inputs.job == 'all' || inputs.job == 'brief'))
         run: |
           echo "Triggering morning brief..."
           curl -sf -X POST https://kt-peter-lynch.onrender.com/api/brief/generate \
@@ -29,7 +39,7 @@ jobs:
             && echo "OK" || echo "FAILED (non-fatal)"
 
       - name: US Scan (07:00 KST)
-        if: github.event.schedule == '0 22 * * 0-4' || github.event_name == 'workflow_dispatch'
+        if: github.event.schedule == '0 22 * * 0-4' || (github.event_name == 'workflow_dispatch' && (inputs.job == 'all' || inputs.job == 'us'))
         run: |
           echo "Triggering US scan..."
           curl -sf -X POST https://kt-peter-lynch.onrender.com/api/scan/us/trigger \
@@ -37,7 +47,7 @@ jobs:
             && echo "OK" || echo "FAILED (non-fatal)"
 
       - name: KR Daily Scan (20:00 KST)
-        if: github.event.schedule == '0 11 * * 1-5' || github.event_name == 'workflow_dispatch'
+        if: github.event.schedule == '0 11 * * 1-5' || (github.event_name == 'workflow_dispatch' && (inputs.job == 'all' || inputs.job == 'kr'))
         run: |
           echo "Triggering KR daily scan..."
           curl -sf -X POST https://kt-peter-lynch.onrender.com/api/scan/trigger \
