@@ -299,6 +299,11 @@ function isScanSecretOrMaster(req) {
   } catch { return false; }
 }
 
+// SCAN_SECRET 헤더로 온 호출인지만 본다 (권한 판정은 isScanSecretOrMaster 가 한다).
+function isScanSecret(req) {
+  return !!process.env.SCAN_SECRET && req.headers['x-scan-secret'] === process.env.SCAN_SECRET;
+}
+
 app.post('/api/migrate', async (req, res) => {
   if (!isScanSecretOrMaster(req)) {
     return res.status(403).json({ error: 'Forbidden' });
@@ -370,9 +375,23 @@ app.post('/api/scan/trigger', async (req, res) => {
   if (!isScanSecretOrMaster(req)) {
     return res.status(403).json({ error: 'Forbidden' });
   }
-  const { runDailyScan } = await import('./cron.js');
-  runDailyScan().catch(console.error);
-  res.json({ ok: true, message: '스캔 시작됨 (비동기)' });
+  const { runDailyScan, runNightly, dailyScanAlreadyDone } = await import('./cron.js');
+  // 마스터 JWT 호출은 설정·스캔 결과 화면의 수동 버튼이다 — 누른 사람이 다시 돌리길 원한 것이므로
+  // 가드 없이 스캔만 돈다(예전 동작 그대로).
+  if (!isScanSecret(req)) {
+    runDailyScan({ force: true }).catch(console.error);
+    return res.json({ ok: true, message: '스캔 시작됨 (비동기)' });
+  }
+  // SCAN_SECRET 호출은 PC 작업 스케줄러·GitHub Actions 의 야간 신호다. 서버가 자다 깨어 node-cron
+  // 20:00 틱을 놓쳤을 수 있으므로 체인 전체(스캔→알림→수급→선점)를 돈다. 그날 스캔이 이미 끝났으면
+  // 건너뛰고, 호출한 쪽(GitHub Actions 로그)에서 보이도록 응답에 남긴다. ?force=1 이면 다시 돈다.
+  const force = req.query.force === '1';
+  const done = force ? null : await dailyScanAlreadyDone();
+  if (done) {
+    return res.json({ ok: true, skipped: true, batchId: done.batch_id, message: '오늘 완료된 스캔이 있어 건너뜀 (다시 돌리려면 ?force=1)' });
+  }
+  runNightly({ force: true }).catch(console.error);
+  res.json({ ok: true, message: '야간 작업 시작됨 — 스캔·알림·수급·선점 (비동기)' });
 });
 
 // 수동 생성 트리거 (마스터/SCAN_SECRET) — 08:00 기다리지 않고 즉시 생성
@@ -1207,7 +1226,8 @@ app.delete('/api/admin/users/:email', authMiddleware, adminMiddleware, async (re
 // ── /api/scan/trigger-admin (어드민 UI 전용) ─────────────────────
 app.post('/api/scan/trigger-admin', authMiddleware, adminMiddleware, async (req, res) => {
   const { runDailyScan } = await import('./cron.js');
-  runDailyScan().catch(console.error);
+  // 어드민 버튼은 "지금 다시"가 의도다 — 중복 스캔 가드를 건너뛴다.
+  runDailyScan({ force: true }).catch(console.error);
   res.json({ ok: true, message: '스캔 시작됨 (비동기)' });
 });
 

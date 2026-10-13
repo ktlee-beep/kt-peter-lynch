@@ -527,6 +527,61 @@ export async function completeScanBatch(batchId) {
   }).eq('batch_id', batchId);
 }
 
+// 가장 최근 "그날 종가 스캔" 기준 시각(평일 18:00 KST)을 Date 로. 장은 15:30 에 닫히지만
+// 투자자별 수급처럼 장 후에 확정되는 값이 언제 다 들어오는지는 확인하지 못했다 [확인 필요].
+// 그래서 18:00 이후에 시작한 스캔만 그날 스캔으로 친다 — 15:30~18:00 에 돈 수동 스캔이 있어도
+// 20:00 스캔은 막히지 않는다(덜 도는 쪽이 아니라 더 도는 쪽으로 틀린다).
+// 공휴일은 모른다 — 공휴일 밤에는 직전 평일 종가를 한 번 더 스캔할 수 있지만(낭비 1회),
+// 돌아야 할 스캔을 막지는 않는다.
+export function lastScanCutoffUtc(now = new Date()) {
+  const KST = 9 * 3600 * 1000, DAY = 86400 * 1000;
+  const k = new Date(now.getTime() + KST);   // UTC 필드로 KST 달력을 읽는다
+  let cut = Date.UTC(k.getUTCFullYear(), k.getUTCMonth(), k.getUTCDate(), 18, 0) - KST;
+  if (cut > now.getTime()) cut -= DAY;
+  while ([0, 6].includes(new Date(cut + KST).getUTCDay())) cut -= DAY;
+  return new Date(cut);
+}
+
+// 기준 시각 이후 시작해 정상 완료된 일일 스캔 배치 (없으면 null). 같은 종가로 두 번 스캔하지
+// 않으려고 쓴다 — GitHub schedule 이 9시간 늦게 도착한 실측이 있어(10-12 20:00 KST 예정 → 10-13
+// 05:04 실행), PC 신호로 이미 끝난 스캔을 새벽에 다시 돌려 Render 무료 시간을 쓸 수 있다.
+// 다음은 완료로 치지 않는다 — 그런 날은 다시 도는 편이 낫다.
+//  - 분석 성공 90% 미만
+//  - total_stocks < minTotal (하드코딩 폴백 유니버스로 돈 배치 — 호출부가 폴백 크기를 넘긴다)
+//  - 실제 저장 행 90% 미만: processed 는 "분석 성공" 건수라, 저장이 통째로 실패해도(cron 은
+//    저장 실패를 로그만 남기고 진행) 90% 를 넘는다. kt_daily_analysis 의 scan_batch_id 로 센다.
+export async function findDailyScanDoneSinceCutoff(now = new Date(), { minTotal = 1 } = {}) {
+  const sb = getSupabase();
+  const since = lastScanCutoffUtc(now).toISOString();
+  const { data, error } = await sb.from('kt_scan_batches')
+    .select('batch_id, started_at, completed_at, total_stocks, processed, failed')
+    .eq('scan_type', 'daily')
+    .eq('status', 'done')
+    .gte('started_at', since)
+    .order('started_at', { ascending: false })
+    .limit(5);
+  if (error) throw new Error(`findDailyScanDoneSinceCutoff 실패: ${error.message}`);
+  const candidates = (data ?? []).filter(b =>
+    b.total_stocks > 0 && b.total_stocks >= minTotal && b.processed >= b.total_stocks * 0.9);
+  for (const b of candidates) {
+    let q = sb.from('kt_daily_analysis')
+      .select('code', { count: 'exact', head: true })
+      .eq('scan_batch_id', b.batch_id);
+    // scan_batch_id 에는 인덱스가 없다. 배치 id 앞머리가 분석일이므로 그 날짜로 먼저 좁혀
+    // idx_kt_daily_date_signal 을 타게 한다 — 테이블이 커져 5초를 넘기면 가드가 조용히 꺼진다.
+    const day = /^\d{4}-\d{2}-\d{2}/.exec(b.batch_id)?.[0];
+    if (day) q = q.eq('analysis_date', day);
+    const { count, error: cErr, status } = await q;
+    // HEAD 응답은 본문이 없어 message 가 비고, 404 는 error·count 가 둘 다 null 로 온다
+    // (postgrest-js 가 404+빈 본문을 status 204 로 바꾸므로 로그의 "HTTP 204 행 수 없음"은
+    // 테이블·경로 없음일 수 있다). 어느 쪽이든 0행으로 넘기지 않고 던진다(호출부가 확인 없이 진행).
+    if (cErr) throw new Error(`저장 행 확인 실패 (${b.batch_id}): HTTP ${status} ${cErr.message || cErr.code || ''}`.trim());
+    if (count == null) throw new Error(`저장 행 확인 실패 (${b.batch_id}): HTTP ${status} 행 수 없음`);
+    if (count >= b.total_stocks * 0.9) return { ...b, saved: count };
+  }
+  return null;
+}
+
 // 분석 결과 배치 저장 (스캔 전용)
 // error 를 확인하지 않으면 그날 스캔 결과가 통째로 사라져도 로그 한 줄 남지 않는다.
 // 특히 신규 컬럼 추가 후 PostgREST 스키마 캐시가 낡아 있으면 PGRST204 로 요청 전체가

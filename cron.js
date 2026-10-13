@@ -3,7 +3,7 @@
 // 6시간마다 — 매크로 갱신
 import cron from 'node-cron';
 import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermoreScore, calcPiotroski, calcGrowthStreak, hasNoLoss, calcTTM, calcParkScore, matrixZone, median, calcRsRatios, rsPercentile, buildRsBreakpoints, calcSupplyTrend, seonjeomTriggers, SEONJEOM_PARK_MIN } from './analysis.js';
-import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief, loadCorpCodeMap, upsertCorpCodes, getDartCache, setDartCache, saveUsScan, getCompanyInfoCache, setCompanyInfoCache, setMultiYearCache, setQuarterlyCache, getGrowthCaches, countKvPrefix, listFreshKvCodes, listAllStocks, upsertStocks, deactivateStocks, saveUniverseMeta, savePerMedian, getPerMedian, getIndexCloses, mergeIndexCloses, saveRsDist, getRsDist, getSupplyCache, setSupplyCache, saveSeonjeomAlerts } from './db.js';
+import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, findDailyScanDoneSinceCutoff, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief, loadCorpCodeMap, upsertCorpCodes, getDartCache, setDartCache, saveUsScan, getCompanyInfoCache, setCompanyInfoCache, setMultiYearCache, setQuarterlyCache, getGrowthCaches, countKvPrefix, listFreshKvCodes, listAllStocks, upsertStocks, deactivateStocks, saveUniverseMeta, savePerMedian, getPerMedian, getIndexCloses, mergeIndexCloses, saveRsDist, getRsDist, getSupplyCache, setSupplyCache, saveSeonjeomAlerts } from './db.js';
 import { SECTOR_MAP } from './sector_map.js';
 import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures, CORP_MAP, fetchCorpCodeMap, fetchDartFinancials, US_UNIVERSE, fetchUsStockDaily, fetchDartCompanyInfo, fetchDartMultiYear, fetchDartQuarterly, hasYearData, dartCallStats, resetDartCallStats, snapshotDartCallStats, dartBlockedBy, fetchNaverMarketSum, filterUniverse, fetchIndexOHLCV, fetchNaverInvestor, KRX_INDICES } from './data.js';
 
@@ -771,8 +771,67 @@ export async function runFundamentalsBackfill({ limit = 0, maxDartCalls = 15000,
 // 배치 행도 두 개가 생겨 진행률이 서로를 덮어쓴다.
 const dailyScanGate = singleFlight('일일 스캔');
 
-export async function runDailyScan() {
+// 그날 기준 시각(18:00 KST) 이후 이미 정상 완료된 스캔이 있으면 그 배치를 돌려준다 (없으면 null).
+// 조회가 실패하거나 5초 안에 안 끝나면 null — 가드 때문에 돌아야 할 스캔이 멈추면 안 된다.
+// 하드코딩 폴백 유니버스로 돈 배치는 완료로 치지 않도록 폴백 크기보다 큰 배치만 본다.
+const SCAN_GUARD_TIMEOUT_MS = 5000;
+export async function dailyScanAlreadyDone() {
+  try {
+    return await withTimeout(SCAN_GUARD_TIMEOUT_MS, '중복 스캔 확인',
+      findDailyScanDoneSinceCutoff(new Date(), { minTotal: getScanUniverse().length + 1 }));
+  } catch (e) {
+    console.error('[Cron] 중복 스캔 확인 실패 — 확인 없이 진행:', e.message);
+    return null;
+  }
+}
+
+// PC 신호·GitHub schedule·서버 node-cron 세 경로가 같은 밤 스캔을 부른다. 동시에 오면
+// singleFlight 가 합치지만, schedule 이 몇 시간 늦게 오면 끝난 스캔을 처음부터 다시 돌린다.
+// force 는 어드민 수동 실행처럼 "같은 종가라도 다시"가 의도인 호출만 쓴다.
+export async function runDailyScan({ force = false } = {}) {
+  if (!force) {
+    const done = await dailyScanAlreadyDone();
+    if (done) {
+      console.warn(`[Cron] 일일 스캔 건너뜀 — 기준 시각 후 완료된 배치 ${done.batch_id} 있음 (${done.processed}/${done.total_stocks}, 저장 ${done.saved}, 시작 ${done.started_at})`);
+      return { skipped: true, batchId: done.batch_id };
+    }
+  }
   return dailyScanGate(() => withKeepAlive('daily-scan', runDailyScanInner));
+}
+
+// 야간 체인: 스캔 → 알림 평가 → 수급 수집 → 선점 평가. node-cron 과 SCAN_SECRET 신호(PC 작업
+// 스케줄러·GitHub Actions) 둘 다 이 경로를 탄다. 상시 깨우기(keepalive.yml)를 끈 뒤로는 20:00
+// 정각에 서버가 자고 있으면 node-cron 틱이 그냥 지나가므로, 서버를 깨운 신호 쪽에서도 체인
+// 전체를 돌려야 수급·선점·알림이 빠지지 않는다.
+// 오늘 스캔이 이미 끝났으면 체인 전체를 건너뛴다 — 그 스캔을 돌린 체인이 나머지도 돌렸다.
+// 예외: 마스터가 18:00 이후 수동 스캔(runDailyScan 단독)을 돌렸다면 그날 체인은 건너뛰어진다.
+const nightlyGate = singleFlight('야간 체인');
+
+export async function runNightly({ force = false } = {}) {
+  return nightlyGate(async () => {
+    if (!force) {
+      const done = await dailyScanAlreadyDone();
+      if (done) {
+        console.warn(`[Cron] 야간 체인 건너뜀 — 기준 시각 후 완료된 배치 ${done.batch_id} 있음`);
+        return { skipped: true, batchId: done.batch_id };
+      }
+    }
+    // 네 작업 전체를 하나의 킵얼라이브로 감싼다. 스캔만 감싸면 이어지는 수급 수집·선점
+    // 평가 구간에서 다시 잠든다.
+    return withKeepAlive('nightly', async () => {
+      const scan = await runDailyScan({ force: true }).catch(e => { console.error('[Cron] 스캔 오류:', e); return null; });
+      // 스캔은 시작 시각의 UTC 날짜로 저장한다. 체인이 09:00 KST(00:00 UTC)를 넘기면 뒤 단계가
+      // 각자 계산한 "오늘"과 어긋나 수급은 생략되고 선점은 0건으로 덮어써지므로, 스캔이 쓴
+      // 날짜를 그대로 넘긴다. 스캔이 실패해 날짜가 없으면 각 단계는 실행 시점 날짜를 쓴다.
+      const date = scan?.analysisDate;
+      await evaluateAlertSettings().catch(e => console.error('[Cron] 알림 평가 오류:', e));
+      // 수급 → 선점 순서를 지킨다. 선점 트리거의 수급 조건이 방금 채운 캐시를 읽으므로
+      // 순서가 뒤집히면 첫날은 수급 조건이 통째로 빠진 채 판정된다.
+      await runSupplyCollect({ date }).catch(e => console.error('[Cron] 수급 수집 오류:', e));
+      await evaluateSeonjeomTriggers({ date }).catch(e => console.error('[Cron] 선점 평가 오류:', e));
+      return { skipped: false, analysisDate: date ?? null };
+    });
+  });
 }
 
 async function runDailyScanInner() {
@@ -1000,6 +1059,8 @@ async function runDailyScanInner() {
       console.error('[Cron] 뉴스 펄스 워밍 오류:', e.message);
     }
   })();
+
+  return { skipped: false, analysisDate: today, batchId };
 }
 
 // ── 매크로 갱신 ──────────────────────────────────────────────────
@@ -1155,9 +1216,10 @@ const SUPPLY_MAX_FETCH = 400;      // 1.2초 간격 × 400 = 약 8분. Render �
 const SUPPLY_DELAY_MS = 1200;
 const SUPPLY_TTL_DAYS = 3;         // 주말·연휴에 같은 값을 다시 받아오지 않을 만큼만
 
-export async function runSupplyCollect({ maxFetch = SUPPLY_MAX_FETCH } = {}) {
+export async function runSupplyCollect({ maxFetch = SUPPLY_MAX_FETCH, date } = {}) {
   console.log('[Cron] 수급 수집 시작');
-  const today = new Date().toISOString().slice(0, 10);
+  // date 는 야간 체인이 넘기는 스캔 분석일. 단독 호출이면 실행 시점 날짜.
+  const today = date ?? new Date().toISOString().slice(0, 10);
   try {
     const { data, error } = await getSupabase()
       .from('kt_daily_analysis')
@@ -1206,9 +1268,10 @@ export async function runSupplyCollect({ maxFetch = SUPPLY_MAX_FETCH } = {}) {
 // RS 백분위의 "상승 전환"은 오늘 값만으로는 알 수 없으므로 어제 저장분과 비교한다.
 // analyzeStockLean 안에서 종목마다 전일 행을 읽으면 3,900회 왕복이 되니, 스캔이 끝난 뒤
 // 이틀치를 한 번에 읽어 여기서 판정한다(evaluateAlertSettings와 같은 방식).
-export async function evaluateSeonjeomTriggers() {
+export async function evaluateSeonjeomTriggers({ date } = {}) {
   try {
-    const today = new Date().toISOString().slice(0, 10);
+    // date 는 야간 체인이 넘기는 스캔 분석일. 단독 호출이면 실행 시점 날짜.
+    const today = date ?? new Date().toISOString().slice(0, 10);
     const from = new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10);
     const { data, error } = await getSupabase()
       .from('kt_daily_analysis')
@@ -1233,8 +1296,10 @@ export async function evaluateSeonjeomTriggers() {
     };
 
     const fired = [];
+    let judged = 0;
     for (const [code, [cur, prev]] of byCode) {
       if (cur.analysis_date !== today) continue;   // 오늘 스캔이 안 된 종목은 판정하지 않는다
+      judged++;
       const a = parse(cur);
       if (!Number.isFinite(Number(a?.park?.score)) || Number(a.park.score) < SEONJEOM_PARK_MIN) continue;
 
@@ -1256,6 +1321,12 @@ export async function evaluateSeonjeomTriggers() {
       }
     }
 
+    // 그 날짜 행이 하나도 없으면 판정한 것이 없다. 여기서 0건을 저장하면 전날 결과가
+    // "오늘 0건(최신)"으로 덮여 화면이 낡았다는 사실까지 지운다.
+    if (!judged) {
+      console.warn(`[Cron] 선점 평가 — ${today} 분석 행 없음, 저장 생략 (이전 결과 유지)`);
+      return [];
+    }
     fired.sort((x, y) => y.parkScore - x.parkScore);
     await saveSeonjeomAlerts({ date: today, count: fired.length, items: fired, at: new Date().toISOString() })
       .catch(e => console.error('[Cron] 선점 알림 저장 실패:', e.message));
@@ -1350,17 +1421,8 @@ async function withKeepAlive(tag, fn) {
 // ── cron 등록 ────────────────────────────────────────────────────
 export function startCron() {
   // 매 영업일 20:00 KST = UTC 11:00
-  cron.schedule('0 11 * * 1-5', async () => {
-    // 네 작업 전체를 하나의 킵얼라이브로 감싼다. 스캔만 감싸면 이어지는 수급 수집·선점
-    // 평가 구간에서 다시 잠든다.
-    await withKeepAlive('nightly', async () => {
-      await runDailyScan().catch(e => console.error('[Cron] 스캔 오류:', e));
-      await evaluateAlertSettings().catch(e => console.error('[Cron] 알림 평가 오류:', e));
-      // 수급 → 선점 순서를 지킨다. 선점 트리거의 수급 조건이 방금 채운 캐시를 읽으므로
-      // 순서가 뒤집히면 첫날은 수급 조건이 통째로 빠진 채 판정된다.
-      await runSupplyCollect().catch(e => console.error('[Cron] 수급 수집 오류:', e));
-      await evaluateSeonjeomTriggers().catch(e => console.error('[Cron] 선점 평가 오류:', e));
-    });
+  cron.schedule('0 11 * * 1-5', () => {
+    runNightly().catch(e => console.error('[Cron] 야간 체인 오류:', e));
   }, { timezone: 'UTC' });
 
   // 6시간마다 매크로 갱신

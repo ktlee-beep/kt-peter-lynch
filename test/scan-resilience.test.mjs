@@ -20,12 +20,15 @@ globalThis.fetch = async (input, init = {}) => {
   const call = { url, method, body, headers: init.headers || {} };
   calls.push(call);
   const r = responder(call) || { status: 200, body: [] };
+  if (r.hang) return new Promise(() => {});   // 응답이 영영 안 오는 DB
   return {
     ok: r.status >= 200 && r.status < 300,
     status: r.status,
     statusText: String(r.status),
-    headers: { get: (k) => (k.toLowerCase() === 'content-type' ? 'application/json' : null) },
-    text: async () => JSON.stringify(r.body ?? []),
+    // r.headers 는 소문자 키 (예: count 조회의 content-range)
+    headers: { get: (k) => r.headers?.[k.toLowerCase()] ?? (k.toLowerCase() === 'content-type' ? 'application/json' : null) },
+    // r.raw 는 본문 문자열 그대로 (예: 본문 없는 HEAD 오류 응답 '')
+    text: async () => r.raw ?? JSON.stringify(r.body ?? []),
     json: async () => r.body ?? [],
   };
 };
@@ -183,6 +186,145 @@ const settled = await Promise.allSettled([
   withTimeout(1000, 'b', Promise.resolve(1)),
 ]);
 ok('멈춘 종목이 있어도 청크는 진행된다', settled.map(r => r.status), ['rejected', 'fulfilled']);
+
+// ── 7. 같은 종가 중복 스캔 가드 ──
+// GitHub schedule 이 9시간 늦게 도착한 실측(10-12 20:00 KST 예정 → 10-13 05:04 실행)이 있다.
+// PC 신호로 20:00 스캔이 이미 끝났는데 새벽에 같은 종가로 처음부터 다시 돌면 안 된다.
+console.log('\n=== 7. 중복 스캔 가드 ===');
+
+const cut = (iso) => db.lastScanCutoffUtc(new Date(iso)).toISOString();
+ok('화 20:00 KST → 화 18:00', cut('2026-10-13T11:00:00Z'), '2026-10-13T09:00:00.000Z');
+ok('화 05:04 KST(늦은 schedule) → 월 18:00', cut('2026-10-12T20:04:00Z'), '2026-10-12T09:00:00.000Z');
+ok('화 17:59 KST → 월 18:00', cut('2026-10-13T08:59:00Z'), '2026-10-12T09:00:00.000Z');
+ok('화 18:00 KST 정각 → 화 18:00', cut('2026-10-13T09:00:00Z'), '2026-10-13T09:00:00.000Z');
+ok('월 08:00 KST → 금 18:00', cut('2026-10-11T23:00:00Z'), '2026-10-09T09:00:00.000Z');
+ok('월 18:30 KST → 월 18:00', cut('2026-10-19T09:30:00Z'), '2026-10-19T09:00:00.000Z');
+ok('토 12:00 KST → 금 18:00', cut('2026-10-17T03:00:00Z'), '2026-10-16T09:00:00.000Z');
+ok('일 23:00 KST → 금 18:00', cut('2026-10-18T14:00:00Z'), '2026-10-16T09:00:00.000Z');
+
+// 배치 목록과 배치별 저장 행 수를 흉내 낸다. saved 에 없는 배치는 저장 0행.
+const guardDb = (batches, saved = {}) => (c) => {
+  if (c.url.includes('/kt_scan_batches')) return { status: 200, body: batches };
+  if (c.url.includes('/kt_daily_analysis')) {
+    const id = decodeURIComponent(c.url.match(/scan_batch_id=eq\.([^&]+)/)?.[1] ?? '');
+    return { status: 200, body: null, headers: { 'content-range': `*/${saved[id] ?? 0}` } };
+  }
+  return { status: 200, body: [] };
+};
+
+reset(guardDb([
+  { batch_id: 'b-partial', processed: 500, total_stocks: 1142 },
+  { batch_id: 'b-full', processed: 1139, total_stocks: 1142 },
+], { 'b-partial': 500, 'b-full': 1139 }));
+const found = await db.findDailyScanDoneSinceCutoff(new Date('2026-10-12T20:04:00Z'));
+const q = calls[0]?.url ?? '';
+ok('성공 90% 미만 배치는 건너뛰고 완료 배치를 고른다', found?.batch_id, 'b-full');
+ok('찾은 배치에 저장 행 수를 붙인다', found?.saved, 1139);
+ok('done 만 본다', /status=eq\.done/.test(q), true);
+ok('daily 만 본다', /scan_type=eq\.daily/.test(q), true);
+ok('기준 시각(월 18:00 KST) 이후만 본다', q.includes('started_at=gte.2026-10-12T09%3A00%3A00.000Z') || q.includes('started_at=gte.2026-10-12T09:00:00.000Z'), true);
+ok('최신순 5건만 본다', /order=started_at\.desc/.test(q) && /limit=5/.test(q), true);
+const cq = calls.find(c => c.url.includes('/kt_daily_analysis'));
+ok('저장 행은 HEAD count 로 센다 (본문을 받지 않는다)', cq?.method, 'HEAD');
+ok('저장 행은 그 배치 id 로 센다', /scan_batch_id=eq\.b-full/.test(cq?.url ?? ''), true);
+ok('90% 미만 배치는 저장 행을 세지도 않는다', calls.some(c => /scan_batch_id=eq\.b-partial/.test(c.url)), false);
+
+reset(guardDb([{ batch_id: 'b-partial', processed: 500, total_stocks: 1142 }]));
+ok('부분 완료뿐이면 null (다시 돌아야 한다)', await db.findDailyScanDoneSinceCutoff(), null);
+
+reset(guardDb([{ batch_id: 'b-90', processed: 900, total_stocks: 1000 }], { 'b-90': 900 }));
+ok('분석·저장 정확히 90% 는 완료', (await db.findDailyScanDoneSinceCutoff())?.batch_id, 'b-90');
+reset(guardDb([{ batch_id: 'b-89', processed: 899, total_stocks: 1000 }], { 'b-89': 899 }));
+ok('분석 89.9% 는 미완료', await db.findDailyScanDoneSinceCutoff(), null);
+reset(guardDb([{ batch_id: 'b-s', processed: 1000, total_stocks: 1000 }], { 'b-s': 899 }));
+ok('저장 89.9% 는 미완료', await db.findDailyScanDoneSinceCutoff(), null);
+
+// processed 는 "분석 성공" 건수다 — 저장이 통째로 실패한 배치도 processed 는 꽉 찬다.
+reset(guardDb([{ batch_id: 'b-nosave', processed: 1142, total_stocks: 1142 }], {}));
+ok('저장이 통째로 실패한 배치는 완료로 치지 않는다', await db.findDailyScanDoneSinceCutoff(), null);
+
+reset(guardDb([
+  { batch_id: 'b-nosave', processed: 1142, total_stocks: 1142 },
+  { batch_id: 'b-older', processed: 1140, total_stocks: 1142 },
+], { 'b-older': 1140 }));
+ok('최신 배치가 저장 실패면 그 전 완료 배치를 본다', (await db.findDailyScanDoneSinceCutoff())?.batch_id, 'b-older');
+
+reset(guardDb([{ batch_id: 'b-fb', processed: 199, total_stocks: 199 }], { 'b-fb': 199 }));
+ok('minTotal 미만(폴백 유니버스) 배치는 완료로 치지 않는다', await db.findDailyScanDoneSinceCutoff(new Date(), { minTotal: 200 }), null);
+
+reset((c) => c.url.includes('/kt_daily_analysis') ? pgErr('42501', 'permission denied')
+  : { status: 200, body: [{ batch_id: 'b-full', processed: 1139, total_stocks: 1142 }] });
+let threw = null;
+try { await db.findDailyScanDoneSinceCutoff(); } catch (e) { threw = e.message; }
+ok('저장 행 조회가 실패하면 던진다 (조용히 완료 처리 금지)', /저장 행 확인 실패/.test(threw ?? ''), true);
+
+// 실제 HEAD 오류는 본문이 없다 — message 가 비어도 상태 코드는 남아야 한다.
+reset((c) => c.url.includes('/kt_daily_analysis') ? { status: 403, raw: '' }
+  : { status: 200, body: [{ batch_id: 'b-full', processed: 1139, total_stocks: 1142 }] });
+threw = null;
+try { await db.findDailyScanDoneSinceCutoff(); } catch (e) { threw = e.message; }
+ok('본문 없는 HEAD 오류도 상태 코드와 함께 던진다', /저장 행 확인 실패.*HTTP 403/.test(threw ?? ''), true);
+
+// 404 + 빈 본문은 postgrest-js 가 오류 없이 count=null 로 돌려준다 — 0행으로 넘기면 안 된다.
+reset((c) => c.url.includes('/kt_daily_analysis') ? { status: 404, raw: '' }
+  : { status: 200, body: [{ batch_id: 'b-full', processed: 1139, total_stocks: 1142 }] });
+threw = null;
+try { await db.findDailyScanDoneSinceCutoff(); } catch (e) { threw = e.message; }
+ok('행 수가 오지 않으면 던진다 (조용히 0행 금지)', /저장 행 확인 실패.*행 수 없음/.test(threw ?? ''), true);
+
+// 실제 배치 id 는 분석일로 시작한다 — 그 날짜로 좁혀 인덱스를 타게 한다.
+reset(guardDb([{ batch_id: '2026-10-13-ab12cd', processed: 1139, total_stocks: 1142 }], { '2026-10-13-ab12cd': 1139 }));
+const dated = await db.findDailyScanDoneSinceCutoff();
+const dq = calls.find(c => c.url.includes('/kt_daily_analysis'))?.url ?? '';
+ok('날짜로 시작하는 배치는 찾는다', dated?.batch_id, '2026-10-13-ab12cd');
+ok('저장 행 조회를 분석일로 좁힌다 (인덱스)', /analysis_date=eq\.2026-10-13/.test(dq), true);
+
+const { runDailyScan, runNightly, dailyScanAlreadyDone, evaluateSeonjeomTriggers, runSupplyCollect } = await import('../cron.js');
+console.warn = () => {};
+reset(guardDb([{ batch_id: 'b-full', processed: 1139, total_stocks: 1142, started_at: 'x' }], { 'b-full': 1139 }));
+ok('완료 배치가 있으면 스캔을 건너뛴다', await runDailyScan(), { skipped: true, batchId: 'b-full' });
+ok('건너뛸 때 배치를 새로 만들지 않는다', calls.some(c => c.method === 'POST'), false);
+
+reset(guardDb([{ batch_id: 'b-full', processed: 1139, total_stocks: 1142, started_at: 'x' }], { 'b-full': 1139 }));
+ok('완료 배치가 있으면 야간 체인 전체를 건너뛴다', await runNightly(), { skipped: true, batchId: 'b-full' });
+ok('체인을 건너뛸 때 아무것도 쓰지 않는다', calls.some(c => c.method !== 'GET' && c.method !== 'HEAD'), false);
+
+// 하드코딩 폴백 유니버스(199종목)로 돈 배치는 dailyScanAlreadyDone 이 완료로 치지 않는다.
+// 경계는 정확히 199/200 으로 본다 — 150 같은 값으로는 "+1" 이 빠져도 통과한다.
+reset(guardDb([{ batch_id: 'b-fb', processed: 199, total_stocks: 199 }], { 'b-fb': 199 }));
+ok('dailyScanAlreadyDone 은 폴백 크기(199) 배치를 무시한다', await dailyScanAlreadyDone(), null);
+reset(guardDb([{ batch_id: 'b-200', processed: 200, total_stocks: 200 }], { 'b-200': 200 }));
+ok('폴백보다 한 종목이라도 많으면 완료로 친다', (await dailyScanAlreadyDone())?.batch_id, 'b-200');
+
+// 체인이 09:00 KST(00:00 UTC)를 넘겨도 스캔이 쓴 분석일로 판정·저장해야 한다.
+const seonRows = (date) => (c) => c.url.includes('/kt_daily_analysis')
+  ? { status: 200, body: [{ code: '005930', analysis_date: date, change_rate: 1, vol_ratio: 1, analysis_json: '{}' }] }
+  : { status: 200, body: [] };
+reset(seonRows('2026-10-13'));
+await evaluateSeonjeomTriggers({ date: '2026-10-13' });
+const seonWrite = calls.find(c => c.method === 'POST' || c.method === 'PATCH');
+// kv 에는 raw_json 문자열로 들어가 따옴표가 한 번 더 이스케이프된다.
+const seonBody = typeof seonWrite?.body === 'string' ? seonWrite.body : JSON.stringify(seonWrite?.body ?? '');
+ok('선점 평가는 넘겨받은 분석일로 저장한다', /__seonjeom__/.test(seonBody) && /date\\?":\\?"2026-10-13/.test(seonBody), true);
+
+reset(seonRows('2026-10-01'));
+await evaluateSeonjeomTriggers({ date: '2026-10-13' });
+ok('그 날짜 행이 없으면 선점 결과를 덮어쓰지 않는다', calls.some(c => c.method !== 'GET' && c.method !== 'HEAD'), false);
+
+reset();
+await runSupplyCollect({ date: '2026-10-13', maxFetch: 0 });
+ok('수급 수집은 넘겨받은 분석일 행을 읽는다', calls.some(c => /analysis_date=eq\.2026-10-13/.test(c.url)), true);
+console.warn = origWarn;
+
+console.error = () => {};
+reset(() => pgErr('42P01', 'relation does not exist'));
+ok('확인 조회가 실패하면 null (스캔을 막지 않는다)', await dailyScanAlreadyDone(), null);
+
+reset(() => ({ hang: true }));
+const t0 = Date.now();
+const hung = await dailyScanAlreadyDone();
+ok('DB 가 응답하지 않으면 5초 뒤 null (스캔을 막지 않는다)', [hung, Date.now() - t0 >= 4900 && Date.now() - t0 < 8000], [null, true]);
+console.error = origErr;
 
 console.log(`\n통과 ${pass} / 실패 ${fail}`);
 process.exit(fail === 0 ? 0 : 1);
