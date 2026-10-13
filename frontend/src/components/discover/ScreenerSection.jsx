@@ -108,7 +108,21 @@ function ResultItem({ item }) {
           )}
           {item.per  != null && <span className="text-[10px] text-slate-500">PER {item.per.toFixed(1)}배</span>}
           {item.pbr  != null && <span className="text-[10px] text-slate-500">PBR {item.pbr.toFixed(2)}배</span>}
-          {item.roe  != null && <span className="text-[10px] text-slate-500">ROE {item.roe.toFixed(1)}%</span>}
+          {/* ratioYear는 DART 결산 폴백일 때만 온다 — 1년 전 결산 ROE를 실시간 값처럼 읽지 않도록 연도를 붙인다. */}
+          {item.roe  != null && (
+            <span className="text-[10px] text-slate-500">
+              ROE {item.roe.toFixed(1)}%{item.ratioYear != null ? ` (${item.ratioYear})` : ''}
+            </span>
+          )}
+          {/* 부채 칸은 셋 중 하나다. 자본잠식이면 부채비율이 정의되지 않으므로 금융업 여부보다 먼저 표시하고,
+              금융업은 부채가 영업 자체(예수금·책임준비금)라 수치 대신 면제 태그를 단다 — 은행의
+              부채비율 1,000%대를 그대로 보여주면 필터를 안 건 목록에서도 오독한다. */}
+          {item.equityImpaired
+            ? <span className="text-[9px] px-1.5 py-px rounded bg-loss/10 text-loss">자본잠식</span>
+            : item.debtExempt
+              ? <span className="text-[9px] px-1.5 py-px rounded bg-slate-800 text-slate-400"
+                  title="은행·보험·증권은 부채가 영업 자체라 부채비율 필터를 적용하지 않습니다">금융업 면제</span>
+              : item.debtRatio != null && <span className="text-[10px] text-slate-500">부채 {Math.round(item.debtRatio)}%</span>}
           {/* 저평가 가점의 비교 대상. 이게 없으면 박세익 점수에서 저평가 축이 빠진 것이라
               같은 점수라도 의미가 다르다 — 화면에서 구분되지 않으면 오독한다. */}
           {item.perBasisMedian != null
@@ -175,6 +189,9 @@ export default function ScreenerSection() {
   // 서버가 돌려주는 안내문을 그대로 담는다. "스캔 데이터 없음"과 "박세익 미계측"은
   // 원인도 대응도 다른데, 불리언 하나로 받으면 화면에서 같은 문장이 된다.
   const [notice,  setNotice]  = useState(null);
+  // notice와 달리 목록을 가리지 않는 경고. ROE·부채비율처럼 null이 통과인 조건이 미계측이면
+  // 결과는 그 조건 없이 거른 목록이라 보여주되, 조건이 빠졌다는 사실은 알린다.
+  const [filterWarning, setFilterWarning] = useState(null);
   const [scanStatus, setScanStatus] = useState(null);
   const [scanTriggerLoading, setScanTriggerLoading] = useState(false);
 
@@ -233,7 +250,7 @@ export default function ScreenerSection() {
   };
 
   const runScreener = useCallback(async (pg = 1) => {
-    setLoading(true); setError(null); setNotice(null);
+    setLoading(true); setError(null); setNotice(null); setFilterWarning(null);
     const params = new URLSearchParams({ sort: sortBy, page: pg, limit: 20 });
     // 섹터는 프리셋과 함께 걸린다(server.js — 프리셋은 점수 기준, 섹터는 모집단).
     if (sector != null) params.set('sector', sector);
@@ -258,6 +275,7 @@ export default function ScreenerSection() {
       setSectorSummary(d.sectorSummary ?? []);
       if (Array.isArray(d.sectorOptions) && d.sectorOptions.length) setSectorOptions(d.sectorOptions);
       if (d.message) setNotice(d.message);
+      if (d.filterWarning) setFilterWarning(d.filterWarning);
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
   }, [preset, perMax, pbrMax, roeMin, debtMax, lynchMin, parkMin, zone, rsMin, sector, sortBy]);
@@ -391,6 +409,11 @@ export default function ScreenerSection() {
           )}
           {results !== null && !notice && (
             <>
+              {filterWarning && (
+                <p className="mx-4 mb-2 px-3 py-2 text-[11px] leading-relaxed text-amber-500/90 bg-amber-500/10 rounded-lg">
+                  {filterWarning}
+                </p>
+              )}
               {results.length === 0 ? (
                 <div className="px-4 py-6 text-center">
                   <p className="text-sm text-slate-500">조건에 맞는 종목이 없습니다</p>

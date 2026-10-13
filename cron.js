@@ -2,7 +2,7 @@
 // 매일 17:00 KST (UTC 08:00) — 전체 종목 스캔
 // 6시간마다 — 매크로 갱신
 import cron from 'node-cron';
-import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermoreScore, calcPiotroski, calcGrowthStreak, hasNoLoss, calcTTM, calcParkScore, matrixZone, median, calcRsRatios, rsPercentile, buildRsBreakpoints, calcSupplyTrend, seonjeomTriggers, SEONJEOM_PARK_MIN } from './analysis.js';
+import { calcRSI, calcMA, calcBollinger, calcMACD, calcLynchScore, calcLivermoreScore, calcPiotroski, calcGrowthStreak, hasNoLoss, calcTTM, calcParkScore, matrixZone, median, calcRsRatios, rsPercentile, buildRsBreakpoints, calcSupplyTrend, seonjeomTriggers, SEONJEOM_PARK_MIN, calcBalanceRatios } from './analysis.js';
 import { getFundamentalsCache, setFundamentalsCache, createScanBatch, updateScanBatch, completeScanBatch, findDailyScanDoneSinceCutoff, batchSaveAnalysis, saveMacroSnapshot, getActiveStocks, getSupabase, getScanResults, saveMorningBrief, loadCorpCodeMap, upsertCorpCodes, getDartCache, setDartCache, saveUsScan, getCompanyInfoCache, setCompanyInfoCache, setMultiYearCache, setQuarterlyCache, getGrowthCaches, countKvPrefix, listFreshKvCodes, listAllStocks, upsertStocks, deactivateStocks, saveUniverseMeta, savePerMedian, getPerMedian, getIndexCloses, mergeIndexCloses, saveRsDist, getRsDist, getSupplyCache, setSupplyCache, saveSeonjeomAlerts } from './db.js';
 import { SECTOR_MAP } from './sector_map.js';
 import { KS_UNIVERSE, KQ_UNIVERSE, fetchNaverFundamentals, fetchKospiFutures, CORP_MAP, fetchCorpCodeMap, fetchDartFinancials, US_UNIVERSE, fetchUsStockDaily, fetchDartCompanyInfo, fetchDartMultiYear, fetchDartQuarterly, hasYearData, dartCallStats, resetDartCallStats, snapshotDartCallStats, dartBlockedBy, fetchNaverMarketSum, filterUniverse, fetchIndexOHLCV, fetchNaverInvestor, KRX_INDICES } from './data.js';
@@ -153,7 +153,8 @@ export async function refreshUniverse({ minCapEok = 1000, minValueEok = 3, dryRu
 // 캐시에 적재된 DART 연간·분기 데이터를 스크리너가 바로 필터할 수 있는 형태로 접는다.
 // 데이터가 없으면 0/false가 아니라 null을 반환한다 — "성장하지 않았다"와
 // "아직 수집하지 않았다"를 같은 값으로 만들면 백필 중인 종목이 전부 탈락으로 보인다.
-export function buildGrowthProfile(multiYear, quarterly) {
+// refYear는 ratios의 기준 연도(생략 시 KST 올해). 테스트가 날짜에 묶이지 않게 열어 둔 것이다.
+export function buildGrowthProfile(multiYear, quarterly, refYear) {
   if (!Array.isArray(multiYear) || multiYear.length === 0) return null;
   // 길이만 보면 안 된다. fetchDartMultiYear는 미확보 연도를 자리표시 객체로 채우므로
   // 5개년이 전부 비어도 length는 5다. 그대로 통과시키면 streak 0 / parkSeikPass false가 나와
@@ -196,6 +197,10 @@ export function buildGrowthProfile(multiYear, quarterly) {
       opYoY:      quarterly.opYoY,
       netYoY:     quarterly.netYoY,
     } : null,
+    // ROE·부채비율 폴백 — 네이버 펀더멘털에 두 값이 없어 스크리너 필터가 전 종목 null로 무력화돼
+    // 있었다. 같은 DART 연간 데이터에서 한 연도분만 뽑아 둔다(규칙은 calcBalanceRatios 주석).
+    // 너무 오래됐거나 자본총계가 없으면 null — 스크리너는 null을 기존대로 통과로 다룬다.
+    ratios: calcBalanceRatios(multiYear, { refYear }),
   };
 }
 

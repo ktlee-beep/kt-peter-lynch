@@ -1069,10 +1069,106 @@ export function analyzeNewsSentiment(newsItems) {
   };
 }
 
+// ── ROE·부채비율 (DART 연간 폴백) ─────────────────────────────────
+// 네이버 펀더멘털 응답에는 roe도 부채비율도 없다(2026-10-13 실호출 — data.js fetchNaverFundamentals).
+// 그래서 스크리너의 ROE·부채 필터와 품질 스크린의 두 항목이 전 종목 null로 조용히 무력화돼 있었다.
+// 그 빈자리를 DART 연간 재무(fetchDartMultiYear 형태)로 채운다. 규칙은 넷이다 —
+//  - 앵커 = 자본총계가 있는 가장 최근 연도. 배열 위치가 아니라 year 값으로 고른다(배열 순서 무관).
+//  - 한 연도에서만 가져온다. ROE는 2025, 부채비율은 2024처럼 섞으면 같은 회사의 다른 시점이
+//    한 줄에 놓이는데, 화면에서는 그걸 구별할 방법이 없다.
+//  - 앵커가 refYear보다 maxLagYears년 넘게 오래면 null. 2026년에 FY2023 비율로 거르면 3년 전 회사로
+//    지금 회사를 거르는 셈이다. 비교를 !(lag <= max)로 둔 이유: refYear가 숫자가 아니면 NaN 비교가
+//    false라, "lag > max"로 쓰면 상한 검사가 조용히 꺼진다. 이렇게 쓰면 null로 닫힌다.
+//  - 자본잠식(equity < 0)이면 앵커 연도에서 멈춘다. 이전 흑자 연도로 넘어가면 잠식을 가리게 된다.
+//    equity === 0은 억원 반올림(data.js toEok) 산물이라 원 단위 자본의 부호를 모른다. data.js는 원 단위
+//    자본이 양수이고 부채가 있으면 debtRatio를 반드시 계산하므로, "equity 0 + 부채 있음 + debtRatio 없음"은
+//    원 단위 자본이 0 이하였다는 뜻이다 — 잠식으로 본다(-0.3억이 0으로 저장돼 필터를 통과하던 구멍).
+//    equity 0이어도 debtRatio가 있으면 원 단위 자본이 양수다 — 잠식이 아니고 비율을 그대로 쓴다.
+// 비율은 data.js가 낸 값 그대로다(기말 자본총계 기준, %). 여기서 다시 계산하지 않는다. 입력은 바꾸지 않는다.
+export function calcBalanceRatios(multiYear, opts) {
+  if (!Array.isArray(multiYear)) return null;
+  // opts가 null이어도 터지지 않게 — 기본 매개변수는 undefined만 받는다.
+  const { refYear, maxLagYears = 2 } = opts || {};
+  let anchor = null;
+  for (const y of multiYear) {
+    // Number()가 아니라 num()으로 — Number(null)·Number('')·Number(false)가 0(정수)이라 "0년" 행이 후보가 된다.
+    const yr = num(y?.year);
+    if (!Number.isInteger(yr) || !Number.isFinite(y?.equity)) continue;
+    if (anchor === null || yr > anchor.year) anchor = { year: yr, row: y };
+  }
+  if (anchor === null) return null;
+  // 기본 기준 연도는 KST — 서버는 UTC로 돌아서 1월 1일 0~9시에 연도가 하루 늦게 넘어간다.
+  // 넘겨받은 refYear는 정수 연도만 받는다. ''·false가 그대로 빼기에 들어가면 0이 되어 아주 옛 자료가
+  // 통과하므로, 정수가 아니면 null로 닫는다. 기준 연도보다 미래인 앵커도 기준이 잘못된 것이라 닫는다.
+  const ref = refYear == null
+    ? new Date(Date.now() + 9 * 60 * 60 * 1000).getUTCFullYear()
+    : num(refYear);
+  if (!Number.isInteger(ref)) return null;
+  // 상한이 숫자가 아니거나 음수면(null은 빼기에서 0이 된다) 기본 2년으로 둔다.
+  const maxLag = (typeof maxLagYears === 'number' && maxLagYears >= 0) ? maxLagYears : 2;
+  const lag = ref - anchor.year;
+  if (!(lag >= 0 && lag <= maxLag)) return null;
+  const { equity, debt, debtRatio } = anchor.row;
+  const impaired = equity < 0 || (equity === 0 && debt > 0 && debtRatio == null);
+  const pick = (v) => (!impaired && Number.isFinite(v)) ? v : null;
+  return { year: anchor.year, roe: pick(anchor.row.roe), debtRatio: pick(anchor.row.debtRatio), impaired };
+}
+
+// 금융업 판정 — 부채비율 필터 면제 대상. 은행·보험·증권의 부채는 예수금·책임준비금·고객예탁금이라
+// 영업 그 자체다. 비금융 잣대(스크리너 150~200%, 품질 스크린 200%)를 대면 업종 전체가 탈락한다.
+// 기준은 DART 개황의 표준산업분류(induty) — 64 금융업, 65 보험·연금, 66 금융·보험 관련 서비스.
+// 예외가 지주회사 64992다. KB·신한·하나 같은 금융지주도, SK·LG 같은 비금융 지주도 같은 코드라
+// (2026-10-13 DART 실조회) 코드만으로는 못 가른다. 그래서 이름·섹터로 한 번 더 거른다.
+// 64991은 KSIC 원문을 확인하지 못했다 [확인 필요] — 지주 예외에 넣지 않고 일반 64 규칙(금융)을 따른다.
+// induty가 없으면(개황 미수집) SECTOR_MAP의 '금융' 분류로 대신한다.
+export function isFinancialCompany(company) {
+  // 인자가 null이어도 터지지 않게 — 기본 매개변수({} 기본값)는 undefined만 받는다.
+  const { induty, name, sector } = company || {};
+  const code = induty == null ? '' : String(induty).trim();
+  if (code === '64992') return String(name || '').includes('금융') || sector === '금융';
+  if (/^6[456]/.test(code)) return true;
+  if (code === '') return sector === '금융';
+  return false;
+}
+
+// 스크리너 ROE·부채비율 필터의 행 단위 판정. server.js /api/screener 루프에서 떼어낸 것이다 —
+// 라우트 안에 있으면 서버를 띄워야만 검증되고, 그 서버는 내부 fetch로 외부망을 탄다.
+// roe·debt는 호출부가 숫자(또는 null)로 정규화해 넘긴다. null은 기존 규칙대로 통과다
+// (경량 스캔은 ROE·부채비율이 없을 수 있다 — 지표 하나 빈 것을 탈락으로 만들지 않는다).
+// 판정 순서가 규칙의 일부다 —
+//  1. 자본잠식이 금융 면제보다 먼저. 자본이 음수면 부채비율이 정의되지 않아 면제할 값조차 없다.
+//     비율 필터를 하나라도 걸었으면 후보가 아니고, 아무 필터도 없으면 그대로 노출한다(목록 자체는 거르지 않는다).
+//  2. 금융업은 부채 상한만 면제한다. ROE는 업종과 무관하게 같은 잣대다.
+// debtExempt는 필터 여부와 무관하게 종목의 속성으로 싣는다 — 화면이 은행의 부채비율 1,000%대를
+// 그대로 보여주면 필터를 안 건 목록에서도 오독한다.
+export function applyRatioFilter({ roe = null, debt = null, impaired = false, financial = false } = {},
+                                 { roeMin = null, debtMax = null } = {}) {
+  if (impaired) return { keep: roeMin === null && debtMax === null, debtExempt: null };
+  const debtExempt = financial ? '금융업' : null;
+  if (roeMin !== null && roe !== null && roe < roeMin) return { keep: false, debtExempt };
+  if (debtMax !== null && !financial && debt !== null && debt > debtMax) return { keep: false, debtExempt };
+  return { keep: true, debtExempt };
+}
+
+// 주격 조사 이/가. 안내문이 여러 항목을 ' · '로 잇고 끝에 조사를 붙이는데, 고정 '가'면
+// '부채비율가' 같은 비문이 된다. 마지막 글자가 한글 음절이면 받침으로 고르고,
+// 한글이 아니면(ROE·RS 같은 약어) '가' — 약어는 읽는 법이 제각각이라 받침을 추정하지 않는다.
+export function josaIGa(word) {
+  const s = String(word ?? '');
+  const c = s.charCodeAt(s.length - 1);
+  if (!(c >= 0xAC00 && c <= 0xD7A3)) return '가';
+  return (c - 0xAC00) % 28 ? '이' : '가';
+}
+
 // Feature 4: 품질 스크린 7개 필터 (투자 가치 있는 기업인지 사전 필터링)
-export function calcQualityScreen(dart, fundamentals, pScore, fScore) {
+// ctx = { ratios, financial } — ratios는 calcBalanceRatios 결과, financial은 isFinancialCompany 결과.
+// 펀더멘털에 ROE·부채비율이 있으면 그대로 쓰고, 없을 때만 ratios로 채운다. 폴백일 때만 값에
+// 기준 연도를 남긴다 — 실시간 시세 기반 값과 1년 전 결산 값이 같은 표기로 보이면 안 된다.
+export function calcQualityScreen(dart, fundamentals, pScore, fScore, ctx = {}) {
   const f = fundamentals || {};
   const d = dart || {};
+  const { ratios = null, financial = false } = ctx || {};
+  const impaired = ratios?.impaired === true;
   const checks = [];
 
   const mk = (key, label, pass, value) => checks.push({ key, label, pass, value });
@@ -1096,16 +1192,27 @@ export function calcQualityScreen(dart, fundamentals, pScore, fScore) {
     per !== null ? `${per.toFixed(1)}배` : 'N/A');
 
   // 4. 부채비율 < 200%
-  const debt = f.debtToEquity ?? null;
-  mk('debt', '부채비율 < 200%',
+  // 자본잠식이 금융업 면제보다 먼저다 — 자본이 음수면 부채비율이 정의되지 않아 면제할 값조차 없다.
+  // 금융업은 통과가 아니라 pass:null(분모 제외)이다. 통과로 세면 재지 않은 항목이 등급을 올린다.
+  // 그 결과 금융업 6개 중 5개 통과는 B, 비금융 7개 중 6개 통과는 A다. 같은 "하나 탈락"인데 등급이
+  // 갈리는 이 비대칭은 의도된 것이다 — 등급은 측정한 항목만으로 매긴다.
+  const debtFund = f.debtToEquity ?? null;
+  const debt = debtFund ?? ratios?.debtRatio ?? null;
+  if (impaired) mk('debt', '부채비율 < 200%', false, '자본잠식');
+  else if (financial) mk('debt', '부채비율 < 200%', null, '금융업 면제');
+  else mk('debt', '부채비율 < 200%',
     debt !== null ? debt < 200 : null,
-    debt !== null ? `${debt.toFixed(0)}%` : 'N/A');
+    debt !== null ? `${debt.toFixed(0)}%${debtFund === null ? ` (${ratios.year})` : ''}` : 'N/A');
 
   // 5. ROE >= 10%
-  const roe = f.roe ?? null;
-  mk('roe', 'ROE ≥ 10%',
+  // 폴백 ROE는 기말 자본총계 기준이다(평균자본 아님). 같은 이익이라도 자본이 연중 늘면 평균자본
+  // ROE보다 낮게 나오므로 기준을 값에 함께 적는다.
+  const roeFund = f.roe ?? null;
+  const roe = roeFund ?? ratios?.roe ?? null;
+  if (impaired) mk('roe', 'ROE ≥ 10%', false, '자본잠식');
+  else mk('roe', 'ROE ≥ 10%',
     roe !== null ? roe >= 10 : null,
-    roe !== null ? `${roe.toFixed(1)}%` : 'N/A');
+    roe !== null ? `${roe.toFixed(1)}%${roeFund === null ? ` (${ratios.year}, 기말자본)` : ''}` : 'N/A');
 
   // 6. Piotroski F-Score >= 5
   const fs = fScore?.score ?? null;
@@ -1125,15 +1232,25 @@ export function calcQualityScreen(dart, fundamentals, pScore, fScore) {
 
   let grade, verdict;
   if (!defined.length) { grade = 'N/A'; verdict = 'UNKNOWN'; }
+  // 자본잠식은 비율로 상쇄되지 않는 하드 컷이다. 나머지 5개가 다 통과하면 5/7 = B가 되는데,
+  // 자본이 마이너스인 회사를 "양호"로 보여주면 스크린의 목적이 뒤집힌다.
+  else if (impaired) { grade = 'F'; verdict = 'FAIL'; }
   else {
-    const rate = passed.length / defined.length;
-    if (rate >= 0.86) { grade = 'A'; verdict = 'PASS'; }
-    else if (rate >= 0.71) { grade = 'B'; verdict = 'PASS'; }
-    else if (rate >= 0.57) { grade = 'C'; verdict = 'WATCH'; }
+    // 등급 경계는 정수 비교다(passed/defined >= k/7 을 곱셈으로 옮긴 것). 이전의 rate >= 0.86은
+    // 7개 중 6개(6/7 = 0.857)가 A에 못 닿는 경계 버그였다 — 7항목 체계에서 "하나만 탈락"이
+    // 최고 등급이 될 수 없었다. 정의 항목 1~6개에서는 이전 경계와 결과가 같고, 바뀌는 칸은
+    // 7개 중 6개(B→A)뿐이다(test/screener-ratios.test.mjs에서 전수 대조).
+    const p7 = passed.length * 7, n = defined.length;
+    if (p7 >= n * 6)      { grade = 'A'; verdict = 'PASS'; }
+    else if (p7 >= n * 5) { grade = 'B'; verdict = 'PASS'; }
+    else if (p7 >= n * 4) { grade = 'C'; verdict = 'WATCH'; }
     else { grade = 'F'; verdict = 'FAIL'; }
   }
 
-  return { verdict, grade, passCount: passed.length, failCount: failed.length, total: checks.length, checks };
+  // definedCount — 화면 헤더가 "통과/측정"을 보여주려면 분모가 필요하다. total(7)로 나누면
+  // 금융업 면제·미수집 항목이 탈락처럼 읽힌다.
+  return { verdict, grade, passCount: passed.length, failCount: failed.length, total: checks.length,
+    definedCount: defined.length, checks };
 }
 
 // ══════════════════════════════════════════════════════════════════

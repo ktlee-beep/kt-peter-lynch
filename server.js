@@ -11,7 +11,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-import { startCron } from './cron.js';
+import { startCron, withTimeout } from './cron.js';
 import { SECTOR_MAP, SECTOR_NAMES } from './sector_map.js';
 import { KRX_STOCKS } from './krx_stocks.js';
 import {
@@ -23,7 +23,7 @@ import {
   calcPiotroski, runBacktest, koreanMarketFlags,
   analyzeNewsSentiment, SENTIMENT_POS, SENTIMENT_NEG,
   detectLeverageETF, calcVolumePriceDivergence, runBacktestMulti,
-  calcSupplyTrend,
+  calcSupplyTrend, isFinancialCompany, applyRatioFilter, josaIGa,
 } from './analysis.js';
 import {
   CORP_MAP, fetchYahooSummary, fetchDartFinancials, fetchDartMultiYear, fetchNaverFundamentals, fetchNaverInvestor,
@@ -1295,7 +1295,8 @@ app.get('/api/screener', async (req, res) => {
     // 미계측 안내는 캐시에도 함께 실린다 — 안 그러면 첫 응답 이후 1시간 동안 "후보 0건"으로 보인다.
     return res.json({ items: slice, total: cached.data.length, page: pg, fromCache: true,
       sectorSummary: cached.sectorSummary ?? [], sectorOptions: SECTOR_NAMES,
-      ...(cached.message ? { message: cached.message } : {}) });
+      ...(cached.message ? { message: cached.message } : {}),
+      ...(cached.filterWarning ? { filterWarning: cached.filterWarning } : {}) });
   }
 
   try {
@@ -1339,10 +1340,15 @@ app.get('/api/screener', async (req, res) => {
     // RS를 따로 세는 이유: rs는 야간 스캔이 만드는 값인데다 백분위(pct)는 RS 분포 기준선에
     // 한 번 더 의존한다. rs 객체는 있는데 pct만 null인 상태가 실제로 존재하므로, 필터가
     // 보는 값(pct)과 같은 기준으로 세지 않으면 미계측을 미계측으로 못 잡는다.
-    let parkRows = 0, rsRows = 0;
+    // ROE·부채비율도 같은 이유로 센다. 두 값은 야간 스캔이 growth.ratios에 남기는 DART 폴백에서
+    // 오는데, 그 필드가 생기기 전 행은 전부 null이라 null 통과 규칙 때문에 필터가 걸러내지 못하고
+    // 전 종목을 그대로 돌려준다(0건이 아니라 "필터가 안 걸린 결과"라 더 알아채기 어렵다).
+    // 자본잠식 행은 값이 null이어도 판정이 된 행이므로 계측으로 센다. 금융업 면제는 세지 않는다 —
+    // induty는 폴백 이전 행에도 있어서, 세면 은행 한 곳이 부채비율 미계측 전체를 가린다.
+    let parkRows = 0, rsRows = 0, roeRows = 0, debtRows = 0;
     for (const r of deduped) {
       let fund = {}, park = null, mZone = null, pctHigh = null, rs = null;
-      let jSector = null, jPerBasis = null, jPerBasisMedian = null;
+      let jSector = null, jPerBasis = null, jPerBasisMedian = null, jInduty = null, ratios = null;
       try {
         const j = JSON.parse(r.analysis_json || '{}');
         fund = j.fundamentals || {};
@@ -1353,21 +1359,38 @@ app.get('/api/screener', async (req, res) => {
         jSector = j.sector || null;
         jPerBasis = j.perBasis || null;
         jPerBasisMedian = pNum(j.perBasisMedian);
+        jInduty = j.induty ?? null;
+        ratios = j.growth?.ratios || null;
       } catch {}
       if (park) parkRows++;
       if (pNum(rs?.pct) !== null) rsRows++;
 
       const per = pNum(fund.per);
       const pbr = pNum(fund.pbr);
-      const roe = pNum(fund.roe);
-      const debt = pNum(fund.debtToEquity);
+      // 펀더멘털 값이 있으면 그것을, 없으면 DART 연간 폴백(calcBalanceRatios)을 쓴다.
+      const roeFund = pNum(fund.roe), debtFund = pNum(fund.debtToEquity);
+      const roe  = roeFund  ?? pNum(ratios?.roe);
+      const debt = debtFund ?? pNum(ratios?.debtRatio);
+      const impaired = ratios?.impaired === true;
       const mktCap = pNum(fund.marketCap); // 억 단위
+      if (roe !== null || impaired) roeRows++;
+      if (debt !== null || impaired) debtRows++;
+
+      // 섹터는 스캔이 analysis_json에 남긴 값을 우선한다 — 그 값이 저평가 가점의 실제 비교
+      // 대상이었으므로, 화면의 섹터와 채점에 쓰인 섹터가 어긋나면 사유를 읽을 수 없게 된다.
+      // 구 스캔 행에는 없으므로 SECTOR_MAP으로 보충한다(server.js /api/sectors와 같은 원천).
+      // 이름과 함께 비율 필터보다 앞에서 구한다 — 금융업 판정(지주회사 64992)이 둘 다 본다.
+      const sec = jSector || SECTOR_MAP[r.code] || null;
+      const name = r.kt_stocks?.name || krxName(r.code) || r.code;
+      const ratioCheck = applyRatioFilter(
+        { roe, debt, impaired, financial: isFinancialCompany({ induty: jInduty, name, sector: sec }) },
+        { roeMin: fRoeMin, debtMax: fDebtMax });
 
       // 지표 누락(null)은 제외하지 않음 — 경량 스캔은 PER/PBR만 제공, ROE/부채비율은 없을 수 있음
+      // ROE·부채비율의 판정 순서(잠식 → 금융업 면제 → 상하한)는 applyRatioFilter 주석 참조.
       if (fPerMax  !== null && per  !== null && per  > fPerMax)  continue;
       if (fPbrMax  !== null && pbr  !== null && pbr  > fPbrMax)  continue;
-      if (fRoeMin  !== null && roe  !== null && roe  < fRoeMin)  continue;
-      if (fDebtMax !== null && debt !== null && debt > fDebtMax) continue;
+      if (!ratioCheck.keep) continue;
       if (fLynchMin !== null && r.lynch_score < fLynchMin)         continue;
       if (fPioMin  !== null && r.piotroski_score < fPioMin)        continue;
       // 박세익 점수는 PER/PBR과 달리 null을 통과시키지 않는다. 여기서 null은 "지표 하나가
@@ -1381,19 +1404,18 @@ app.get('/api/screener', async (req, res) => {
       const rsPct = pNum(rs?.pct);
       if (fRsMin !== null && !(rsPct !== null && rsPct >= fRsMin)) continue;
 
-      // 섹터는 스캔이 analysis_json에 남긴 값을 우선한다 — 그 값이 저평가 가점의 실제 비교
-      // 대상이었으므로, 화면의 섹터와 채점에 쓰인 섹터가 어긋나면 사유를 읽을 수 없게 된다.
-      // 구 스캔 행에는 없으므로 SECTOR_MAP으로 보충한다(server.js /api/sectors와 같은 원천).
-      const sec = jSector || SECTOR_MAP[r.code] || null;
       if (fSector !== null && sec !== fSector) continue;
-
-      const name = r.kt_stocks?.name || krxName(r.code) || r.code;
 
       results.push({
         code: r.code, name, sector: sec,
         // 저평가 가점이 무엇과 비교됐는지. null이면 기준이 없어 가점에서 빠진 종목이다.
         perBasis: jPerBasis, perBasisMedian: jPerBasisMedian,
         per, pbr, roe, debtRatio: debt, marketCap: mktCap,
+        // ratioYear — ROE·부채비율(또는 잠식 판정)이 DART 폴백에서 왔을 때 그 결산 연도.
+        // 펀더멘털 값이면 null이다(실시간 기준이라 연도를 붙이면 오히려 틀린 표기가 된다).
+        ratioYear: (impaired || (roeFund === null && roe !== null) || (debtFund === null && debt !== null))
+          ? (ratios?.year ?? null) : null,
+        debtExempt: ratioCheck.debtExempt, equityImpaired: impaired,
         close: r.close_price, changeRate: r.change_rate, rsi: r.rsi,
         lynchScore: r.lynch_score, piotroskiScore: r.piotroski_score,
         livermoreScore: r.livermore_score,
@@ -1431,8 +1453,19 @@ app.get('/api/screener', async (req, res) => {
     const uncomputed = [];
     if ((fParkMin !== null || fZone !== null) && parkRows === 0 && hasRows) uncomputed.push('박세익 스코어');
     if (fRsMin !== null && rsRows === 0 && hasRows) uncomputed.push('RS 백분위');
+    // 조사는 마지막 항목에 붙는다 — 고정 '가'면 받침 있는 항목에서 비문이 된다(josaIGa).
     const message = uncomputed.length
-      ? `${uncomputed.join(' · ')}가 아직 계산되지 않았습니다. 다음 전체 스캔 이후 사용 가능합니다.`
+      ? `${uncomputed.join(' · ')}${josaIGa(uncomputed.at(-1))} 아직 계산되지 않았습니다. 다음 전체 스캔 이후 사용 가능합니다.`
+      : undefined;
+    // ROE·부채비율 미계측은 message와 따로 낸다. 박세익·RS는 null이 제외라 미계측이면 결과가 어차피
+    // 비지만, ROE·부채는 null이 통과라 결과는 "이 조건 없이 거른 목록"으로 멀쩡히 나온다. 이것을
+    // message에 실으면 화면이 목록을 숨겨(ScreenerSection) 린치·가치·성장 프리셋이 안내문만 남는다 —
+    // growth.ratios는 다음 야간 스캔부터 생기므로 배포 직후 하루 동안 그 상태가 된다.
+    const ratioUncomputed = [];
+    if (fRoeMin !== null && roeRows === 0 && hasRows) ratioUncomputed.push('ROE');
+    if (fDebtMax !== null && debtRows === 0 && hasRows) ratioUncomputed.push('부채비율');
+    const filterWarning = ratioUncomputed.length
+      ? `${ratioUncomputed.join(' · ')} 조건은 아직 값이 없어 적용하지 않았습니다(아래 목록은 이 조건 없이 거른 결과). 다음 전체 스캔 이후 적용됩니다.`
       : undefined;
     // 섹터 집계. "어느 섹터가 저평가인가"는 종목 목록을 20개씩 넘겨보며 답할 질문이 아니라
     // 집계로 답할 질문인데, 지금까지는 그 집계를 낼 자리가 없었다. 필터가 걸린 결과 집합에
@@ -1459,14 +1492,14 @@ app.get('/api/screener', async (req, res) => {
       medPark: med(a.parkScores), scored: a.parkScores.length, medPer: med(a.pers),
     })).sort((x, y) => y.seonjeom - x.seonjeom || (y.medPark ?? -1) - (x.medPark ?? -1) || y.count - x.count);
 
-    setScreenerCache(cacheKey, { data: results, ts: Date.now(), message, sectorSummary });
+    setScreenerCache(cacheKey, { data: results, ts: Date.now(), message, filterWarning, sectorSummary });
 
     const pg = parseInt(page), lm = parseInt(limit);
     const slice = results.slice((pg - 1) * lm, pg * lm);
     // 허용 섹터 목록을 응답에 싣는다. 클라이언트가 상수를 복제하면 서버의 400 검증과
     // 드롭다운이 언젠가 어긋나고, 그 어긋남은 "필터를 골랐는데 400"으로만 드러난다.
     res.json({ items: slice, total: results.length, page: pg, sectorSummary, sectorOptions: SECTOR_NAMES,
-      ...(message ? { message } : {}) });
+      ...(message ? { message } : {}), ...(filterWarning ? { filterWarning } : {}) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -2107,14 +2140,22 @@ app.get('/api/quality-screen', async (req, res) => {
   const code = req.query.code;
   if (!code) return res.status(400).json({ error: 'code 파라미터 필요' });
   try {
+    // ROE·부채비율 폴백용 DART 캐시(연간 재무·기업개황)를 분석 조회와 나란히 읽는다.
+    // 보조 데이터라 3초 안에 못 오거나 실패하면 null로 두고 진행한다 — 이것 때문에 품질 스크린
+    // 전체가 늦어지거나 깨지면 안 된다(그 경우 두 항목은 이전처럼 N/A로 남는다).
+    // 조회는 먼저 띄우되 기다리는 건 분석이 성공한 뒤다 — 분석이 실패하면 캐시를 기다리지 않고 바로 답한다.
+    const cachesP = withTimeout(3000, '품질 스크린 재무 캐시', getGrowthCaches(code)).catch(() => null);
     const analysisRes = await fetch(`http://localhost:${PORT}/api/analysis?code=${code}`, {
       headers: { authorization: req.headers.authorization },
     });
     if (!analysisRes.ok) return res.status(502).json({ error: '종목 데이터 조회 실패' });
     const d = await analysisRes.json();
     if (d.error) return res.status(400).json({ error: d.error });
-    const { calcQualityScreen } = await import('./analysis.js');
-    const result = calcQualityScreen(d.dart, d.fundamentals, d.pScore, d.fScore);
+    const caches = await cachesP;
+    const { calcQualityScreen, calcBalanceRatios } = await import('./analysis.js');
+    const ratios = calcBalanceRatios(caches?.multiYear);
+    const financial = isFinancialCompany({ induty: caches?.company?.indutyCode, name: d.name, sector: SECTOR_MAP[code] });
+    const result = calcQualityScreen(d.dart, d.fundamentals, d.pScore, d.fScore, { ratios, financial });
     res.json({ ...result, code, name: d.name });
   } catch (e) {
     res.status(500).json({ error: e.message });

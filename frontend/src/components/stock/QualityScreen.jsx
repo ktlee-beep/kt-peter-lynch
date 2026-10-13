@@ -76,8 +76,12 @@ export default function QualityScreen({ code, preloadData }) {
         <div className="px-4 pt-3 pb-4">
           <div className={`flex items-center justify-between px-3 py-2.5 rounded-xl border mb-3 ${gradeConf.cls}`}>
             <span className="text-sm font-bold">{gradeConf.label}</span>
+            {/* 분모는 측정된 항목 수다. 등급도 그 수로 매기므로 total(7)로 나누면 금융업 면제·미수집
+                항목이 탈락처럼 읽힌다. definedCount가 없는 구 응답은 예전 표기 그대로 둔다. */}
             <span className="text-[10px] font-medium opacity-80">
-              {data.passCount}/{data.total} 통과
+              {data.definedCount != null
+                ? `${data.passCount}/${data.definedCount} 통과 (전체 ${data.total})`
+                : `${data.passCount}/${data.total} 통과`}
             </span>
           </div>
           <div className="divide-y divide-slate-800/60">
