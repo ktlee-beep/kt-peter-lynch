@@ -58,3 +58,5 @@ scripts/pc/*.log
 # 수집기 실행 잠금·중지 요청 (stream-collector.mjs, panel.mjs)
 scripts/pc/collector.lock
 scripts/pc/collector.stop
+# 이 PC 에서 만든 실행 파일·아이콘·node 경로 (install-app.mjs)
+scripts/pc/bin/

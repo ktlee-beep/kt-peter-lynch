@@ -4,10 +4,10 @@
 // 종목, 다음 수집에 쓸 저녁 후보, 저장 용량, 로그를 한 화면에 보여 주고, 수집 시작·중지와 후보 다시 고르기를 버튼으로 한다.
 // 시세는 보지 않는다(토큰을 쓰지 않는다). 수집기와 후보 빌더는 따로 떠서 이 창을 닫아도 계속 돈다.
 //
-// 사용: node scripts/pc/panel.mjs            제어판을 띄우고 브라우저를 연다(이미 떠 있으면 브라우저만 연다)
-//       node scripts/pc/panel.mjs --install  바탕화면에 "KT 단타 수집기" 바로가기를 만든다
-//       --no-open  브라우저를 열지 않는다(시험용)   --port <n>  포트(기본 4787)
-// 30분 동안 화면에서 요청이 없으면 스스로 꺼진다(브라우저 탭이 열려 있으면 10초마다 묻기 때문에 꺼지지 않는다).
+// 사용: node scripts/pc/panel.mjs            제어판을 띄우고 창을 연다(이미 떠 있으면 창만 연다)
+//       node scripts/pc/panel.mjs --install  실행 파일(KT-Collector.exe)과 바탕화면·시작 메뉴 바로가기를 만든다(install-app.mjs)
+//       --no-open  창을 열지 않는다(시험용)   --tab  엣지 앱 창 대신 기본 브라우저 탭으로 연다   --port <n>  포트(기본 4787)
+// 30분 동안 화면에서 요청이 없으면 스스로 꺼진다(창이 열려 있으면 10초마다 묻기 때문에 꺼지지 않는다).
 //
 // 보안: 127.0.0.1 에만 붙는다. Host 헤더가 127.0.0.1/localhost 가 아니면 거부(DNS 리바인딩), 버튼 요청(POST)은
 // X-KT-Panel 헤더가 있어야 받는다 — 다른 사이트가 브라우저를 시켜 버튼을 누르게 할 수 없다(사용자 정의 헤더는 CORS 사전요청을
@@ -15,7 +15,7 @@
 import http from 'node:http';
 import { spawn, execFile } from 'node:child_process';
 import { readFile, readdir, stat, writeFile, appendFile, open, unlink } from 'node:fs/promises';
-import { openSync, closeSync } from 'node:fs';
+import { openSync, closeSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildWindow, inBuildWindow, BUILD_FILE_RE } from '../backtest/build-window.mjs';
@@ -57,27 +57,9 @@ const nextWeekday = ymd => {
 };
 const panelLog = async msg => { const t = kst(); await appendFile(path.join(HERE, LOGS.panel), `[${t.date} ${t.hm}] ${msg}\n`).catch(() => {}); };
 
-// ---------- 바탕화면 바로가기 ----------
+// ---------- 설치(실행 파일·바로가기) ----------
 if (argv.includes('--install')) {
-  const q = s => s.replace(/'/g, "''");
-  const ps = [
-    `[Console]::OutputEncoding = [Text.Encoding]::UTF8`,
-    `$d = [Environment]::GetFolderPath('Desktop')`,
-    `$p = Join-Path $d 'KT 단타 수집기.lnk'`,
-    `$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p)`,
-    `$s.TargetPath = '${q(process.execPath)}'`,
-    `$s.Arguments = '"${q(fileURLToPath(import.meta.url))}"'`,
-    `$s.WorkingDirectory = '${q(ROOT)}'`,
-    `$s.WindowStyle = 7`,
-    `$s.Description = 'KT 단타 수집기 제어판 (이 PC 전용 화면)'`,
-    `$s.Save()`,
-    `$p`,
-  ].join('; ');
-  execFile('powershell.exe', ['-NoProfile', '-EncodedCommand', Buffer.from(ps, 'utf16le').toString('base64')], { windowsHide: true }, (err, out, errOut) => {
-    if (err) { console.error('바로가기를 만들지 못했습니다:', errOut || err.message); process.exit(1); }
-    console.log(`바탕화면 바로가기를 만들었습니다: ${out.trim()}`);
-    console.log('더블클릭하면 제어판이 브라우저로 열립니다. 작은 검은 창(최소화)이 제어판 서버이며, 닫아도 수집은 계속됩니다.');
-  });
+  await import('./install-app.mjs');
 } else {
   startServer();
 }
@@ -430,13 +412,15 @@ function startServer() {
     }
   });
   server.on('error', async e => {
-    if (e.code !== 'EADDRINUSE') { console.error(e); process.exit(1); }
-    // 이미 떠 있는 제어판이면 브라우저만 연다
+    // 실행 파일로 띄우면 콘솔이 없으므로 시작 실패는 panel.log 에도 남긴다
+    if (e.code !== 'EADDRINUSE') { console.error(e); await panelLog(`제어판 시작 오류: ${e.message}`); process.exit(1); }
+    // 이미 떠 있는 제어판이면 창만 연다
     try {
       const r = await fetch(`${BASE_URL}api/ping`, { signal: AbortSignal.timeout(3000) });
       if ((await r.json()).app === 'kt-panel') { console.log(`제어판이 이미 떠 있습니다: ${BASE_URL}`); openBrowser(); return setTimeout(() => process.exit(0), 500); }
     } catch { /* 다른 프로그램 */ }
     console.error(`포트 ${PORT}를 다른 프로그램이 쓰고 있습니다. --port 로 다른 번호를 주세요.`);
+    await panelLog(`포트 ${PORT}를 다른 프로그램이 쓰고 있어 제어판을 띄우지 못했습니다.`);
     process.exit(1);
   });
   server.listen(PORT, HOST, () => {
@@ -449,15 +433,27 @@ function startServer() {
   }, 60000).unref();
 }
 
+// 엣지가 있으면 탭·주소창 없는 프로그램 창(--app)으로 연다. 없거나 --tab 이면 기본 브라우저 탭으로 연다.
 function openBrowser() {
   if (argv.includes('--no-open')) return;
-  spawn('rundll32.exe', ['url.dll,FileProtocolHandler', BASE_URL], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  // 창을 못 열어도 제어판은 계속 떠 있어야 하므로 spawn 의 동기 예외도 여기서 삼키고 알린다
+  const fail = e => console.error(`창을 열지 못했습니다: ${e.message}`);
+  const tab = () => {
+    try { spawn('rundll32.exe', ['url.dll,FileProtocolHandler', BASE_URL], { detached: true, stdio: 'ignore', windowsHide: true }).on('error', fail).unref(); }
+    catch (e) { fail(e); }
+  };
+  const edge = ['ProgramFiles(x86)', 'ProgramFiles', 'LOCALAPPDATA']
+    .map(k => process.env[k] && path.join(process.env[k], 'Microsoft', 'Edge', 'Application', 'msedge.exe'))
+    .find(p => p && existsSync(p));
+  if (!edge || argv.includes('--tab')) return tab();
+  try { spawn(edge, [`--app=${BASE_URL}`, '--window-size=1180,900'], { detached: true, stdio: 'ignore' }).on('error', tab).unref(); }
+  catch { tab(); }
 }
 
 // ---------- 화면 ----------
 const PAGE = `<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>KT 단타 수집기</title><link rel="icon" href="data:,">
+<title>KT 단타 수집기</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect x='4' y='4' width='92' height='92' rx='20' fill='%232457d6'/%3E%3Cg fill='white'%3E%3Crect x='22' y='56' width='12' height='22'/%3E%3Crect x='44' y='42' width='12' height='36'/%3E%3Crect x='66' y='24' width='12' height='54'/%3E%3C/g%3E%3C/svg%3E">
 <style>
 :root{--bg:#f6f7f9;--card:#fff;--text:#1d2330;--muted:#667085;--line:#e4e7ec;--accent:#2457d6;--accent-text:#fff;
 --ok:#137a3e;--ok-bg:#e7f6ec;--warn:#9a5b00;--warn-bg:#fff4e0;--bad:#b42318;--bad-bg:#fdecea;--idle:#475467;--idle-bg:#eef0f3;--up:#c8322b;--down:#2457d6}
@@ -561,7 +557,7 @@ const post = async (u, body) => {
   try {
     const r = await fetch(u, { method: 'POST', headers: { 'X-KT-Panel': '1', 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
     return { status: r.status, ...(await r.json().catch(() => ({ message: '응답 오류(' + r.status + ')' }))) };
-  } catch { return { status: 0, message: '제어판에 연결할 수 없습니다 — 바탕화면 바로가기로 다시 여세요' }; }
+  } catch { return { status: 0, message: '제어판에 연결할 수 없습니다 — 바탕화면이나 시작 메뉴의 "KT 단타 수집기"로 다시 여세요' }; }
 };
 const hhmm = ms => new Date(ms + 9 * 3600e3).toISOString().slice(11, 16);
 let S = null, logName = 'collector', stopArm = 0, forceArm = false;
@@ -631,7 +627,7 @@ function render(s) {
 async function refresh() {
   let r, j;
   try { r = await fetch('/api/status'); j = await r.json().catch(() => null); }
-  catch { $('clock').textContent = '제어판에 연결할 수 없습니다 — 바탕화면 바로가기로 다시 여세요'; return; }
+  catch { $('clock').textContent = '제어판에 연결할 수 없습니다 — 바탕화면이나 시작 메뉴의 "KT 단타 수집기"로 다시 여세요'; return; }
   if (!r.ok || !j) { $('clock').textContent = '상태를 읽지 못했습니다(' + r.status + (j && j.message ? ', ' + j.message : '') + ') — 10초 뒤 다시 시도합니다'; return; }
   try { render(j); }
   catch (e) { $('clock').textContent = '화면을 그리다 오류가 났습니다: ' + e.message; console.error(e); }
