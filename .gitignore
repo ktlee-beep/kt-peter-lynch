@@ -60,3 +60,5 @@ scripts/pc/collector.lock
 scripts/pc/collector.stop
 # 이 PC 에서 만든 실행 파일·아이콘·node 경로 (install-app.mjs)
 scripts/pc/bin/
+# 스윙 모의매매 산출물 — 네이버 일봉 사본과 그로부터 만든 장부(공개 저장소에 재배포하지 않는다)
+scripts/backtest/paper/

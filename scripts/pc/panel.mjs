@@ -1,4 +1,4 @@
-// KT 단타 수집기 제어판 — 이 PC에서만 열리는 작은 웹 화면(http://127.0.0.1:4787).
+// KT 매매 제어판(단타 수집기 + 스윙 모의매매) — 이 PC에서만 열리는 작은 웹 화면(http://127.0.0.1:4787).
 //
 // 하는 일: 수집기(scripts/backtest/stream-collector.mjs)가 도는지, 오늘 얼마나 모았는지, 작업 스케줄러 일정, 오늘 구독 중인
 // 종목, 다음 수집에 쓸 저녁 후보, 저장 용량, 로그를 한 화면에 보여 주고, 수집 시작·중지와 후보 다시 고르기를 버튼으로 한다.
@@ -29,7 +29,9 @@ const BUILDER = path.join(BT, 'universe-builder.mjs');
 const LOCK_FILE = path.join(HERE, 'collector.lock');   // stream-collector.mjs 와 같은 경로
 const STOP_FILE = path.join(HERE, 'collector.stop');
 const TICKS = path.join(BT, 'ticks'), UNIVERSE = path.join(BT, 'universe'), CACHE = path.join(BT, 'cache');
-const LOGS = { collector: 'collector.log', universe: 'universe.log', morning: 'morning.log', evening: 'evening.log', panel: 'panel.log' };
+const SWING = path.join(BT, 'swing-paper.mjs'), SWING_OUT = path.join(BT, 'paper', 'swing.json'), SWING_LOCK = path.join(BT, 'paper', 'swing.lock');
+const SWING_COOLDOWN_MS = 10 * 60 * 1000;                 // 네이버 일봉 120여 건 호출 — 저녁 작업이 매일 돌리므로 손으로는 가끔만
+const LOGS = { collector: 'collector.log', universe: 'universe.log', swing: 'swing.log', morning: 'morning.log', evening: 'evening.log', panel: 'panel.log' };
 const COLLECT_FROM = '07:00', COLLECT_UNTIL = '20:05';   // stream-collector.mjs 기본 수집 창과 같게
 const BUILD_BLOCK = ['07:00', '15:40'];                   // 평일 이 사이 빌드는 어느 수집에도 안 쓰인다(build-window.mjs)
 const BUILD_COOLDOWN_MS = 30 * 60 * 1000;                 // 네이버 테마 내부 API 호출 최소화
@@ -369,6 +371,29 @@ async function buildUniverse() {
   return [200, { message: '후보를 고르기 시작했습니다. 보통 2~8분 걸립니다.' }];
 }
 
+// 스윙 모의매매(swing-paper.mjs) — 실주문 없이 장부만 다시 계산한다
+let swing = { child: null, exit: null };
+let swingStarting = false;   // 아래 await 사이에 두 번째 요청이 끼어들지 않게 — 검사 전에 바로 세운다
+// 저녁 작업(evening.cmd)이 돌리는 계산도 잡는다. swing-paper.mjs가 잡는 잠금(paper/swing.lock)을 본다.
+const swingLockLive = async () => liveLock(await readLock(SWING_LOCK).catch(() => null), kst().date);
+async function runSwing() {
+  if (swingStarting || (swing.child && swing.exit === null)) return [409, { message: '계산 중입니다(보통 30초 안팎).' }];
+  swingStarting = true;
+  try {
+    if (await swingLockLive()) return [409, { message: '저녁 작업이 계산 중입니다(보통 1분 안팎). 끝나면 화면이 바뀝니다.' }];
+    const last = await stat(SWING_OUT).catch(() => null);
+    if (last && Date.now() - last.mtimeMs < SWING_COOLDOWN_MS) return [429, { message: '10분 안에 계산한 결과가 있습니다. 네이버 호출을 줄이려고 10분 간격으로만 다시 계산합니다.' }];
+    const now = kst();
+    await appendFile(path.join(HERE, LOGS.swing), `[${now.date} ${now.hm}] 제어판에서 다시 계산\n`).catch(() => {});
+    const child = launch(SWING, LOGS.swing);
+    swing = { child, exit: null };
+    // 신호로 끝나면 code가 null이다 — null로 두면 계속 "계산 중"으로 보인다
+    child.on('error', e => { swing.exit = -1; panelLog(`스윙 모의매매 실행 실패: ${e.message}`); });
+    child.on('exit', (code, sig) => { swing.exit = code ?? -1; panelLog(`스윙 모의매매 계산 끝 exit=${code ?? sig}`); });
+    return [200, { message: '다시 계산하기 시작했습니다. 30초쯤 뒤 화면이 바뀝니다.' }];
+  } finally { swingStarting = false; }
+}
+
 // ---------- 서버 ----------
 function startServer() {
   let lastReq = Date.now();
@@ -385,6 +410,11 @@ function startServer() {
         if (url.pathname === '/') return send(res, 200, PAGE, 'text/html; charset=utf-8');
         if (url.pathname === '/api/ping') return send(res, 200, { app: 'kt-panel' });
         if (url.pathname === '/api/status') return send(res, 200, await status());
+        if (url.pathname === '/api/swing') {
+          const j = await readJson(SWING_OUT);
+          const running = (!!swing.child && swing.exit === null) || !!(await swingLockLive());
+          return send(res, 200, { running, lastExit: swing.exit, data: j });
+        }
         if (url.pathname === '/api/log') {
           const name = url.searchParams.get('name');
           const f = Object.hasOwn(LOGS, name ?? '') ? LOGS[name] : null;
@@ -403,6 +433,7 @@ function startServer() {
         if (url.pathname === '/api/collector/start') r = await startCollector();
         else if (url.pathname === '/api/collector/stop') r = await stopCollector(j.force === true);
         else if (url.pathname === '/api/universe/build') r = await buildUniverse();
+        else if (url.pathname === '/api/swing/run') r = await runSwing();
         else r = [404, { message: '없음' }];
         return send(res, r[0], r[1]);
       }
@@ -424,7 +455,7 @@ function startServer() {
     process.exit(1);
   });
   server.listen(PORT, HOST, () => {
-    console.log(`KT 단타 수집기 제어판: ${BASE_URL}`);
+    console.log(`KT 매매 제어판: ${BASE_URL}`);
     console.log('이 창을 닫으면 제어판만 꺼지고, 수집기는 계속 돕니다. 30분 동안 화면을 안 보면 스스로 꺼집니다.');
     openBrowser();
   });
@@ -453,7 +484,7 @@ function openBrowser() {
 // ---------- 화면 ----------
 const PAGE = `<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>KT 단타 수집기</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect x='4' y='4' width='92' height='92' rx='20' fill='%232457d6'/%3E%3Cg fill='white'%3E%3Crect x='22' y='56' width='12' height='22'/%3E%3Crect x='44' y='42' width='12' height='36'/%3E%3Crect x='66' y='24' width='12' height='54'/%3E%3C/g%3E%3C/svg%3E">
+<title>KT 매매 제어판</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect x='4' y='4' width='92' height='92' rx='20' fill='%232457d6'/%3E%3Cg fill='white'%3E%3Crect x='22' y='56' width='12' height='22'/%3E%3Crect x='44' y='42' width='12' height='36'/%3E%3Crect x='66' y='24' width='12' height='54'/%3E%3C/g%3E%3C/svg%3E">
 <style>
 :root{--bg:#f6f7f9;--card:#fff;--text:#1d2330;--muted:#667085;--line:#e4e7ec;--accent:#2457d6;--accent-text:#fff;
 --ok:#137a3e;--ok-bg:#e7f6ec;--warn:#9a5b00;--warn-bg:#fff4e0;--bad:#b42318;--bad-bg:#fdecea;--idle:#475467;--idle-bg:#eef0f3;--up:#c8322b;--down:#2457d6}
@@ -467,6 +498,7 @@ body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 "Malgun Gothi
 header{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;margin:4px 0 14px}
 h1{font-size:20px;margin:0}
 h2{font-size:16px;margin:0 0 10px}
+h3{font-size:14px;margin:16px 0 6px}
 .muted{color:var(--muted)} .small{font-size:13px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:14px}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
@@ -496,7 +528,35 @@ footer{font-size:13px;color:var(--muted);margin:6px 2px 30px}
 @media (max-width:560px){.wrap{padding:12px 16px} .nums{grid-template-columns:1fr 1fr}}
 </style></head>
 <body><div class="wrap">
-<header><h1>KT 단타 수집기</h1><span class="muted small" id="clock">불러오는 중</span></header>
+<header><h1>KT 매매 제어판</h1><span class="muted small" id="clock">불러오는 중</span></header>
+
+<section class="card">
+  <h2>스윙 모의매매 <span class="muted small">일봉 · 20일 보유 · 실주문 없음</span></h2>
+  <div class="small muted" id="swInfo">불러오는 중</div>
+  <div class="nums">
+    <div class="num"><span class="muted small">모의 손익(1천만 원 기준)</span><b id="swTotal">-</b></div>
+    <div class="num"><span class="muted small">보유 / 매수 대기</span><b id="swOpen">-</b></div>
+    <div class="num"><span class="muted small">청산(평균 · 승률)</span><b id="swClosed">-</b></div>
+    <div class="num"><span class="muted small">같은 날 아무 종목 산 것보다</span><b id="swExcess">-</b></div>
+  </div>
+  <h3>다음 거래일 시가에 살 종목</h3>
+  <div class="tbl"><table><thead><tr><th>종목</th><th class="r">점수</th><th class="r">신호일 종가</th><th>이유</th></tr></thead><tbody id="swBuy"></tbody></table></div>
+  <h3>보유 중</h3>
+  <div class="tbl"><table><thead><tr><th>종목</th><th>산 날</th><th class="r">산 값</th><th class="r">지금</th><th class="r">보유일</th><th class="r">수익</th><th class="r">최대 하락</th><th class="r">아무 종목 대비</th></tr></thead><tbody id="swHold"></tbody></table></div>
+  <details><summary id="swDoneSum">청산한 거래</summary>
+    <div class="tbl"><table><thead><tr><th>종목</th><th>산 날</th><th>판 날</th><th class="r">산 값</th><th class="r">판 값</th><th class="r">수익</th><th class="r">최대 하락</th><th class="r">아무 종목 대비</th></tr></thead><tbody id="swDone"></tbody></table></div>
+  </details>
+  <details><summary>규칙과 과거 검증</summary><div class="small" style="margin-top:6px">
+    매수: 그날 종가로 계산한 점수가 4.72 이상(전체의 상위 2%)이면 다음 거래일 시가에 산다.<br>
+    매도: 산 날을 1일로 세어 20번째 거래일 종가에 판다. 손절은 없다.<br>
+    장부: 1종목 100만 원, 최대 10종목. 사고팔 때 비용 0.21%를 뺀다. 스팩은 뺀다.<br>
+    과거 검증(점수를 만들 때 쓰지 않은 과거 348거래일, 422건): 20일 평균 +4.81%, 같은 날 아무 종목을 산 평균 +0.88%, 승률 50%.
+    보유 중 평균 최대 하락이 -13.8%라 중간에 -10%대로 빠지는 일은 규칙 안의 일이다.<br>
+    2026-09-14 이후 신호는 점수를 만들 때 쓰지 않은 구간이다. 규칙은 2026-10-15에 이 구간 결과를 보기 전에 고정했고, 그 뒤로는 매일 저녁 새 신호가 그대로 쌓인다(전진 검증).
+  </div></details>
+  <div class="row" style="margin-top:12px"><button id="btnSwing" class="sec">지금 다시 계산</button><span class="small muted" id="swHint">평일 20:15에 자동으로 계산합니다</span></div>
+  <div class="msg small" id="swMsg"></div>
+</section>
 
 <section class="card">
   <div class="row"><span class="badge b-idle" id="cBadge">확인 중</span><span id="cDetail" class="muted"></span></div>
@@ -539,7 +599,7 @@ footer{font-size:13px;color:var(--muted);margin:6px 2px 30px}
 <section class="card">
   <h2>기록</h2>
   <div class="tabs" id="logTabs">
-    <button data-log="collector">수집기</button><button data-log="universe" class="sec">후보 고르기</button>
+    <button data-log="collector">수집기</button><button data-log="universe" class="sec">후보 고르기</button><button data-log="swing" class="sec">스윙 모의매매</button>
     <button data-log="morning" class="sec">아침 작업</button><button data-log="evening" class="sec">저녁 작업</button><button data-log="panel" class="sec">제어판</button>
   </div>
   <pre id="logText">불러오는 중</pre>
@@ -641,6 +701,51 @@ async function refreshLog() {
   } catch {}
 }
 
+const md = d => d ? esc(String(d).slice(4, 6) + '-' + String(d).slice(6)) : '-';
+const sign = v => v > 0 ? 'up' : v < 0 ? 'down' : '';
+const pct = (v, unit) => v == null ? '-' : '<span class="' + sign(v) + '">' + (v > 0 ? '+' : '') + Number(v).toFixed(2) + (unit || '%') + '</span>';
+function renderSwing(w) {
+  const j = w.data;
+  $('btnSwing').disabled = w.running;
+  if (w.running) $('swHint').textContent = '계산 중...';
+  else $('swHint').textContent = w.lastExit != null && w.lastExit !== 0 ? '지난 계산이 실패했습니다(exit ' + w.lastExit + ') — 아래 기록의 "스윙 모의매매" 탭을 보세요' : '평일 20:15에 자동으로 계산합니다';
+  if (!j) { $('swInfo').textContent = '아직 계산한 결과가 없습니다. "지금 다시 계산"을 누르세요.'; return; }
+  const s = j.summary, d = j.data;
+  $('swInfo').textContent = '시세 ' + md(d.lastDate) + '까지 · 계산 ' + j.generatedAt + ' · ' + d.used + '종목 · 전진 검증 ' + d.days + '거래일째'
+    + (d.fetchFails && d.fetchFails.length ? ' · 시세 못 받은 종목 ' + d.fetchFails.length + '개' : '')
+    + (d.dropped && d.dropped.length ? ' · 거래 멈춘 종목 ' + d.dropped.length + '개' : '')
+    + (j.ledger && j.ledger.diff && j.ledger.diff.length ? ' · [주의] 지난 신호 ' + j.ledger.diff.length + '일이 기록과 다름(시세 수정 가능성) — 기록 탭 "스윙 모의매매"' : '');
+  $('swTotal').innerHTML = '<span class="' + sign(s.total) + '">' + (s.total > 0 ? '+' : '') + fmt(s.total) + '원</span> <span class="small">' + pct(s.totalPct) + '</span>';
+  $('swOpen').textContent = s.open + ' / ' + s.pending;
+  $('swClosed').innerHTML = s.closed ? s.closed + '건 ' + pct(s.closedAvg) + ' <span class="small muted">' + s.closedWin + '%</span>' : '<span class="muted">아직 없음</span>';
+  $('swExcess').innerHTML = s.bookExcess == null ? '-' : pct(s.bookExcess, '%p');
+  const why = p => '<span class="small">' + esc((p.fired || []).join(', ')) + '</span>';
+  const name = p => esc(p.name) + ' <span class="muted small">' + esc(p.code) + '</span>';
+  const buy = j.today.signals;
+  $('swBuy').innerHTML = buy.map(p => '<tr><td>' + name(p) + (p.skip ? ' <span class="badge b-idle small">' + esc(p.skip) + ' — 안 삼</span>' : '') + '</td><td class="r">' + p.score + '</td><td class="r">' + fmt(p.close) + '</td><td>' + why(p) + '</td></tr>').join('')
+    || '<tr><td colspan="4" class="muted">' + md(j.today.date) + ' 종가 기준 신호 없음</td></tr>';
+  const halted = p => p.halted ? ' <span class="badge b-idle small">' + md(p.halted) + ' 뒤 거래 없음</span>' : '';
+  $('swHold').innerHTML = j.positions.open.map(p => '<tr><td>' + name(p) + halted(p) + '</td><td>' + md(p.entryDate) + '</td><td class="r">' + fmt(p.entryPrice) + '</td><td class="r">' + fmt(p.lastPrice) + '</td><td class="r">' + p.day + '/' + j.rules.hold + '</td><td class="r">' + pct(p.ret) + '</td><td class="r">' + pct(p.mae) + '</td><td class="r">' + pct(p.excess, '%p') + '</td></tr>').join('')
+    || '<tr><td colspan="8" class="muted">없음</td></tr>';
+  const done = j.positions.closed;
+  $('swDoneSum').textContent = '청산한 거래 ' + done.length + '건';
+  $('swDone').innerHTML = done.map(p => '<tr><td>' + name(p) + '</td><td>' + md(p.entryDate) + '</td><td>' + md(p.exitDate) + '</td><td class="r">' + fmt(p.entryPrice) + '</td><td class="r">' + fmt(p.lastPrice) + '</td><td class="r">' + pct(p.ret) + '</td><td class="r">' + pct(p.mae) + '</td><td class="r">' + pct(p.excess, '%p') + '</td></tr>').join('')
+    || '<tr><td colspan="8" class="muted">아직 없음 — 첫 청산은 산 날부터 20거래일 뒤</td></tr>';
+}
+let swingWasRunning = false;
+async function refreshSwing() {
+  try {
+    const r = await fetch('/api/swing'); const w = await r.json();
+    renderSwing(w);
+    if (swingWasRunning && !w.running) $('swMsg').textContent = '';
+    swingWasRunning = w.running;
+  } catch (e) { $('swInfo').textContent = '스윙 결과를 읽지 못했습니다: ' + e.message; }
+}
+$('btnSwing').onclick = async () => {
+  $('btnSwing').disabled = true; $('swMsg').textContent = '요청하는 중...';
+  const r = await post('/api/swing/run'); $('swMsg').textContent = r.message; setTimeout(refreshSwing, 1500);
+};
+
 $('btnStart').onclick = async () => {
   $('btnStart').disabled = true; $('cMsg').textContent = '시작하는 중...';
   const r = await post('/api/collector/start'); $('cMsg').textContent = r.message; setTimeout(refresh, 1500);
@@ -670,4 +775,5 @@ for (const b of document.querySelectorAll('#logTabs button')) b.onclick = () => 
 };
 refresh(); refreshLog();
 setInterval(refresh, 10000); setInterval(refreshLog, 15000);
+(function swingLoop() { refreshSwing().finally(() => setTimeout(swingLoop, swingWasRunning ? 3000 : 20000)); })();
 </script></body></html>`;
