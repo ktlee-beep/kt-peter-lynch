@@ -289,12 +289,15 @@ reset(guardDb([{ batch_id: 'b-full', processed: 1139, total_stocks: 1142, starte
 ok('완료 배치가 있으면 야간 체인 전체를 건너뛴다', await runNightly(), { skipped: true, batchId: 'b-full' });
 ok('체인을 건너뛸 때 아무것도 쓰지 않는다', calls.some(c => c.method !== 'GET' && c.method !== 'HEAD'), false);
 
-// 하드코딩 폴백 유니버스(199종목)로 돈 배치는 dailyScanAlreadyDone 이 완료로 치지 않는다.
-// 경계는 정확히 199/200 으로 본다 — 150 같은 값으로는 "+1" 이 빠져도 통과한다.
-reset(guardDb([{ batch_id: 'b-fb', processed: 199, total_stocks: 199 }], { 'b-fb': 199 }));
-ok('dailyScanAlreadyDone 은 폴백 크기(199) 배치를 무시한다', await dailyScanAlreadyDone(), null);
-reset(guardDb([{ batch_id: 'b-200', processed: 200, total_stocks: 200 }], { 'b-200': 200 }));
-ok('폴백보다 한 종목이라도 많으면 완료로 친다', (await dailyScanAlreadyDone())?.batch_id, 'b-200');
+// 하드코딩 폴백 유니버스로 돈 배치는 dailyScanAlreadyDone 이 완료로 치지 않는다.
+// 경계는 정확히 폴백 크기 / 폴백 크기+1 로 본다 — 150 같은 값으로는 "+1" 이 빠져도 통과한다.
+// 폴백 크기는 data.js 목록에서 읽는다(2026-10-14 정리로 199 → 193). 목록을 고칠 때 이 시험이 깨지지 않게 한다.
+const { KS_UNIVERSE, KQ_UNIVERSE } = await import('../data.js');
+const FB = KS_UNIVERSE.length + KQ_UNIVERSE.length;
+reset(guardDb([{ batch_id: 'b-fb', processed: FB, total_stocks: FB }], { 'b-fb': FB }));
+ok(`dailyScanAlreadyDone 은 폴백 크기(${FB}) 배치를 무시한다`, await dailyScanAlreadyDone(), null);
+reset(guardDb([{ batch_id: 'b-fb1', processed: FB + 1, total_stocks: FB + 1 }], { 'b-fb1': FB + 1 }));
+ok('폴백보다 한 종목이라도 많으면 완료로 친다', (await dailyScanAlreadyDone())?.batch_id, 'b-fb1');
 
 // 체인이 09:00 KST(00:00 UTC)를 넘겨도 스캔이 쓴 분석일로 판정·저장해야 한다.
 const seonRows = (date) => (c) => c.url.includes('/kt_daily_analysis')
