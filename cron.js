@@ -613,7 +613,14 @@ async function backfillOne({ code, need }, corpResolver, dartKey) {
   return { empty: !got };
 }
 
-export async function runFundamentalsBackfill({ limit = 0, maxDartCalls = 15000, full = false } = {}) {
+// 예산 15,000회면 200ms 간격으로 약 50분이 걸린다. 트리거 요청이 끝나면 들어오는 요청이 없어
+// Render가 15분 뒤 인스턴스를 재우므로 일일 스캔처럼 킵얼라이브로 감싼다(withKeepAlive 주석 참조).
+// 2026-09·10월 실행은 모두 2분 안에 멈춰서 이 문제가 드러나지 않았다.
+export async function runFundamentalsBackfill(opts = {}) {
+  return withKeepAlive('backfill', () => runFundamentalsBackfillInner(opts));
+}
+
+async function runFundamentalsBackfillInner({ limit = 0, maxDartCalls = 15000, full = false } = {}) {
   const dartKey = process.env.DART_API_KEY;
   // 조기반환에도 dartCallsBudgeted를 반드시 싣는다. server.js는 이 값이 없으면 "얼마나 썼는지
   // 모른다"고 보고 maxDartCalls 전액(기본 15,000)을 일일 예산에서 차감한다 — 실제로는 한 번도
@@ -643,23 +650,24 @@ export async function runFundamentalsBackfill({ limit = 0, maxDartCalls = 15000,
   }
   const corpResolver = (code) => corpMap[code] || CORP_MAP[code] || null;
 
-  // full=true는 corp_code 매핑에 있는 전 상장사(약 3,930), 기본은 일일 스캔과 같은 대상.
+  // 기본은 일일 스캔과 같은 대상, full=true는 거기에 corp_code 매핑의 나머지 상장사(약 3,930)를 더한다.
   // Phase 2(유니버스 확장) 전에도 데이터를 미리 쌓아둘 수 있도록 스위치로 열어둔다.
-  // 비-full일 때 runDailyScan과 같은 순서(kt_stocks 우선 → 하드코딩 폴백)를 쓰는 게 중요하다.
+  // runDailyScan과 같은 순서(kt_stocks 우선 → 하드코딩 폴백)를 쓰는 게 중요하다.
   // getScanUniverse()만 보면 kt_stocks에만 있는 종목이 스캔 대상인데도 영원히 안 채워진다.
-  let codes;
-  if (full) {
-    codes = Object.keys(corpMap);
-  } else {
-    // 폴백은 조용하면 안 된다. 유니버스 확장 후 낙차가 1,136 → 193이라, DB 일시 장애로
-    // 대상이 83% 줄어도 로그가 없으면 "그냥 그날 적게 돌았다"로 지나간다.
-    const active = await getActiveStocks().catch(e => {
-      console.error('[Backfill] kt_stocks 조회 실패 — 하드코딩 유니버스로 폴백:', e.message);
-      return [];
-    });
-    if (!active.length) console.warn('[Backfill] 활성 종목 0건 — 하드코딩 유니버스 사용');
-    codes = (active.length ? active : getScanUniverse()).map(s => s.code);
-  }
+  // 폴백은 조용하면 안 된다. 유니버스 확장 후 낙차가 1,136 → 193이라, DB 일시 장애로
+  // 대상이 83% 줄어도 로그가 없으면 "그냥 그날 적게 돌았다"로 지나간다.
+  const active = await getActiveStocks().catch(e => {
+    console.error('[Backfill] kt_stocks 조회 실패 — 하드코딩 유니버스로 폴백:', e.message);
+    return [];
+  });
+  if (!active.length) console.warn('[Backfill] 활성 종목 0건 — 하드코딩 유니버스 사용');
+  const scanCodes = (active.length ? active : getScanUniverse()).map(s => s.code);
+  // full이어도 스캔 대상을 맨 앞에 둔다. 예전처럼 corpMap 순서만 쓰면, 자료가 있는 종목은 지난
+  // 실행에서 신선해져 빠지고 진짜 무자료 종목(음수 캐시를 두지 않는다 — backfillOne 주석)만
+  // 매번 대상 맨 앞에 남는다. 2026-09·10월 정기 실행 6회가 모두 그 40종목에서 멈춰, 스캔 종목의
+  // 5개년 캐시(스크리너 ROE·부채비율 폴백의 원천)가 9월부터 늘지 않았다. 예산이 모자라도
+  // 화면에 쓰이는 종목부터 채워지게 한다. Set은 넣은 순서를 지키므로 중복만 빠진다.
+  const codes = full ? [...new Set([...scanCodes, ...Object.keys(corpMap)])] : scanCodes;
 
   let skipped = 0, noCorp = 0;
   const pending = [];
@@ -697,9 +705,18 @@ export async function runFundamentalsBackfill({ limit = 0, maxDartCalls = 15000,
   // 전멸한 청크가 "자료가 없어서"인지 "닿지 못해서"인지는 네트워크 실패 수로 갈린다.
   // 닿지 못하는 상태는 더 돌아도 결과가 달라지지 않으므로 훨씬 빨리 끊는다. 반대로 한 번의
   // 일시적 리셋으로 정상 실행을 죽이면 안 되니 연속 2청크는 본다.
+  // 전멸 청크라도 실패가 전부 status '013'(조회된 데이터 없음)이었다면 연속 전멸로 세지 않는다.
+  // DART가 닿아서 "그 회사는 자료가 없다"고 말한 것이라 차단도 불통도 아니다. 이것까지 세면
+  // 무자료 종목이 몰린 구간에서 멈추는데, 무자료 종목은 캐시가 안 남아 다음 실행에서도 같은 자리에
+  // 오므로 매번 같은 곳에서 멈춘다 — 2026-09-01~10-03 정기 실행 6회가 전부 이렇게 40종목에서
+  // 끝났다. 무자료로 쓰는 호출은 maxDartCalls가 묶는다. HTTP 오류·네트워크 실패·그 밖의 status가
+  // 하나라도 섞였으면 예전처럼 센다 — 013 한 건이 다른 실패를 가리면 안 된다.
+  // 같은 이유로 013이 온 청크는 DART가 닿은 것이므로 불통(netStreak)으로도 세지 않는다.
   const DEAD_CHUNKS = 5, UNREACHABLE_CHUNKS = 2;
   let deadStreak = 0, netStreak = 0;
   resetDartCallStats();
+  const sum = (obj, skip = []) => Object.entries(obj).reduce((s, [k, n]) => skip.includes(k) ? s : s + n, 0);
+  const otherFailures = () => sum(dartCallStats.http) + sum(dartCallStats.status, ['000', '013']);
 
   for (let i = 0; i < pending.length; i += CHUNK) {
     const chunk = pending.slice(i, i + CHUNK);
@@ -708,7 +725,9 @@ export async function runFundamentalsBackfill({ limit = 0, maxDartCalls = 15000,
     calls += chunkCost;
 
     const netBefore = dartCallStats.network;
-    const res = await Promise.allSettled(chunk.map(p => backfillOne(p, corpResolver, dartKey)));
+    const noDataBefore = dartCallStats.status['013'] || 0;
+    const otherBefore = otherFailures();
+    const res =await Promise.allSettled(chunk.map(p => backfillOne(p, corpResolver, dartKey)));
     const hit = res.filter(r => r.status === 'fulfilled' && r.value && !r.value.empty).length;
     done += hit;
     empty += chunk.length - hit;
@@ -720,8 +739,13 @@ export async function runFundamentalsBackfill({ limit = 0, maxDartCalls = 15000,
       break;
     }
     const unreachable = dartCallStats.network > netBefore;
+    const answeredNoData = (dartCallStats.status['013'] || 0) > noDataBefore;
+    const onlyNoData = answeredNoData && !unreachable && otherFailures() === otherBefore;
     if (hit) { deadStreak = 0; netStreak = 0; }
-    else { deadStreak++; netStreak = unreachable ? netStreak + 1 : 0; }
+    else {
+      deadStreak = onlyNoData ? 0 : deadStreak + 1;
+      netStreak = unreachable && !answeredNoData ? netStreak + 1 : 0;
+    }
     if (netStreak >= UNREACHABLE_CHUNKS) {
       stoppedBy = `dart-unreachable:${Object.keys(dartCallStats.netCause).join(',')}`;
       console.error(`[Backfill] DART 연결 실패 연속 — 중단 (적재 ${done}, 호출 ${calls}, 원인 ${JSON.stringify(dartCallStats.netCause)})`);
@@ -753,7 +777,7 @@ export async function runFundamentalsBackfill({ limit = 0, maxDartCalls = 15000,
     // empty가 왜 컸는지 결과만 보고 판별할 수 있게 원인별 계수를 함께 싣는다.
     // status['013']이 크면 진짜 무자료, '020'·'012' 등이 있으면 우리가 막힌 것이다.
     dart: snapshotDartCallStats(),
-    stoppedBy,                       // 'quota' | 'limit' | null(완주)
+    stoppedBy,                       // 'quota' | 'limit' | 'dead-streak' | 'dart-blocked:…' | 'dart-unreachable:…' | null(완주)
     truncatedByLimit,
     // 주의: limit로 자른 경우 pending이 이미 잘려 있어 이 값은 "전체 백로그"가 아니라
     // "이번 배치의 잔여"다. 전체 진행률은 아래 cached 건수로 볼 것.

@@ -44,6 +44,14 @@ jobs:
           curl -sf "$BASE/healthz" || true
           sleep 40
 
+      # 트리거가 last를 지우므로 직전 실행의 최종 집계는 지금이 아니면 볼 곳이 없다.
+      # 서버가 재시작됐다면 last가 null이다(상태는 프로세스 메모리). 실패해도 진행한다.
+      - name: Previous result (직전 실행 집계)
+        run: |
+          curl -sf "$BASE/api/backfill/fundamentals/status" -H "x-scan-secret: $SCAN_SECRET" \
+            || echo "상태 조회 실패 (non-fatal)"
+          echo
+
       - name: Trigger backfill
         run: |
           # 입력값을 JSON 본문에 펼치기 전에 형식을 강제한다. 큰따옴표 안에서도 $(...)와
@@ -66,8 +74,17 @@ jobs:
 
       # 백필은 수 시간이 걸릴 수 있어 완료까지 기다리지 않는다. 여기서는 초반에
       # 죽지 않았는지만 확인하고, 최종 집계는 다음 실행의 status 응답으로 확인한다.
+      # 초반에 수집 불능으로 멈췄으면 실행을 실패로 표시한다. 2026-09-01~10-03 정기 실행 6회가
+      # 전부 시작 직후 dead-streak로 멈췄는데 여기서 성공으로 끝나 한 달 넘게 아무도 몰랐다.
+      # 'quota'·'limit'은 정상 중단이라 실패로 보지 않는다. 상태 조회 자체의 실패는 예전처럼 넘긴다.
       - name: Check progress (5분 후 1회)
         run: |
           sleep 300
-          curl -sf "$BASE/api/backfill/fundamentals/status" \
-            -H "x-scan-secret: $SCAN_SECRET" || echo "상태 조회 실패 (non-fatal)"
+          if ! curl -sf "$BASE/api/backfill/fundamentals/status" \
+              -H "x-scan-secret: $SCAN_SECRET" -o /tmp/status.json; then
+            echo "상태 조회 실패 (non-fatal)"; exit 0
+          fi
+          cat /tmp/status.json; echo
+          if grep -Eq '"stoppedBy":"(dead-streak|dart-blocked|dart-unreachable)|"last":\{"ok":false' /tmp/status.json; then
+            echo "백필이 수집 불능으로 멈췄습니다 — 위 응답의 last.stoppedBy·last.dart를 확인하세요"; exit 1
+          fi

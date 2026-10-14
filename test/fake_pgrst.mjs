@@ -24,6 +24,11 @@ export const SUPABASE_URL = SB;
 // 네이버 일괄 시세 원천의 상태. mode로 장애·형식변경·부분응답을 재현한다.
 export const naver = { mode: 'ok', items: [] };
 
+// DART 응답 조작. noData에 든 corp_code는 모든 엔드포인트가 '013'(조회된 데이터 없음)으로 답하고,
+// mode 'http500'이면 모든 호출이, fail500에 든 corp_code는 그 종목 호출만 HTTP 500으로 실패한다
+// — 백필의 연속 전멸 판정을 무자료·응답 실패·둘이 섞인 경우로 가르는 데 쓴다.
+export const dart = { mode: 'ok', noData: new Set(), fail500: new Set() };
+
 // supabase-js는 헤더를 Headers 인스턴스로 넘길 수도, 평범한 객체로 넘길 수도 있다.
 // 한쪽만 보면 Prefer를 못 읽어 count가 조용히 null이 된다(하네스 자체 버그였음).
 function readHeaders(init) {
@@ -181,6 +186,11 @@ export function install() {
 
     if (url.includes('opendart.fss.or.kr')) {
       stats.dartCalls++;
+      const corp = new URL(url).searchParams.get('corp_code');
+      if (dart.mode === 'http500' || dart.fail500.has(corp)) return new Response('server error', { status: 500 });
+      if (dart.noData.has(corp)) {
+        return Response.json({ status: '013', message: '조회된 데이타가 없습니다.' });
+      }
       if (url.includes('/company.json')) {
         return Response.json({ status: '000', corp_name: '테스트', stock_code: '000001',
           induty_code: '264', corp_cls: 'Y', acc_mt: '12', est_dt: '19690113' });
@@ -214,6 +224,7 @@ export function reset() {
   stocks.rows.length = 0;
   for (const k of Object.keys(stats)) stats[k] = 0;
   naver.mode = 'ok'; naver.items.length = 0;
+  dart.mode = 'ok'; dart.noData.clear(); dart.fail500.clear();
 }
 
 // 시세 목록 원본 1행. 실제 응답 필드명을 그대로 쓴다 — 단위 환산(백만원→억원)과

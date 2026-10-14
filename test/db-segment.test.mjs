@@ -190,9 +190,15 @@ ok('exact count (1000행 상한 무관)', await db.countKvPrefix('__multiyear__'
 // ── 8. 백필 통합 — 예산·재개·집계 ──
 console.log('\n=== 8. runFundamentalsBackfill 통합 ===');
 const cron = await import('../cron.js');
+// corp_code 맵과 스캔 대상(kt_stocks)을 함께 넣는다. kt_stocks를 비워 두면 하드코딩 유니버스로
+// 폴백하고, full 백필은 스캔 대상을 맨 앞에 붙이므로 그 종목들까지 긁어 결과가 섞인다.
+const seedUniverse = (corpCodes, scanCodes = corpCodes) => {
+  fake.seed('__corpmap__', Object.fromEntries(corpCodes.map(c => [c, `corp${c}`])), 0);
+  for (const code of scanCodes) fake.stocks.rows.push({ code, market: 'KOSPI', is_active: 1 });
+};
 fake.reset();
 const CODES = Array.from({ length: 20 }, (_, i) => String(100000 + i));
-fake.seed('__corpmap__', Object.fromEntries(CODES.map(c => [c, `corp${c}`])), 0);
+seedUniverse(CODES);
 
 const r1 = await cron.runFundamentalsBackfill({ full: true, maxDartCalls: 10000 });
 console.log('  1회차:', JSON.stringify({ universe: r1.universe, targeted: r1.targeted, filled: r1.filled,
@@ -209,7 +215,7 @@ ok('재개형 — 추가 호출 0', r2.dartCallsBudgeted, 0);
 
 // 예산 부족 시 조기 중단
 fake.reset();
-fake.seed('__corpmap__', Object.fromEntries(CODES.map(c => [c, `corp${c}`])), 0);
+seedUniverse(CODES);
 const r3 = await cron.runFundamentalsBackfill({ full: true, maxDartCalls: 100 });
 console.log('  예산100:', JSON.stringify({ filled: r3.filled, calls: r3.dartCallsBudgeted,
   stoppedBy: r3.stoppedBy, batchRemaining: r3.batchRemaining }));
@@ -220,7 +226,7 @@ ok('중단 사유 quota', r3.stoppedBy, 'quota');
 // corp_code 맵을 미리 넣어 둔다 — 없으면 refreshCorpCodes가 zip 1회를 받으러 가고,
 // 그 1회가 "종목별 수집"과 섞여 무엇이 절약됐는지 알 수 없게 된다.
 fake.reset();
-fake.seed('__corpmap__', Object.fromEntries(CODES.map(c => [c, `corp${c}`])), 0);
+seedUniverse(CODES);
 const before = fake.stats.dartCalls;
 fake.cfg.onPageServed = () => { throw new Error('DB 장애'); };
 const r4 = await cron.runFundamentalsBackfill({ full: true, maxDartCalls: 10000 }).catch(e => ({ ok: false, error: e.message }));
@@ -230,6 +236,61 @@ ok('실패 시 종목별 DART 호출 0', fake.stats.dartCalls - before, 0);
 // 조기반환이 예산 사용량을 명시하지 않으면 server.js가 maxDartCalls 전액을 차감한다 —
 // 0회 호출로 하루치 예산이 소진돼 429로 잠기는 경로(M-1).
 ok('조기반환도 예산 사용량 0을 명시', r4.dartCallsBudgeted, 0);
+
+// ── 8b. 연속 전멸 판정 — 무자료(013)와 응답 실패를 가르는가 ──
+// 2026-09·10월 정기 실행 6회가 전부 대상 맨 앞의 무자료 40종목에서 dead-streak로 멈췄다.
+// DART 호출 간격이 200ms라 시험 시간을 줄이려고 개황(1회)만 필요하게 5개년·분기 캐시를 미리 채운다.
+console.log('\n=== 8b. 백필 연속 전멸 판정 ===');
+const onlyCompanyNeeded = (codes) => {
+  for (const c of codes) {
+    fake.seed(`__multiyear__${c}`, [{ year: 2025 }], 1);
+    fake.seed(`__quarterly__${c}`, { year: 2026 }, 1);
+  }
+};
+const NODATA  = Array.from({ length: 48 }, (_, i) => String(110000 + i));   // 6청크 — 예전 기준(5청크)을 넘긴다
+const HASDATA = Array.from({ length: 4 },  (_, i) => String(120000 + i));
+fake.reset();
+seedUniverse([...NODATA, ...HASDATA]);
+onlyCompanyNeeded([...NODATA, ...HASDATA]);
+for (const c of NODATA) fake.dart.noData.add(`corp${c}`);
+const r5 = await cron.runFundamentalsBackfill({ full: true, maxDartCalls: 10000 });
+console.log('  앞쪽 무자료 48:', JSON.stringify({ filled: r5.filled, empty: r5.empty, stoppedBy: r5.stoppedBy, status: r5.dart?.status }));
+ok('013 연속으로는 멈추지 않음', r5.stoppedBy, null);
+ok('뒤쪽 자료 종목까지 적재', r5.filled, 4);
+ok('무자료 48', r5.empty, 48);
+
+// 응답 자체가 실패하는(013이 아닌) 연속 전멸은 예전처럼 40종목에서 끊는다.
+fake.reset();
+seedUniverse([...NODATA, ...HASDATA]);
+onlyCompanyNeeded([...NODATA, ...HASDATA]);
+fake.dart.mode = 'http500';
+const r6 = await cron.runFundamentalsBackfill({ full: true, maxDartCalls: 10000 });
+console.log('  HTTP 500:', JSON.stringify({ filled: r6.filled, empty: r6.empty, stoppedBy: r6.stoppedBy, http: r6.dart?.http }));
+ok('HTTP 실패 연속 → dead-streak', r6.stoppedBy, 'dead-streak');
+ok('40종목에서 중단', r6.empty, 40);
+
+// 청크마다 013이 한 건 끼어 있어도 나머지가 HTTP 500이면 응답 실패다 — 013이 가리면 안 된다.
+fake.reset();
+seedUniverse([...NODATA, ...HASDATA]);
+onlyCompanyNeeded([...NODATA, ...HASDATA]);
+NODATA.forEach((c, i) => (i % 8 === 0 ? fake.dart.noData : fake.dart.fail500).add(`corp${c}`));
+const r8 = await cron.runFundamentalsBackfill({ full: true, maxDartCalls: 10000 });
+console.log('  013 1 + HTTP 500 7 청크:', JSON.stringify({ empty: r8.empty, stoppedBy: r8.stoppedBy, status: r8.dart?.status, http: r8.dart?.http }));
+ok('섞인 청크 연속 → dead-streak', r8.stoppedBy, 'dead-streak');
+ok('섞여도 40종목에서 중단', r8.empty, 40);
+
+// full이어도 스캔 대상(kt_stocks)부터 처리하는가 — limit으로 잘라 앞쪽이 누구인지 본다.
+// corp 맵의 키는 숫자 꼴이라 오름차순으로 나열되므로, 예전 순서였다면 OTHERS가 먼저 채워진다.
+fake.reset();
+const OTHERS = Array.from({ length: 10 }, (_, i) => String(130000 + i));
+const SCAN   = Array.from({ length: 5 },  (_, i) => String(140000 + i));
+seedUniverse([...OTHERS, ...SCAN], SCAN);
+onlyCompanyNeeded([...OTHERS, ...SCAN]);
+const r7 = await cron.runFundamentalsBackfill({ full: true, maxDartCalls: 10000, limit: 5 });
+const filledCodes = fake.table.rows.filter(r => r.code.startsWith('__company__'))
+  .map(r => r.code.slice('__company__'.length)).sort();
+ok('full 대상 = 스캔 5 + 나머지 10 (중복 없음)', r7.universe, 15);
+ok('full — 스캔 대상부터 적재', filledCodes, SCAN);
 
 // ── 9. saveAnalysisToDB 병합 — 온디맨드가 크론 결과를 지우지 않는가 ──
 // analysis_json은 통 blob이고 PK가 (code, analysis_date)라 upsert 한 번이면 통째로 교체된다.
