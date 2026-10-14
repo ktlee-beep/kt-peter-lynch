@@ -702,13 +702,22 @@ export async function yahooStock(code) {
   return (await naverStock(code)) || { code, error: 'NOT_FOUND' };
 }
 
-export function isValidYahooResult(meta, code, suffix) {
+// 야후는 상장 시장이 아닌 쪽 접미사(코스피 종목의 .KQ, 코스닥 종목의 .KS)에도 응답을 준다.
+// 그 응답은 2024-07-19에 멈춘 옛 가격을 regularMarketPrice로 들고 있어서, 받아들이면 현재가가
+// 엉뚱하게 나온다(코웨이 실제 10만원대 → 63,300원, 2026-10-14 확인). 그런 응답은
+// instrumentType이 MUTUALFUND이고 shortName이 "021240.KQ,0P0000B9ZH,148690" 꼴이다.
+// 예전에는 이름의 쉼표로 걸렀는데, 정상 응답의 longName "COWAY Co., Ltd."까지 걸러져
+// 정상 티커를 버리고 죽은 티커를 받는 역전이 났다 — 쉼표 대신 아래 세 신호로 거른다.
+const YAHOO_STALE_MS = 30 * 24 * 60 * 60 * 1000; // 장기 연휴(10일 안팎)보다 넉넉하게
+export function isValidYahooResult(meta, code, suffix, now = Date.now()) {
   if (!meta) return false;
   const sym = (meta.symbol || '').toUpperCase();
   const expected = `${code}.${suffix}`;
   if (sym && sym !== expected.toUpperCase()) return false;
-  const name = meta.longName || meta.shortName || '';
-  if (name.includes(',')) return false;
+  const placeholder = /^[0-9A-Z]{6}\.(KS|KQ),/i; // 영숫자 단축코드(0220W0 등)도 같은 꼴
+  if (placeholder.test(meta.longName || '') || placeholder.test(meta.shortName || '')) return false;
+  if (meta.instrumentType === 'MUTUALFUND') return false;
+  if (meta.regularMarketTime && now - meta.regularMarketTime * 1000 > YAHOO_STALE_MS) return false;
   return true;
 }
 

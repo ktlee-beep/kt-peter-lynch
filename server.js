@@ -1026,25 +1026,30 @@ app.get('/api/movers', async (req, res) => {
   }
 
   const H = { 'User-Agent': 'Mozilla/5.0' };
+  // 목록의 접미사가 실제 시장과 다르면(KQ 목록의 코스피 종목 등) 야후가 옛 가격에 멈춘 응답을 준다 —
+  // isValidYahooResult로 거르고 반대 접미사로 한 번 더 묻는다.
   const fetchChart = async (code, suffix) => {
-    try {
-      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${code}.${suffix}?interval=1d&range=2d`;
-      const r = await fetch(url, { headers: H });
-      if (!r.ok) return null;
-      const data = await r.json();
-      const meta = data.chart?.result?.[0]?.meta;
-      if (!meta?.regularMarketPrice) return null;
-      const price = meta.regularMarketPrice;
-      const prev  = meta.previousClose || meta.chartPreviousClose;
-      return {
-        code, suffix,
-        name:       meta.longName || meta.shortName || code,
-        market:     suffix === 'KS' ? 'KOSPI' : 'KOSDAQ',
-        price,
-        changeRate: prev ? ((price - prev) / prev) * 100 : 0,
-        volume:     meta.regularMarketVolume || 0,
-      };
-    } catch { return null; }
+    for (const sfx of [suffix, suffix === 'KS' ? 'KQ' : 'KS']) {
+      try {
+        const url = `https://query1.finance.yahoo.com/v8/finance/chart/${code}.${sfx}?interval=1d&range=2d`;
+        const r = await fetch(url, { headers: H });
+        if (!r.ok) continue;
+        const data = await r.json();
+        const meta = data.chart?.result?.[0]?.meta;
+        if (!meta?.regularMarketPrice || !isValidYahooResult(meta, code, sfx)) continue;
+        const price = meta.regularMarketPrice;
+        const prev  = meta.previousClose || meta.chartPreviousClose;
+        return {
+          code, suffix: sfx,
+          name:       meta.longName || meta.shortName || code,
+          market:     sfx === 'KS' ? 'KOSPI' : 'KOSDAQ',
+          price,
+          changeRate: prev ? ((price - prev) / prev) * 100 : 0,
+          volume:     meta.regularMarketVolume || 0,
+        };
+      } catch {}
+    }
+    return null;
   };
 
   const allPromises = [
