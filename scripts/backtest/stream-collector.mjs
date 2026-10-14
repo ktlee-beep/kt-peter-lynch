@@ -18,23 +18,34 @@
 //   수집 창: 평일 --from ~ --until(KST) 밖에서 시작하면 접속 없이 바로 끝낸다. 작업 스케줄러가 놓친 실행을
 //   밤·주말에 뒤늦게 띄워도 빈 접속과 토큰 재발급(같은 키를 쓰는 다른 프로세스의 토큰 폐기)을 만들지 않으려는 것.
 //   --anyday 는 주말 검사만 끈다(공휴일은 모른다).
-//   종목 선정: (1) 코어 = 일봉 캐시를 직전 20일 평균 거래대금으로 정렬한 상위 --core 개,
-//             (2) 소형 슬롯 = universe-builder 최신 산출물(universe/YYYY-MM-DD_HHmm.json)의 picks 전부.
+//   종목 선정: (1) 코어 = 일봉 캐시를 직전 20일 평균 거래대금으로 정렬한 상위 --core 개. 마지막 봉이 캐시 전체의
+//                 최신 봉보다 STALE_DAYS 넘게 뒤처진 종목(상장폐지·장기 거래정지)은 뺀다.
+//             (2) 소형 슬롯 = universe-builder 의 저녁 빌드(universe/YYYY-MM-DD_HHmm.json)의 picks 전부.
 //   체결 = 코어 ∪ picks (중복 제거). 호가 = 남은 용량(200 - 체결 수)을 picks 와 코어에 반씩 (한쪽이 모자라면 다른 쪽이 채움).
 //   연결 A = 체결 앞 100건, 연결 B = 체결 나머지 + 호가 (계정당 2연결 x 연결당 100건 = 200건 한도).
-//   빌더 산출물이 없거나 읽기 실패면 코어만으로 수집한다(수집을 멈추지 않는다). 최신 산출물이 오늘 빌드가
-//   아니면(빌더 실패 등) 어제 테마 목록을 섞지 않고 코어만 쓴다. --universe 로 직접 준 파일은 날짜가 달라도 쓴다.
+//   빌더 산출물이 없거나 읽기 실패면 코어만으로 수집한다(수집을 멈추지 않는다). 자동 선택은 [직전 평일 15:40, 오늘 07:00)
+//   에 만든 빌드 중 최신 것만 쓴다(아래 loadPicks). 그 창에 빌드가 없으면(저녁 작업 실패 등) 묵은 테마 목록을 섞지 않고
+//   코어만 쓴다. --universe 로 직접 준 파일은 창 밖이어도 쓴다(경고만 남김).
 //   실제 구독 목록과 근거는 ticks/<날짜>/subscriptions-<HHmm>.json 에 남긴다.
-import { readFile, readdir, mkdir, writeFile } from 'node:fs/promises';
-import { createWriteStream } from 'node:fs';
+//
+// 실행 제어: 시작할 때 scripts/pc/collector.lock 을 잡는다(이미 살아 있는 수집기가 있으면 접속 없이 종료).
+//   scripts/pc/collector.stop 파일이 생기면 3초 안에 파일을 닫고 끝낸다(제어판 중지 버튼). 둘 다 gitignored.
+import { readFile, readdir, mkdir, writeFile, unlink } from 'node:fs/promises';
+import { createWriteStream, existsSync, unlinkSync } from 'node:fs';
 import { createGzip, constants as zc } from 'node:zlib';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildWindow, inBuildWindow, BUILD_FILE_RE } from './build-window.mjs';
+import { takeLock, releaseLockSync, lockOwner, lockBody } from './run-lock.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DAILY_DIR = path.join(HERE, 'cache');
 const UNIVERSE_DIR = path.join(HERE, 'universe');
 const OUT_ROOT = path.join(HERE, 'ticks');
+// 실행 제어 파일(gitignored). 잠금 = 동시 실행 방지, 중지 = 제어판(scripts/pc/panel.mjs)의 정상 종료 요청.
+const RUN_DIR = path.join(HERE, '..', 'pc');
+const LOCK_FILE = path.join(RUN_DIR, 'collector.lock');
+const STOP_FILE = path.join(RUN_DIR, 'collector.stop');
 const ENV_PATH = 'C:/Users/ThinkBook/.secrets/api-keys.env';
 const BASE = 'https://openapi.tossinvest.com';
 const WS_URL = 'wss://openapi-ws.tossinvest.com/ws/v1';
@@ -93,6 +104,11 @@ async function ensureToken() {
 }
 
 // ---------- 종목 선정 ----------
+// 캐시 안 최신 봉보다 이만큼(달력일) 넘게 뒤처진 종목은 코어에서 뺀다. 2026-10-14 에 464680(마지막 봉 06-08)·
+// 466910(05-18)이 토스에서 stock-not-found 로 거부돼 구독 2건이 비었다. 오늘 날짜가 아니라 캐시 최신 봉과 비교하는 건
+// 캐시 자체가 묵어도(갱신 주기와 무관하게) 전 종목이 빠지지 않게 하려는 것. 연휴는 전 종목이 같이 밀리므로 영향 없다.
+const STALE_DAYS = 10;
+const ymdMs = d => Date.UTC(+d.slice(0, 4), +d.slice(4, 6) - 1, +d.slice(6, 8));
 async function pickUniverse() {
   const files = (await readdir(DAILY_DIR)).filter(f => f.endsWith('.json'));
   const rows = [];
@@ -100,28 +116,47 @@ async function pickUniverse() {
     try {
       const j = JSON.parse(await readFile(path.join(DAILY_DIR, f), 'utf8'));
       const it = j.items.slice(-20);
-      if (it.length < 10) continue;
-      rows.push([j.code, it.reduce((s, x) => s + x.c * x.v, 0) / it.length]);
+      if (it.length < 10 || !/^\d{8}$/.test(it.at(-1).d ?? '')) continue;
+      rows.push([j.code, it.reduce((s, x) => s + x.c * x.v, 0) / it.length, it.at(-1).d]);
     } catch { /* 손상 캐시 건너뜀 */ }
   }
-  rows.sort((a, b) => b[1] - a[1]);
-  return rows.map(r => r[0]);
+  const newest = rows.reduce((m, r) => (r[2] > m ? r[2] : m), '');
+  const isStale = r => ymdMs(newest) - ymdMs(r[2]) > STALE_DAYS * 86400e3;
+  const live = rows.filter(r => !isStale(r)).sort((a, b) => b[1] - a[1]);
+  return { codes: live.map(r => r[0]), newest, stale: rows.filter(isStale).map(r => `${r[0]}(${r[2]})`) };
 }
 
-// universe-builder 최신 산출물의 picks (거래대금 내림차순). 구형 산출물(YYYY-MM-DD.json)은 형식이 달라 건너뛴다.
-// 자동 선택일 때 오늘(today, KST) 빌드가 아니면 picks 를 쓰지 않는다.
+// universe-builder 저녁 빌드의 picks (거래대금 내림차순). 구형 산출물(YYYY-MM-DD.json)은 형식이 달라 건너뛴다.
+// 자동 선택 창은 build-window.mjs. 창 안에서 최신 빌드부터 보되 후보가 빈 빌드(장 시작 전에 고른 것 등)는 건너뛴다 —
+// 빈 빌드 하나가 전날 저녁의 정상 빌드를 밀어내면 그날은 코어만 수집하게 된다.
 async function loadPicks(today) {
   if (NO_PICKS) return { file: null, picks: [], reason: '--nopicks' };
-  try {
-    const file = UNIVERSE_FILE ?? path.join(UNIVERSE_DIR,
-      (await readdir(UNIVERSE_DIR)).filter(f => /^\d{4}-\d{2}-\d{2}_\d{4}\.json$/.test(f)).sort().at(-1) ?? '');
-    if (!file.endsWith('.json')) return { file: null, picks: [], reason: '빌더 산출물 없음' };
-    if (!UNIVERSE_FILE && !path.basename(file).startsWith(today)) {
-      return { file, picks: [], reason: `오늘(${today}) 빌드 아님 — ${path.basename(file)} 무시, 코어만` };
-    }
+  const read = async file => {
     const j = JSON.parse(await readFile(file, 'utf8'));
     const picks = (j.picks ?? []).filter(p => p?.code).sort((a, b) => (b.tradeValue ?? 0) - (a.tradeValue ?? 0));
-    return { file, builtAtKST: j.builtAtKST ?? null, picks, reason: picks.length ? null : 'picks 비어 있음' };
+    return { file, builtAtKST: j.builtAtKST ?? null, picks };
+  };
+  try {
+    if (UNIVERSE_FILE) {
+      const r = await read(UNIVERSE_FILE);
+      return { ...r, reason: r.picks.length ? null : 'picks 비어 있음' };
+    }
+    const names = (await readdir(UNIVERSE_DIR)).filter(f => BUILD_FILE_RE.test(f)).sort();
+    if (!names.length) return { file: null, picks: [], reason: '빌더 산출물 없음' };
+    const ok = names.filter(f => inBuildWindow(f, today));
+    if (!ok.length) {
+      const [lo, hi] = buildWindow(today);
+      return { file: null, picks: [], reason: `저녁 빌드 없음(${lo}~${hi} 사이 파일 없음, 최신 ${names.at(-1)}) — 코어만` };
+    }
+    const skipped = [];
+    for (const name of ok.reverse()) {
+      try {
+        const r = await read(path.join(UNIVERSE_DIR, name));
+        if (r.picks.length) return { ...r, reason: skipped.length ? `빈·깨진 빌드 건너뜀: ${skipped.join(', ')}` : null };
+        skipped.push(`${name}(picks 0)`);
+      } catch (e) { skipped.push(`${name}(읽기 실패: ${e.message})`); }
+    }
+    return { file: null, picks: [], reason: `창 안 빌드 ${ok.length}개 모두 후보 없음: ${skipped.join(', ')} — 코어만` };
   } catch (e) {
     return { file: null, picks: [], reason: `빌더 산출물 읽기 실패: ${e.message}` };
   }
@@ -231,7 +266,9 @@ function connect(label, declaration) {
 
 // ---------- 실행 ----------
 const start = kstParts();
-const core = (await pickUniverse()).slice(0, N_CORE);
+const uni = await pickUniverse();
+const core = uni.codes.slice(0, N_CORE);
+if (uni.stale.length) console.log(`코어 제외(마지막 봉이 캐시 최신 ${uni.newest}보다 ${STALE_DAYS}일 넘게 묵음): ${uni.stale.join(', ')}`);
 // 캐시가 깨져 종목이 모자란 경우를 잡는다. --core 를 20 미만으로 준 시험 실행은 그 개수를 기준으로 본다.
 if (core.length < Math.min(20, N_CORE)) throw new Error(`코어 종목 선정 실패(${core.length}개 / 요청 ${N_CORE})`);
 const pk = await loadPicks(start.date);
@@ -245,11 +282,12 @@ const bookPicks = bookCodes.filter(c => pickSet.has(c)).length;
 console.log(`코어 ${core.length} + picks ${pk.picks.length}${pk.reason ? ` (${pk.reason})` : ''} → 체결 ${trade.length}(고유 ${new Set(trade).size})`
   + ` / 호가 ${bookCodes.length}(picks ${bookPicks}, 코어 ${bookCodes.length - bookPicks})`
   + ` / A: 체결 ${A.length} / B: 체결 ${rest.length} + 호가 ${bookCodes.length} / 종료 ${UNTIL} KST`);
-if (pk.file && pk.picks.length) console.log(`picks 출처: ${path.basename(pk.file)} (빌드 ${pk.builtAtKST})${UNIVERSE_FILE && !path.basename(pk.file).startsWith(start.date) ? ' — 경고: 오늘 빌드 아님(직접 지정)' : ''}`);
+if (pk.file && pk.picks.length) console.log(`picks 출처: ${path.basename(pk.file)} (빌드 ${pk.builtAtKST})${UNIVERSE_FILE && !inBuildWindow(path.basename(pk.file), start.date) ? ' — 경고: 저녁 빌드 창 밖(직접 지정)' : ''}`);
 
 const subsRecord = {
   startedAtKST: `${start.date} ${start.hm}`, from: FROM, until: UNTIL, params: { core: N_CORE, nopicks: NO_PICKS, anyday: ANY_DAY },
   picksFile: pk.file ? path.basename(pk.file) : null, picksBuiltAtKST: pk.builtAtKST ?? null, picksReason: pk.reason,
+  coreCacheNewest: uni.newest, coreStaleDropped: uni.stale,
   core, picks: pk.picks.map(p => ({ code: p.code, name: p.name, bucket: p.bucket, tradeValue: p.tradeValue, tickPct: p.tickPct })),
   trade, book: bookCodes, connA: A, connB: { trade: rest, book: bookCodes },
 };
@@ -261,6 +299,17 @@ if (argv.includes('--dry')) {
 // 수집 창 밖이면 토큰 발급·접속 전에 끝낸다(위 사용법 주석).
 if (start.weekend && !ANY_DAY) { console.log(`[${start.date} ${start.hm}] 주말 — 수집하지 않고 종료 (--anyday 로 무시 가능)`); process.exit(0); }
 if (start.hm < FROM || start.hm >= UNTIL) { console.log(`[${start.date} ${start.hm}] 수집 창(${FROM}~${UNTIL} KST) 밖 — 접속하지 않고 종료`); process.exit(0); }
+
+// 동시 실행 방지(run-lock.mjs). 토큰 발급 전에 잡는다.
+const lock = await takeLock(LOCK_FILE, { date: start.date, startedAtKST: `${start.date} ${start.hm}` });
+for (const h of lock.removed) console.log(`묵은 잠금 제거(pid ${h.pid ?? '?'}, ${h.startedAtKST})`);
+if (!lock.ok) {
+  console.log(`[${start.date} ${start.hm}] ${lock.lost ? '다른 수집기와 동시에 시작해 물러남' : '이미 실행 중'}(pid ${lock.held.pid}, 시작 ${lock.held.startedAtKST}) — 접속하지 않고 종료`);
+  process.exit(0);
+}
+process.on('exit', () => releaseLockSync(LOCK_FILE));
+// 남아 있던 중지 요청은 지난 실행 몫이다
+await unlink(STOP_FILE).catch(() => {});
 
 keys = await loadKeys();
 await openSinks(start.date);
@@ -279,16 +328,29 @@ const timer = setInterval(async () => {
     try { await openSinks(date); } catch (e) { stats.errors++; console.log(`저장 파일 다시 열기 실패: ${e.message}`); }
   }
   console.log(`[${date} ${hm}] trade=${stats.trade} book=${stats.book} (표집 제외 ${stats.bookSkipped}) err=${stats.errors} 마지막수신 ${Math.round((Date.now() - stats.lastMsg) / 1000)}초 전`);
-  if (hm >= UNTIL) shutdown();
+  if (hm >= UNTIL) return shutdown('종료 시각 도달');
+  // 잠금을 다른 수집기가 가져갔으면 물러난다(둘이 뜨면 서로의 토큰을 폐기한다). 누가 지웠으면 다시 잡는다.
+  const owner = await lockOwner(LOCK_FILE);
+  if (owner === 'other') shutdown('잠금을 다른 수집기가 가져가 물러남');
+  else if (owner === 'missing' && !stopping) {
+    await writeFile(LOCK_FILE, lockBody({ date: start.date, startedAtKST: `${start.date} ${start.hm}` }), { flag: 'wx' })
+      .then(() => console.log('잠금이 없어져 다시 잡음'), () => {});
+  }
 }, 60000);
+// 제어판(scripts/pc/panel.mjs)의 중지 버튼은 STOP_FILE 을 만든다. 프로세스를 죽이지 않고 파일을 닫고 끝내려는 것.
+const stopWatch = setInterval(() => {
+  if (!existsSync(STOP_FILE)) return;
+  try { unlinkSync(STOP_FILE); } catch { /* 무시 */ }
+  shutdown('중지 요청(제어판)');
+}, 3000);
 
-function shutdown() {
+function shutdown(reason) {
   if (stopping) return;
-  stopping = true; clearInterval(timer);
-  console.log('종료 시각 도달, 정리');
+  stopping = true; clearInterval(timer); clearInterval(stopWatch);
+  console.log(`[${kstParts().date} ${kstParts().hm}] ${reason}, 정리 — trade=${stats.trade} book=${stats.book} err=${stats.errors}`);
   conns.forEach(c => c.close());
   for (const s of sinks.values()) s.gz.end();
   setTimeout(() => process.exit(0), 2000);
 }
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));

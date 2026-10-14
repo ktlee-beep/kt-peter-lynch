@@ -55,3 +55,6 @@ scripts/backtest/universe/
 
 # PC 작업 스케줄러 신호·수집기 실행 기록
 scripts/pc/*.log
+# 수집기 실행 잠금·중지 요청 (stream-collector.mjs, panel.mjs)
+scripts/pc/collector.lock
+scripts/pc/collector.stop

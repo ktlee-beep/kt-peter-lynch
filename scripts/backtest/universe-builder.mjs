@@ -7,8 +7,10 @@
 //   4) 뉴스: 상위 테마명·선정 종목명으로 뉴스 제목을 모아 키워드 빈도를 저장 (신호가 아니라 기록)
 // 저장: scripts/backtest/universe/<기준일>.json  (선정 근거·제외 사유·시세 스냅샷 시각 포함)
 //
-// 주의: 값은 호출 시점의 스냅샷이다. 장 시작 전(08:50) 호출하면 전일 값, 장중 호출하면 당일 진행값이다.
-//       장중에 만든 목록을 같은 날 룩어헤드 없이 쓰려면 asOf(스냅샷 시각) 이후 데이터만 사용해야 한다.
+// 주의: 값은 호출 시점의 스냅샷이다. 평일 저녁(작업 스케줄러 \KT\KT-PeterLynch-Evening, 20:15) 장 마감 뒤에 돌려
+//       그날 하루치 값으로 다음 거래일 후보를 만든다. 장 시작 전 08:50 호출은 거래대금이 0으로 와서 전 종목이 탈락했다
+//       (2026-10-14: passed 0, 스냅샷 1090종목 PREOPEN). 장중 호출은 당일 진행값이라 같은 날 쓰면 룩어헤드다.
+//       수집기는 [직전 평일 15:40, 당일 07:00) 사이 빌드만 자동으로 받는다(stream-collector.mjs loadPicks).
 // 사용: node scripts/backtest/universe-builder.mjs [--slots 60] [--minvalue 3000000000] [--themes 40] [--noNews]
 import { readFile, readdir, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -30,8 +32,8 @@ const MIN_PRICE = parseInt(argOf('minprice', '0'), 10);   // 가격 하드 제�
 const GAP_MS = 250;
 if (!(SLOTS > 0) || !(N_THEMES > 0) || !Number.isFinite(MIN_VALUE) || !(MIN_PRICE >= 0)) throw new Error('인자 오류: --slots/--themes/--minvalue/--minprice는 양수여야 함');
 
-// 아침 작업에서 빌더 다음에 수집기가 뜬다. 빌더가 멈추면 수집기 시작이 장 시작 뒤로 밀리므로 전체 시간에 상한을 둔다
-// (파일을 쓰기 전에 끊기면 수집기는 오늘 빌드가 없다고 보고 코어만으로 시작한다).
+// 네트워크가 걸려 멈춘 채 다음 작업과 겹치지 않도록 전체 시간에 상한을 둔다
+// (파일을 쓰기 전에 끊기면 다음 날 수집기는 저녁 빌드가 없다고 보고 코어만으로 시작한다).
 setTimeout(() => { console.error('전체 시간 8분 초과 — 중단'); process.exit(2); }, 8 * 60_000).unref();
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -179,7 +181,7 @@ for (const { s } of stocks.values()) { const k = `${s.marketStatus}/${s.tradingS
 const out = {
   builtAtKST: `${now.date} ${now.time}`, asOfUTC: asOf, snapshotSessions: sessions,
   params: { slots: SLOTS, minTradeValue: MIN_VALUE, minPrice: MIN_PRICE, themesByValue: N_THEMES, themesByRate: Math.floor(N_THEMES / 2) },
-  note: '값은 호출 시점 스냅샷. 08:50 호출이면 전일 값, 장중이면 당일 진행값(룩어헤드 주의). 임계값은 근거 없는 시작값.',
+  note: '값은 호출 시점 스냅샷. 장 마감 뒤 호출이면 그날 하루치 값(다음 거래일용), 장중이면 당일 진행값(룩어헤드 주의), 장 시작 전이면 거래대금 0. 임계값은 근거 없는 시작값.',
   counts: { themesTotal: byValue.length, themesQueried: picked.size, themesFailed: failedThemes.length, stocksSeen: stocks.size, passed: candidates.length, coreAmongPassed: candidates.filter(c => c.inCore).length, picked: picks.length, shortfall: Math.max(0, SLOTS - picks.length), byBucket: Object.fromEntries([...new Set(picks.map(c => c.bucket))].map(b => [b, picks.filter(c => c.bucket === b).length])) },
   failedThemes,
   excludedByReason: excluded,
