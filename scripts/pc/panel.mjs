@@ -155,7 +155,10 @@ async function collectorLogInfo(today) {
     const m = lines[i].match(STATS_RE);
     if (m && m[1] === today) stats = { at: m[2], trade: +m[3], book: +m[4], bookSkipped: +m[5], errors: +m[6], lastRecvSec: +m[7] };
   }
-  return { stats, recent: lines.slice(-6) };
+  // 수집기가 남긴 정규장 중 무수신 구간(stream-collector.mjs closeGap). 깨진 줄은 건너뛴다.
+  const gaps = (await readFile(path.join(TICKS, today, 'gaps.ndjson'), 'utf8').catch(() => '')).split(/\r?\n/).filter(Boolean)
+    .flatMap(l => { try { const g = JSON.parse(l); return Number.isFinite(g.from) && Number.isFinite(g.to) ? [g] : []; } catch { return []; } });
+  return { stats, recent: lines.slice(-6), gaps };
 }
 
 const subsMemo = new Map();
@@ -641,6 +644,16 @@ function render(s) {
     notes.push('제어판에서 시작한 수집기(pid ' + c.lastLaunch.pid + ')가 ' + hhmm(c.lastLaunch.exitAt) + '에 끝났습니다(종료 코드 ' + c.lastLaunch.exit + ') — 이유는 아래 수집기 로그를 보세요');
   if (c.orphanLock) notes.push('남은 잠금(pid ' + c.orphanLock.pid + ')이 있지만 그 pid 는 수집기가 아닙니다 — [수집 시작]을 누르면 치우고 시작합니다');
   if (c.lockError) notes.push(c.lockError);
+  // 덮개를 한 번 닫으면 연결마다 한 줄씩 남으므로 같은 시간대는 한 곳으로 묶는다. 분은 정규장과 겹친 시간(sessionSec).
+  const gapRows = [];
+  for (const g of s.log.gaps || []) {
+    const key = hhmm(g.from) + '~' + hhmm(g.to), row = gapRows.find(r => r.key === key);
+    if (!row) gapRows.push({ key: key, conns: [g.conn || '연결'], g: g });
+    else if (row.conns.indexOf(g.conn) < 0) row.conns.push(g.conn);
+  }
+  if (gapRows.length) notes.push('오늘 장중에 끊긴 구간 ' + gapRows.length + '곳: ' + gapRows.slice(-3).map(r => r.conns.join('·') + ' ' + r.key
+    + '(장중 ' + Math.max(1, Math.round((Number.isFinite(r.g.sessionSec) ? r.g.sessionSec : (r.g.to - r.g.from) / 1000) / 60)) + '분, '
+    + (r.g.reason || '사유 모름') + ')').join(' / ') + ' — 그 시간에 해당 연결이 맡은 종목의 체결이 비어 있습니다');
   if (!c.running && c.hiddenNodes) notes.push('명령줄을 확인할 수 없는 node 프로세스가 ' + c.hiddenNodes + '개 있어 제어판에서는 시작하지 않습니다(관리자 권한 프로그램 등)');
   $('cBadge').className = 'badge ' + badge; $('cBadge').textContent = text; $('cDetail').textContent = detail + (notes.length ? ' · ' + notes.join(' · ') : '');
   $('nTrade').textContent = st ? fmt(st.trade) : '-';
@@ -722,7 +735,7 @@ function renderSwing(w) {
   const why = p => '<span class="small">' + esc((p.fired || []).join(', ')) + '</span>';
   const name = p => esc(p.name) + ' <span class="muted small">' + esc(p.code) + '</span>';
   const buy = j.today.signals;
-  $('swBuy').innerHTML = buy.map(p => '<tr><td>' + name(p) + (p.skip ? ' <span class="badge b-idle small">' + esc(p.skip) + ' — 안 삼</span>' : '') + '</td><td class="r">' + p.score + '</td><td class="r">' + fmt(p.close) + '</td><td>' + why(p) + '</td></tr>').join('')
+  $('swBuy').innerHTML = buy.map(p => '<tr><td>' + name(p) + (p.skip ? ' <span class="badge b-idle small">' + esc(p.skip) + ' — 안 삼</span>' : '') + (p.caution ? '<br><span class="small" style="color:var(--warn)">[주의] ' + esc(p.caution) + ' — 실매수 보류</span>' : '') + '</td><td class="r">' + p.score + '</td><td class="r">' + fmt(p.close) + '</td><td>' + why(p) + '</td></tr>').join('')
     || '<tr><td colspan="4" class="muted">' + md(j.today.date) + ' 종가 기준 신호 없음</td></tr>';
   const halted = p => p.halted ? ' <span class="badge b-idle small">' + md(p.halted) + ' 뒤 거래 없음</span>' : '';
   $('swHold').innerHTML = j.positions.open.map(p => '<tr><td>' + name(p) + halted(p) + '</td><td>' + md(p.entryDate) + '</td><td class="r">' + fmt(p.entryPrice) + '</td><td class="r">' + fmt(p.lastPrice) + '</td><td class="r">' + p.day + '/' + j.rules.hold + '</td><td class="r">' + pct(p.ret) + '</td><td class="r">' + pct(p.mae) + '</td><td class="r">' + pct(p.excess, '%p') + '</td></tr>').join('')

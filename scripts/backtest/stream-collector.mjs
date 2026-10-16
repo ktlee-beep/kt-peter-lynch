@@ -30,7 +30,7 @@
 //
 // 실행 제어: 시작할 때 scripts/pc/collector.lock 을 잡는다(이미 살아 있는 수집기가 있으면 접속 없이 종료).
 //   scripts/pc/collector.stop 파일이 생기면 3초 안에 파일을 닫고 끝낸다(제어판 중지 버튼). 둘 다 gitignored.
-import { readFile, readdir, mkdir, writeFile, unlink } from 'node:fs/promises';
+import { readFile, readdir, mkdir, writeFile, unlink, appendFile } from 'node:fs/promises';
 import { createWriteStream, existsSync, unlinkSync } from 'node:fs';
 import { createGzip, constants as zc } from 'node:zlib';
 import path from 'node:path';
@@ -206,14 +206,62 @@ async function openSinks(date) {
 const write = (name, row) => sinks.get(name).gz.write(JSON.stringify(row) + '\n');
 setInterval(() => { for (const s of sinks.values()) s.gz.flush(zc.Z_SYNC_FLUSH); }, 5000);   // 비정상 종료 시 손실 상한 약 5초
 
+// ---------- 공백 기록 ----------
+// 정규장(KRX 연속매매 09:00~15:20 KST)과 GAP_MS 넘게 겹치는 연결별 무수신 구간을 로그 [공백] 줄과
+// ticks/<날짜>/gaps.ndjson 에 남긴다. 2026-10-15 덮개를 닫아(시스템 로그 Kernel-Power 506 사유 Lid) 09:21~13:54 에
+// 아무것도 받지 못했는데 상태 줄은 err=0 이어서 그날 파일 크기를 보고서야 알았다. 덮개·전원 단추 절전은 프로그램이
+// 막을 수 없으므로(SetThreadExecutionState 문서) 막는 대신 빠진 구간을 기록한다. 장 전후(NXT)는 체결이 드물어 재지 않는다.
+const GAP_MS = 60000, SESSION_MIN = [9 * 60, 15 * 60 + 20], KST_MS = 9 * 3600e3, DAY_MS = 86400e3;
+const kstHm = ms => new Date(ms + KST_MS).toISOString().slice(11, 16);
+const kstDay = ms => new Date(ms + KST_MS).toISOString().slice(0, 10);
+const dayStart = ms => Math.floor((ms + KST_MS) / DAY_MS) * DAY_MS - KST_MS;   // 그날 KST 자정(ms)
+const inSession = ms => { const m = Math.floor(((ms + KST_MS) % DAY_MS) / 60e3); return m >= SESSION_MIN[0] && m < SESSION_MIN[1]; };
+const lastBy = new Map();      // 연결 이름 -> 마지막 수신 시각
+const gapWhy = new Map();      // 연결 이름 -> 지금 이어지는 무수신 동안 생긴 일(연결 실패·끊김·PC 멈춤)
+const gapSum = { n: 0, maxSec: 0 };
+let timerAt = Date.now();      // 분 점검이 마지막으로 돈 시각. 90초 넘게 밀렸으면 그동안 PC 가 멈춰 있었다.
+let sessionDay0 = 0;           // 정규장 중 수신이 있었던 마지막 날의 KST 자정. 그날 첫 수신 전의 무수신은 휴장·늦은 개장일 수 있다.
+const noteGap = (label, why) => { if (!gapWhy.has(label)) gapWhy.set(label, new Set()); gapWhy.get(label).add(why); };
+// [from, to] 가 평일 정규장과 겹치는 시간(ms). 덮개를 닫은 채 날을 넘길 수 있어 날마다 더한다.
+function sessionOverlap(from, to) {
+  let ms = 0;
+  for (let d0 = dayStart(from); d0 < to; d0 += DAY_MS) {
+    const wd = new Date(d0 + KST_MS).getUTCDay();
+    if (wd === 0 || wd === 6) continue;
+    ms += Math.max(0, Math.min(to, d0 + SESSION_MIN[1] * 60e3) - Math.max(from, d0 + SESSION_MIN[0] * 60e3));
+  }
+  return ms;
+}
+function closeGap(label, from, to, tail = '') {
+  const why = gapWhy.get(label) ?? new Set();
+  gapWhy.delete(label);
+  if (to - timerAt > 90000) why.add('PC 멈춤(덮개 닫힘·절전 등)');
+  const overlap = sessionOverlap(from, to);
+  if (overlap < GAP_MS) return;
+  // 연결도 멀쩡했고 그날 정규장 수신이 아직 한 건도 없었다면 끊김이 아니라 장이 안 열린 것일 수 있다.
+  const quiet = sessionDay0 !== dayStart(to) ?'정규장 수신 0건(휴장일·늦은 개장이 아니면 구독 이상)' : '수신 없음(연결은 유지)';
+  const sec = Math.round((to - from) / 1000), sessionSec = Math.round(overlap / 1000), reason = ([...why].join(', ') || quiet) + tail;
+  gapSum.n++; gapSum.maxSec = Math.max(gapSum.maxSec, sessionSec);
+  console.log(`[공백] ${label} ${kstHm(from)}~${kstHm(to)} 장중 ${Math.round(sessionSec / 60)}분(전체 ${sec}초) — ${reason}`);
+  // 부가 기록이다 — 저장에 실패해도 수집은 계속한다. 날짜 폴더는 from 기준.
+  appendFile(path.join(OUT_ROOT, kstDay(from), 'gaps.ndjson'), JSON.stringify({ conn: label, from, to, sec, sessionSec, reason }) + '\n')
+    .catch(e => { stats.errors++; console.log(`공백 기록 저장 실패: ${e.message}`); });
+}
+
 // ---------- 연결 ----------
 const stats = { trade: 0, book: 0, bookSkipped: 0, errors: 0, lastMsg: Date.now() };
 const lastBook = new Map();
 const num = x => +x;
 
-function handle(frame) {
+function handle(frame, label) {
   if (frame.type === 'message') {
     stats.lastMsg = Date.now();
+    const prev = lastBy.get(label) ?? stats.lastMsg;
+    lastBy.set(label, stats.lastMsg);
+    if (stats.lastMsg - prev >= GAP_MS) closeGap(label, prev, stats.lastMsg);
+    else if (gapWhy.has(label)) gapWhy.delete(label);
+    // 메시지마다 도는 줄이라 산술만 쓴다. 그날 정규장 첫 수신 뒤에는 첫 비교에서 바로 빠진다.
+    if (stats.lastMsg - sessionDay0 >= DAY_MS && inSession(stats.lastMsg)) sessionDay0 = dayStart(stats.lastMsg);
     const [ch, , code] = frame.topic.split(':');
     const d = frame.data, recv = Date.now();
     if (ch === 'trade') { write('trade', [recv, code, num(d.price), num(d.volume), Date.parse(d.timestamp)]); stats.trade++; }
@@ -236,6 +284,8 @@ function handle(frame) {
 let stopping = false;
 function connect(label, declaration) {
   let backoff = 1000, ws = null, ping = null;
+  // 첫 수신 전부터 재야 시작부터 붙지 못한 구간(2026-10-15 08:50~ 토큰 403)도 공백으로 잡힌다.
+  lastBy.set(label, Date.now());
   const open = async () => {
     if (stopping) return;
     let used;
@@ -243,10 +293,14 @@ function connect(label, declaration) {
       if (!token) await ensureToken();
       used = token;
       ws = new WebSocket(WS_URL, { headers: { Authorization: `Bearer ${used}` } });
-    } catch (e) { console.log(`${label} 연결 준비 실패: ${e.message}`); setTimeout(open, backoff = Math.min(backoff * 2, 30000)); return; }
+    } catch (e) {
+      // 연결을 못 여는 것도 오류로 센다 — 2026-10-15 토큰 403 이 30분 반복되는 동안 상태 줄은 err=0 이었다.
+      stats.errors++; noteGap(label, `연결 준비 실패(${e.message})`);
+      console.log(`${label} 연결 준비 실패: ${e.message}`); setTimeout(open, backoff = Math.min(backoff * 2, 30000)); return;
+    }
     let openedAt = 0;
     ws.onopen = () => { openedAt = Date.now(); ws.send(JSON.stringify(declaration)); console.log(`${label} 연결됨`); ping = setInterval(() => ws.readyState === 1 && ws.send('PING'), 50000); };
-    ws.onmessage = e => { try { handle(JSON.parse(String(e.data))); } catch (err) { stats.errors++; } };
+    ws.onmessage = e => { try { handle(JSON.parse(String(e.data)), label); } catch (err) { stats.errors++; } };
     ws.onerror = () => { /* onclose에서 처리 */ };
     ws.onclose = e => {
       clearInterval(ping);
@@ -255,6 +309,8 @@ function connect(label, declaration) {
       if (!openedAt && token === used) token = null;
       // 붙자마자 끊기는 상황(선언 거부 등)이 1초 간격 재접속으로 하루 종일 돌지 않도록, 오래 붙어 있던 연결만 대기를 되돌린다.
       if (openedAt && Date.now() - openedAt >= STABLE_MS) backoff = 1000;
+      if (!openedAt) stats.errors++;   // 접속 거부(토큰 폐기 등)도 err 로 센다 — 연결 준비 실패와 같은 취급
+      noteGap(label, openedAt ? `연결 끊김(code ${e.code})` : `접속 거부(code ${e.code})`);
       console.log(`${label} 종료 code=${e.code}, ${backoff}ms 후 재연결`);
       setTimeout(open, backoff);
       backoff = Math.min(backoff * 2, 30000);
@@ -322,12 +378,26 @@ const conns = [
   connect('연결B', [{ id: 'B' }, ...declB]),
 ];
 
+timerAt = Date.now();
 const timer = setInterval(async () => {
   const { date, hm } = kstParts();
+  // 60초 점검이 90초 넘게 밀렸으면 그동안 PC 가 멈춰 있었다(덮개 닫힘·절전). 그 사이 모든 연결이 못 받았다.
+  const now = Date.now();
+  if (now - timerAt > 90000) {
+    console.log(`[멈춤] ${kstHm(timerAt)}~${kstHm(now)} ${Math.round((now - timerAt) / 60000)}분 동안 PC가 멈춰 있었음(덮개 닫힘·절전 등) — 그동안 수집도 멈춤`);
+    // 깨어난 뒤 이미 받아서 공백을 마감한 연결에는 달지 않는다(묵은 사유가 다음 공백에 섞이지 않게).
+    for (const [l, t] of lastBy) if (t <= timerAt) noteGap(l, 'PC 멈춤(덮개 닫힘·절전 등)');
+  }
+  timerAt = now;
+  // 다른 연결이 받고 있으면 마지막수신은 0초라 한 연결만 끊긴 것이 안 보인다 — 장중 진행 중인 무수신을 따로 적는다.
+  const live = inSession(now) ? [...lastBy].filter(([, t]) => now - t >= GAP_MS).map(([l, t]) => `${l} ${Math.round((now - t) / 60000)}분`) : [];
   if (date !== sinkDate || sinkBroken) {
     try { await openSinks(date); } catch (e) { stats.errors++; console.log(`저장 파일 다시 열기 실패: ${e.message}`); }
   }
-  console.log(`[${date} ${hm}] trade=${stats.trade} book=${stats.book} (표집 제외 ${stats.bookSkipped}) err=${stats.errors} 마지막수신 ${Math.round((Date.now() - stats.lastMsg) / 1000)}초 전`);
+  // 끝의 공백 표시는 제어판 STATS_RE(끝 고정 없음) 뒤에 붙는다 — 공백이 없으면 예전 형식 그대로다.
+  console.log(`[${date} ${hm}] trade=${stats.trade} book=${stats.book} (표집 제외 ${stats.bookSkipped}) err=${stats.errors} 마지막수신 ${Math.round((Date.now() - stats.lastMsg) / 1000)}초 전`
+    + (gapSum.n ? ` · 공백 ${gapSum.n}회(장중 최대 ${Math.round(gapSum.maxSec / 60)}분)` : '')
+    + (live.length ? ` · 무수신 진행 중 ${live.join(', ')}` : ''));
   if (hm >= UNTIL) return shutdown('종료 시각 도달');
   // 잠금을 다른 수집기가 가져갔으면 물러난다(둘이 뜨면 서로의 토큰을 폐기한다). 누가 지웠으면 다시 잡는다.
   const owner = await lockOwner(LOCK_FILE);
@@ -347,7 +417,11 @@ const stopWatch = setInterval(() => {
 function shutdown(reason) {
   if (stopping) return;
   stopping = true; clearInterval(timer); clearInterval(stopWatch);
-  console.log(`[${kstParts().date} ${kstParts().hm}] ${reason}, 정리 — trade=${stats.trade} book=${stats.book} err=${stats.errors}`);
+  // 끝날 때까지 이어진 무수신(정규장 중 끊긴 채 종료)도 남긴다.
+  const now = Date.now();
+  for (const [l, t] of lastBy) if (now - t >= GAP_MS) closeGap(l, t, now, ' — 종료 시점까지 이어짐');
+  console.log(`[${kstParts().date} ${kstParts().hm}] ${reason}, 정리 — trade=${stats.trade} book=${stats.book} err=${stats.errors}`
+    + (gapSum.n ? ` 공백 ${gapSum.n}회(장중 최대 ${Math.round(gapSum.maxSec / 60)}분)` : ''));
   conns.forEach(c => c.close());
   for (const s of sinks.values()) s.gz.end();
   setTimeout(() => process.exit(0), 2000);

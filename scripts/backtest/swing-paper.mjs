@@ -222,6 +222,12 @@ async function main() {
     let free = SLOTS - positions.filter(p => p.status === 'pending' || p.status === 'open').length;
     for (const c of cands) {
       const sig = { date: D, code: c.st.code, name: c.st.name, score: c.score, close: c.close, fired: c.fired };
+      // 최근 20봉 안에 거래정지 봉(시가 0 또는 거래량 0)이 있으면 수정주가가 아직 소급되지 않았을 수 있다. 장부 규칙은
+      // 그대로 두고 경고만 단다(2026-10-14 좋은사람들 033340: 감자 뒤 재개일이 +473%로 보여 가짜 신호, 다음 날 시세
+      // 수정으로 사라짐. 정지봉은 시가 0 으로도, 시가는 있고 거래량 0 으로도 온다 — 033340 20260911 o=2400 v=0).
+      let halts = 0;
+      for (let k = Math.max(0, c.i - 19); k <= c.i; k++) if (!(c.st.opens[k] > 0) || !(c.st.volumes[k] > 0)) halts++;
+      if (halts) sig.caution = `최근 20일 중 ${halts}일 거래 없음·정지 — 수정주가 반영 전일 수 있음`;
       if (busy.has(c.st.code)) sig.skip = '보유 중';
       else if (free <= 0) sig.skip = '자리 없음';
       else {
@@ -326,7 +332,7 @@ async function main() {
   if (fetchInfo && dayOver && !seen.has(lastDate)) {
     await appendFile(ledgerFile, JSON.stringify({ date: lastDate, recordedAt: now.stamp, rulesVersion: RULES_VERSION,
       fetchFails: fetchInfo.failCodes,
-      signals: today.map(s => ({ code: s.code, score: s.score, close: s.close, taken: !s.skip })) }) + '\n');
+      signals: today.map(s => ({ code: s.code, score: s.score, close: s.close, taken: !s.skip, ...(s.caution ? { caution: s.caution } : {}) })) }) + '\n');
     wroteToday = true;
   }
   result.ledger = { days: ledger.length + (wroteToday ? 1 : 0), diff, wroteToday };
@@ -336,7 +342,7 @@ async function main() {
 
   const s = result.summary;
   console.log(`데이터 ${lastDate}까지 · ${stocks.length}종목 · 전진 구간 ${days.length}거래일` + (dropped.length ? ` · 제외 ${dropped.length}` : ''));
-  console.log(`오늘 신호 ${today.length}건: ${today.map(x => `${x.name}(${x.score}${x.skip ? `, ${x.skip}` : ''})`).join(', ') || '없음'}`);
+  console.log(`오늘 신호 ${today.length}건: ${today.map(x => `${x.name}(${x.score}${x.skip ? `, ${x.skip}` : ''}${x.caution ? `, [주의] ${x.caution}` : ''})`).join(', ') || '없음'}`);
   console.log(`장부 — 대기 ${s.pending} · 보유 ${s.open} · 청산 ${s.closed}(평균 ${s.closedAvg ?? '-'}%) · 손익 ${s.total.toLocaleString('ko-KR')}원(${s.totalPct}%)`);
   console.log(`규칙 전체 — 신호 ${s.ruleSignals}건 · 20일 채운 것 ${s.ruleClosed}건 평균 ${s.ruleAvg ?? '-'}% · 대조군 대비 ${s.ruleExcess ?? '-'}%p`);
   console.log(`신호 원장 ${result.ledger.days}일` + (wroteToday ? ` · ${lastDate} 기록` : ' · 이번에는 기록 안 함(시세 미갱신 또는 20:05 전)'));
