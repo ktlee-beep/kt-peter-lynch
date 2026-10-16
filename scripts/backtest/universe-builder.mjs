@@ -1,8 +1,9 @@
 // 일일 단타 후보 유니버스 빌더 (읽기 전용. 주문·토스 호출 없음 -> 가동 중인 웹소켓 수집기의 토큰과 충돌하지 않는다).
 //
 // 소스: 네이버 증권 테마 내부 API(비공식, 호출 최소화) + 네이버 검색 오픈API(공식, 뉴스)
-//   1) 테마 목록(거래대금순 상위 + 등락률순 상위) -> 각 테마의 구성종목(거래대금순 100)
-//   2) 종목 단위 필터: ETF 제외 / 종가 5,000원 미만 제외 / 거래대금 하한 미만 제외 / 투자경고·관리·거래정지 제외
+//   1) 테마 목록(거래대금순 상위 + 등락률순 상위) -> 각 테마의 구성종목(KOSPI·KOSDAQ 각각, 시장당 최대 300)
+//   2) 종목 단위 필터: 주식 외(ETF 등) 제외 / 거래대금 하한 미만 제외 / 거래 불가(정지 등) 제외 / 스팩 제외
+//      (관리종목·투자경고 제외는 2026-10-15 네이버 응답 변경으로 필드가 없어져 하지 못한다 — themeStocks 주석)
 //   3) 기존 코어 풀(일봉 캐시 122종목)에 없는 종목 중 거래대금 상위 SLOTS개를 소형주 슬롯으로 선정
 //   4) 뉴스: 상위 테마명·선정 종목명으로 뉴스 제목을 모아 키워드 빈도를 저장 (신호가 아니라 기록)
 // 저장: scripts/backtest/universe/<기준일>.json  (선정 근거·제외 사유·시세 스냅샷 시각 포함)
@@ -60,31 +61,48 @@ const kst = () => {
 async function themeList(sortType) {
   const out = []; let cursor = '';
   for (let page = 0; page < 3; page++) {
-    const j = await getJson(`${NAVER}/stockSecurity/rankings/v2/domestic/themes?sortType=${sortType}&size=100&period=daily${cursor ? `&cursor=${cursor}` : ''}`);
+    const j = await getJson(`${NAVER}/stockSecurity/rankings/v2/domestic/themes?sortType=${sortType}&size=100&period=daily${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
     out.push(...j.items);
     if (!j.hasNext || !j.cursor) break;
     cursor = j.cursor; await sleep(GAP_MS);
   }
   return out;
 }
+// 2026-10-15 네이버가 구성종목 API 형식을 바꿨다(그날 저녁 60개 테마 전부 HTTP 400 -> 다음 날 수집기 picks 0).
+//   marketType=ALL 거부(KOSPI|KOSDAQ만) / 배열 -> {items, hasNext, cursor} / pageSize 무시, size 사용 /
+//   값은 krx{currentPrice, tradingValue, marketCap, tradableStatus..}와 nxt{..}로 나뉨. nxt는 KRX를 포함한 통합값이 아니다
+//   (2026-10-16 삼성전자 거래대금 nxt 2.78조 < krx 3.90조). 정렬은 priceTop이라도 시가총액 내림차순이었다.
+//   예전 응답의 관리종목(manageStatusGb)·시장경보(marketAlertType)·상장일 필드는 새 응답에 없어 그 두 제외는 하지 못한다.
+//   거래대금·가격은 예전과 같이 KRX 값을 쓰고, 넥스트레이드 값은 nxtTradeValue 로 기록만 한다.
+const truncatedThemes = [];          // 3쪽을 넘겨 잘린 테마 — 시총 내림차순이라 소형주가 빠진다
 async function themeStocks(code) {
-  const j = await getJson(`${NAVER}/domestic/market/theme/${code}/stocklist?marketType=ALL&orderType=priceTop&startIdx=0&pageSize=100`);
-  if (!Array.isArray(j)) throw new Error(`구성종목 응답이 배열이 아님 (테마 ${code}): ${JSON.stringify(j).slice(0, 120)}`);
-  return j;
+  const out = [];
+  for (const market of ['KOSPI', 'KOSDAQ']) {
+    let cursor = '';
+    for (let page = 0; page < 3; page++) {
+      const j = await getJson(`${NAVER}/domestic/market/theme/${code}/stocklist?marketType=${market}&orderType=priceTop&size=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+      if (!Array.isArray(j?.items)) throw new Error(`구성종목 응답 형식이 다름 (테마 ${code} ${market}): ${JSON.stringify(j).slice(0, 120)}`);
+      out.push(...j.items);
+      if (!j.hasNext || !j.cursor) break;
+      if (page === 2) { truncatedThemes.push(`${code}/${market}`); console.log(`테마 ${code} ${market}: 3쪽(300종목) 뒤가 남아 잘림`); break; }
+      cursor = j.cursor; await sleep(GAP_MS);
+    }
+    await sleep(GAP_MS);
+  }
+  return out;
 }
 
 // ---------- 2) 종목 필터 ----------
 function exclusion(s) {
-  if (s.etfType) return 'ETF';
-  const price = Number(s.nowPrice);
-  if (!Number.isFinite(price) || price < MIN_PRICE) return `현재가<${MIN_PRICE}`;
-  if (s.tradeStopYn !== 'N') return '거래정지';
-  if (s.manageStatusGb !== '0') return `관리(${s.manageStatusGb})`;
-  if (s.marketAlertType !== '00') return `시장경보(${s.marketAlertType})`;
-  if (s.tradableStatus !== 'tradable') return `거래불가(${s.tradableStatusCode})`;
-  if (!(Number(s.tradeAmount) >= MIN_VALUE)) return '거래대금하한미달';
-  if (!(Number(s.marketSum) > 0)) return '시총없음';
-  if (/스팩|\d+호$/.test(s.itemname)) return '스팩';
+  if (s.stockEndType !== 'stock') return `종목유형(${s.stockEndType})`;
+  const k = s.krx;
+  if (!k) return 'KRX시세없음';
+  const price = Number(k.currentPrice);
+  if (!Number.isFinite(price) || price <= 0 || price < MIN_PRICE) return `현재가<${MIN_PRICE}`;
+  if (k.tradableStatus !== 'tradable') return `거래불가(${k.tradableStatusCode})`;
+  if (!(Number(k.tradingValue) >= MIN_VALUE)) return '거래대금하한미달';
+  if (!(Number(k.marketCap) > 0)) return '시총없음';
+  if (/스팩|\d+호$/.test(s.itemName)) return '스팩';
   return null;
 }
 const tickOf = p => p < 2000 ? 1 : p < 5000 ? 5 : p < 20000 ? 10 : p < 50000 ? 50 : p < 200000 ? 100 : p < 500000 ? 500 : 1000;   // KRX 호가단위(두 시장 동일, 2023.1.25 이후)
@@ -136,9 +154,10 @@ for (const t of picked.values()) {
   let rows;
   try { rows = await themeStocks(t.code); } catch (e) { console.log(`테마 ${t.code} 실패: ${e.message}`); failedThemes.push({ code: t.code, name: t.name, error: e.message }); continue; }
   for (const s of rows) {
-    const e = stocks.get(s.itemcode) || { s, themes: [] };
-    e.themes.push({ code: t.code, name: t.name });
-    stocks.set(s.itemcode, e);
+    if (!s?.itemCode) continue;
+    const e = stocks.get(s.itemCode) || { s, themes: [] };
+    if (!e.themes.some(x => x.code === t.code)) e.themes.push({ code: t.code, name: t.name });
+    stocks.set(s.itemCode, e);
   }
   await sleep(GAP_MS);
 }
@@ -147,10 +166,11 @@ const excluded = {}, candidates = [];
 for (const [code, { s, themes }] of stocks) {
   const why = exclusion(s);
   if (why) { excluded[why] = (excluded[why] || 0) + 1; continue; }
+  const price = Number(s.krx.currentPrice), cap = Number(s.krx.marketCap);
   candidates.push({
-    code, name: s.itemname, market: s.sosok === '0' ? 'KOSPI' : 'KOSDAQ', price: Number(s.nowPrice), changeRate: Number(s.prevChangeRate),
-    tradeValue: Number(s.tradeAmount), marketCap: Number(s.marketSum), bucket: sizeBucket(Number(s.marketSum)),
-    listedDate: s.listedDate, priceBand: Number(s.nowPrice) < 1000 ? '1천미만' : Number(s.nowPrice) < 2000 ? '1천~2천' : Number(s.nowPrice) < 5000 ? '2천~5천' : '5천+', tickPct: +(tickOf(Number(s.nowPrice)) / Number(s.nowPrice) * 100).toFixed(3), inCore: core.has(code), themes,
+    code, name: s.itemName, market: s.marketType, price, changeRate: Number(s.krx.changeRate),
+    tradeValue: Number(s.krx.tradingValue), nxtTradeValue: s.nxt ? Number(s.nxt.tradingValue) : null, marketCap: cap, bucket: sizeBucket(cap),
+    newlyListed: !!s.isNewlyListed, priceBand: price < 1000 ? '1천미만' : price < 2000 ? '1천~2천' : price < 5000 ? '2천~5천' : '5천+', tickPct: +(tickOf(price) / price * 100).toFixed(3), inCore: core.has(code), themes,
   });
 }
 candidates.sort((a, b) => b.tradeValue - a.tradeValue);
@@ -177,12 +197,13 @@ if (!NO_NEWS) {
 }
 
 const sessions = {};
-for (const { s } of stocks.values()) { const k = `${s.marketStatus}/${s.tradingSessionType}`; sessions[k] = (sessions[k] || 0) + 1; }
+// 새 응답에는 장 상태 필드가 없어 KRX 거래 가능 상태 코드와 그 갱신 날짜로 대신 남긴다.
+for (const { s } of stocks.values()) { const k = `${s.krx?.tradableStatusCode}/${String(s.krx?.tradableStatusUpdatedAt ?? '').slice(0, 10)}`; sessions[k] = (sessions[k] || 0) + 1; }
 const out = {
   builtAtKST: `${now.date} ${now.time}`, asOfUTC: asOf, snapshotSessions: sessions,
   params: { slots: SLOTS, minTradeValue: MIN_VALUE, minPrice: MIN_PRICE, themesByValue: N_THEMES, themesByRate: Math.floor(N_THEMES / 2) },
   note: '값은 호출 시점 스냅샷. 장 마감 뒤 호출이면 그날 하루치 값(다음 거래일용), 장중이면 당일 진행값(룩어헤드 주의), 장 시작 전이면 거래대금 0. 임계값은 근거 없는 시작값.',
-  counts: { themesTotal: byValue.length, themesQueried: picked.size, themesFailed: failedThemes.length, stocksSeen: stocks.size, passed: candidates.length, coreAmongPassed: candidates.filter(c => c.inCore).length, picked: picks.length, shortfall: Math.max(0, SLOTS - picks.length), byBucket: Object.fromEntries([...new Set(picks.map(c => c.bucket))].map(b => [b, picks.filter(c => c.bucket === b).length])) },
+  counts: { themesTotal: byValue.length, themesQueried: picked.size, themesFailed: failedThemes.length, themesTruncated: truncatedThemes.length, stocksSeen: stocks.size, passed: candidates.length, coreAmongPassed: candidates.filter(c => c.inCore).length, picked: picks.length, shortfall: Math.max(0, SLOTS - picks.length), byBucket: Object.fromEntries([...new Set(picks.map(c => c.bucket))].map(b => [b, picks.filter(c => c.bucket === b).length])) },
   failedThemes,
   excludedByReason: excluded,
   picks,
@@ -195,3 +216,5 @@ await writeFile(file, JSON.stringify(out, null, 1));
 console.log(`저장 ${file}`);
 console.log(JSON.stringify({ counts: out.counts, excludedByReason: excluded, snapshotSessions: sessions }));
 if (stocks.size === 0 || failedThemes.length > picked.size / 2) { console.error('수집 실패 비율이 높아 비정상 종료'); process.exitCode = 1; }
+// 응답 안쪽 형식이 또 바뀌면 테마 실패 없이 전 종목이 제외돼 후보가 0이 된다 — 그것도 실패로 남긴다
+else if (picks.length === 0) { console.error('후보 0 — 응답 형식 변경 또는 필터 이상 의심, 비정상 종료'); process.exitCode = 1; }
