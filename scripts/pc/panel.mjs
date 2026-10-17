@@ -31,7 +31,8 @@ const STOP_FILE = path.join(HERE, 'collector.stop');
 const TICKS = path.join(BT, 'ticks'), UNIVERSE = path.join(BT, 'universe'), CACHE = path.join(BT, 'cache');
 const SWING = path.join(BT, 'swing-paper.mjs'), SWING_OUT = path.join(BT, 'paper', 'swing.json'), SWING_LOCK = path.join(BT, 'paper', 'swing.lock');
 const SWING_COOLDOWN_MS = 10 * 60 * 1000;                 // 네이버 일봉 120여 건 호출 — 저녁 작업이 매일 돌리므로 손으로는 가끔만
-const LOGS = { collector: 'collector.log', universe: 'universe.log', swing: 'swing.log', morning: 'morning.log', evening: 'evening.log', panel: 'panel.log' };
+const TRADER = path.join(HERE, 'trader', 'server.mjs');
+const LOGS = { collector: 'collector.log', universe: 'universe.log', swing: 'swing.log', trader: 'trader.log', morning: 'morning.log', evening: 'evening.log', panel: 'panel.log' };
 const COLLECT_FROM = '07:00', COLLECT_UNTIL = '20:05';   // stream-collector.mjs 기본 수집 창과 같게
 const BUILD_BLOCK = ['07:00', '15:40'];                   // 평일 이 사이 빌드는 어느 수집에도 안 쓰인다(build-window.mjs)
 const BUILD_COOLDOWN_MS = 30 * 60 * 1000;                 // 네이버 테마 내부 API 호출 최소화
@@ -280,10 +281,10 @@ async function status() {
 }
 
 // ---------- 동작 ----------
-function launch(script, logName) {
+function launch(script, logName, args = []) {
   const fd = openSync(path.join(HERE, logName), 'a');
   try {
-    const child = spawn(process.execPath, [script], { cwd: ROOT, detached: true, stdio: ['ignore', fd, fd], windowsHide: true });
+    const child = spawn(process.execPath, [script, ...args], { cwd: ROOT, detached: true, stdio: ['ignore', fd, fd], windowsHide: true });
     child.unref();
     return child;
   } finally { closeSync(fd); }
@@ -397,6 +398,21 @@ async function runSwing() {
   } finally { swingStarting = false; }
 }
 
+// 실시간 매매 화면(trader/server.mjs) — 모의 주문만. 이미 떠 있으면 그 프로그램이 창만 다시 열고 스스로 끝난다.
+// 장중(평일 08:50~20:05)에는 수집기 시세(127.0.0.1:4791)에 붙고, 그 밖에는 마지막 기록 날을 재생한다.
+let traderAt = 0;
+async function openTrader() {
+  if (Date.now() - traderAt < 5000) return [429, { message: '방금 열었습니다. 창이 뜰 때까지 잠시 기다려 주세요.' }];
+  traderAt = Date.now();
+  const now = kst();
+  await appendFile(path.join(HERE, LOGS.trader), `[${now.date} ${now.hm}] 제어판에서 매매 화면 열기
+`).catch(() => {});
+  // 제어판을 시험용(--no-open)으로 띄웠으면 매매 화면도 창 없이 띄운다
+  const child = launch(TRADER, LOGS.trader, argv.includes('--no-open') ? ['--no-open'] : []);
+  child.on('error', e => panelLog(`매매 화면 실행 실패: ${e.message}`));
+  return [200, { message: '매매 화면을 엽니다(모의 주문). 새 창이 뜹니다.' }];
+}
+
 // ---------- 서버 ----------
 function startServer() {
   let lastReq = Date.now();
@@ -437,6 +453,7 @@ function startServer() {
         else if (url.pathname === '/api/collector/stop') r = await stopCollector(j.force === true);
         else if (url.pathname === '/api/universe/build') r = await buildUniverse();
         else if (url.pathname === '/api/swing/run') r = await runSwing();
+        else if (url.pathname === '/api/trader/open') r = await openTrader();
         else r = [404, { message: '없음' }];
         return send(res, r[0], r[1]);
       }
@@ -534,6 +551,12 @@ footer{font-size:13px;color:var(--muted);margin:6px 2px 30px}
 <header><h1>KT 매매 제어판</h1><span class="muted small" id="clock">불러오는 중</span></header>
 
 <section class="card">
+  <h2>실시간 매매 화면 <span class="muted small">호가·체결·주문 · 모의 주문(실주문은 승인 전 꺼짐)</span></h2>
+  <div class="small muted">장중에는 수집기 시세로 초 단위 매매 연습, 장 밖에는 저장된 날을 재생합니다. 매매 내역·수익률·일별 성적이 자동 저장됩니다.</div>
+  <div class="row" style="margin-top:12px"><button id="btnTrader">매매 화면 열기</button><span class="small muted" id="trMsg"></span></div>
+</section>
+
+<section class="card">
   <h2>스윙 모의매매 <span class="muted small">일봉 · 20일 보유 · 실주문 없음</span></h2>
   <div class="small muted" id="swInfo">불러오는 중</div>
   <div class="nums">
@@ -602,7 +625,7 @@ footer{font-size:13px;color:var(--muted);margin:6px 2px 30px}
 <section class="card">
   <h2>기록</h2>
   <div class="tabs" id="logTabs">
-    <button data-log="collector">수집기</button><button data-log="universe" class="sec">후보 고르기</button><button data-log="swing" class="sec">스윙 모의매매</button>
+    <button data-log="collector">수집기</button><button data-log="universe" class="sec">후보 고르기</button><button data-log="swing" class="sec">스윙 모의매매</button><button data-log="trader" class="sec">매매 화면</button>
     <button data-log="morning" class="sec">아침 작업</button><button data-log="evening" class="sec">저녁 작업</button><button data-log="panel" class="sec">제어판</button>
   </div>
   <pre id="logText">불러오는 중</pre>
@@ -754,6 +777,11 @@ async function refreshSwing() {
     swingWasRunning = w.running;
   } catch (e) { $('swInfo').textContent = '스윙 결과를 읽지 못했습니다: ' + e.message; }
 }
+$('btnTrader').onclick = async () => {
+  $('btnTrader').disabled = true; $('trMsg').textContent = '여는 중...';
+  const r = await post('/api/trader/open'); $('trMsg').textContent = r.message;
+  setTimeout(() => { $('btnTrader').disabled = false; }, 5000);
+};
 $('btnSwing').onclick = async () => {
   $('btnSwing').disabled = true; $('swMsg').textContent = '요청하는 중...';
   const r = await post('/api/swing/run'); $('swMsg').textContent = r.message; setTimeout(refreshSwing, 1500);

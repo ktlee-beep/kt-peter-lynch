@@ -18,7 +18,10 @@ import {
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const CACHE_DIR = path.join(HERE, 'cache');
-export const COST = 0.21; // 수수료 0.015%×2(매수+매도) + 거래세 0.18% — analysis.js:944와 동일 근거
+// 수수료 0.015%×2(매수+매도) + 증권거래세 0.20%(2026-01-01 양도분부터: 코스피 0.05%+농특세 0.15%, 코스닥 0.20% —
+// 세계일보 2026-01-05 등 보도 기준, 기재부 원문 [확인 필요]). 2026-10-17 0.21→0.23(옛 0.18% 세율 기준이었음).
+// paper-broker.mjs TAX_RATE 와 같은 근거. analysis.js(서버) 쪽은 아직 0.21 — 별도 배포 때 맞춘다.
+export const COST = 0.23;
 
 // 박세익 축 중립 고정값. 과거 시점의 재무제표를 복원할 수 없어 백테스트로는 이 축을
 // 재현하지 못한다. 현재 재무를 과거에 적용하면 look-ahead가 되므로 중립 고정이 정직하다.

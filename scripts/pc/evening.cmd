@@ -6,7 +6,10 @@ rem   The morning collector uses the newest build made between the previous week
 rem   swing-paper      : daily-bar swing paper trading (no real orders). Refreshes Naver daily bars,
 rem                      scores today's close, books next-open buys, writes scripts\backtest\paper\swing.json
 rem                      which the control panel shows.
-rem Logs (gitignored): scripts\pc\evening.log, universe.log, swing.log
+rem   learn --nightly  : intraday rule search on recorded ticks (no orders). First scores the frozen
+rem                      candidates on days they never saw (forward test), then re-learns on the last
+rem                      10 days and freezes the best into scripts\pc\trader\learn\candidates.json.
+rem Logs (gitignored): scripts\pc\evening.log, universe.log, swing.log, learn.log
 cd /d "%~dp0..\.."
 set "NODE=C:\Program Files\nodejs\node.exe"
 >> scripts\pc\evening.log echo [%date% %time%] start
@@ -14,3 +17,5 @@ set "NODE=C:\Program Files\nodejs\node.exe"
 >> scripts\pc\evening.log echo [%date% %time%] universe-builder exit=%errorlevel%
 "%NODE%" scripts\backtest\swing-paper.mjs >> scripts\pc\swing.log 2>&1
 >> scripts\pc\evening.log echo [%date% %time%] swing-paper exit=%errorlevel%
+"%NODE%" scripts\pc\trader\learn.mjs --nightly --recent 10 >> scripts\pc\learn.log 2>&1
+>> scripts\pc\evening.log echo [%date% %time%] learn exit=%errorlevel%

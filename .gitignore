@@ -62,3 +62,9 @@ scripts/pc/collector.stop
 scripts/pc/bin/
 # 스윙 모의매매 산출물 — 네이버 일봉 사본과 그로부터 만든 장부(공개 저장소에 재배포하지 않는다)
 scripts/backtest/paper/
+
+# 매매 화면 모의 장부(개인 매매 기록)
+scripts/pc/trader/ledger/
+
+# 규칙 학습 결과(learn.mjs — 날마다 다시 만든다)
+scripts/pc/trader/learn/

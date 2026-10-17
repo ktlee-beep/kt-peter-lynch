@@ -34,6 +34,7 @@ import { readFile, readdir, mkdir, writeFile, unlink, appendFile } from 'node:fs
 import { createWriteStream, existsSync, unlinkSync } from 'node:fs';
 import { createGzip, constants as zc } from 'node:zlib';
 import path from 'node:path';
+import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { buildWindow, inBuildWindow, BUILD_FILE_RE } from './build-window.mjs';
 import { takeLock, releaseLockSync, lockOwner, lockBody } from './run-lock.mjs';
@@ -206,6 +207,38 @@ async function openSinks(date) {
 const write = (name, row) => sinks.get(name).gz.write(JSON.stringify(row) + '\n');
 setInterval(() => { for (const s of sinks.values()) s.gz.flush(zc.Z_SYNC_FLUSH); }, 5000);   // 비정상 종료 시 손실 상한 약 5초
 
+// ---------- 매매 화면으로 내보내기 ----------
+// 토스 웹소켓은 계정당 2연결이고 둘 다 여기서 쓰며, 토큰을 다시 받으면 이전 토큰이 폐기된다. 그래서 매매 화면
+// (scripts/pc/trader)은 토스에 따로 붙지 않고 이 프로세스가 받은 행을 127.0.0.1 SSE(GET /feed)로 받아 간다.
+// 부가 기능이다 — 포트를 못 열거나 화면이 느려도 녹화는 그대로 간다. 1MB 넘게 밀린 구독자는 끊는다.
+const FEED_PORT = Number(argOf('feed-port', '4791'));
+const feedClients = new Set();
+let feedHello = null;
+function feed(kind, row) {
+  if (!feedClients.size) return;
+  const line = `event: ${kind}\ndata: ${JSON.stringify(row)}\n\n`;
+  for (const res of feedClients) {
+    if (res.destroyed || res.writableLength > 1 << 20) { feedClients.delete(res); res.destroy(); continue; }
+    try { res.write(line); } catch { feedClients.delete(res); }
+  }
+}
+function startFeed(hello) {
+  feedHello = hello;
+  // 브라우저에서 직접 읽히지 않게 CORS 허용은 주지 않고, 다른 이름으로 들어온 요청(DNS 재바인딩)은 막는다
+  const hosts = new Set([`127.0.0.1:${FEED_PORT}`, `localhost:${FEED_PORT}`]);
+  const srv = http.createServer((req, res) => {
+    if (req.method !== 'GET' || !req.url.startsWith('/feed') || !hosts.has(req.headers.host)) { res.writeHead(404); return res.end(); }
+    res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store' });
+    res.write(`event: hello\ndata: ${JSON.stringify(feedHello)}\n\n`);
+    feedClients.add(res);
+    const drop = () => feedClients.delete(res);
+    req.on('close', drop); req.on('error', drop); res.on('error', drop);
+  });
+  srv.on('error', e => console.log(`매매 화면 내보내기 포트 ${FEED_PORT} 못 엶(녹화는 계속): ${e.message}`));
+  srv.listen(FEED_PORT, '127.0.0.1', () => console.log(`매매 화면 내보내기 http://127.0.0.1:${FEED_PORT}/feed`));
+  setInterval(() => { for (const res of feedClients) try { res.write(': ping\n\n'); } catch { feedClients.delete(res); } }, 15000).unref();
+}
+
 // ---------- 공백 기록 ----------
 // 정규장(KRX 연속매매 09:00~15:20 KST)과 GAP_MS 넘게 겹치는 연결별 무수신 구간을 로그 [공백] 줄과
 // ticks/<날짜>/gaps.ndjson 에 남긴다. 2026-10-15 덮개를 닫아(시스템 로그 Kernel-Power 506 사유 Lid) 09:21~13:54 에
@@ -264,14 +297,21 @@ function handle(frame, label) {
     if (stats.lastMsg - sessionDay0 >= DAY_MS && inSession(stats.lastMsg)) sessionDay0 = dayStart(stats.lastMsg);
     const [ch, , code] = frame.topic.split(':');
     const d = frame.data, recv = Date.now();
-    if (ch === 'trade') { write('trade', [recv, code, num(d.price), num(d.volume), Date.parse(d.timestamp)]); stats.trade++; }
+    if (ch === 'trade') {
+      const row = [recv, code, num(d.price), num(d.volume), Date.parse(d.timestamp)];
+      write('trade', row); stats.trade++;
+      feed('trade', row);
+    }
     else if (ch === 'orderbook') {
       if (recv - (lastBook.get(code) ?? 0) < BOOK_MIN_GAP_MS) { stats.bookSkipped++; return; }
       lastBook.set(code, recv);
-      const lv = a => a.slice(0, 3).flatMap(x => [num(x.price), num(x.volume)]);
+      const lv = (a, n) => a.slice(0, n).flatMap(x => [num(x.price), num(x.volume)]);
       const sum = a => a.reduce((s, x) => s + num(x.volume), 0);
-      write('book', [recv, code, Date.parse(d.timestamp), lv(d.bids), lv(d.asks), sum(d.bids), sum(d.asks)]);
+      const ts = Date.parse(d.timestamp), sb = sum(d.bids), sa = sum(d.asks);
+      write('book', [recv, code, ts, lv(d.bids, 3), lv(d.asks, 3), sb, sa]);
       stats.book++;
+      // 화면에는 받은 호가 전부(저장은 3단)
+      if (feedClients.size) feed('book', [recv, code, ts, lv(d.bids, 10), lv(d.asks, 10), sb, sa]);
     }
   } else if (frame.type === 'error') { stats.errors++; console.log('error 프레임:', JSON.stringify(frame.error)); }
   else if (frame.type === 'subscriptions') {
@@ -369,6 +409,7 @@ await unlink(STOP_FILE).catch(() => {});
 
 keys = await loadKeys();
 await openSinks(start.date);
+startFeed({ date: start.date, startedAtKST: `${start.date} ${start.hm}`, trade, book: bookCodes });
 // 구독 기록은 부가 기록이다 — 저장에 실패해도 수집은 시작한다.
 try {
   await writeFile(path.join(OUT_ROOT, start.date, `subscriptions-${start.hm.replace(':', '')}.json`), JSON.stringify(subsRecord, null, 1));
